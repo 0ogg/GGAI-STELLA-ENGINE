@@ -2,6 +2,7 @@ import {
   AbstractInputSuggest,
   App,
   Notice,
+  Platform,
   Plugin,
   PluginSettingTab,
   Setting,
@@ -181,6 +182,9 @@ export default class StellaEnginePlugin extends Plugin {
 
     // 전역 IME 조합 추적 — 조합 중 배경 뷰의 DOM/선택영역 개입을 미루는 기준.
     installGlobalImeTracker((cleanup) => this.register(cleanup));
+
+    // 모바일 홈버튼 바 높이를 키보드 없는 순간에 측정해 고정한다(세션 툴바 여백용).
+    this.installHomeBarInsetTracker();
 
     // [임시 진단] 입력 포커스 소실 추적 — GGAI/focus-log.txt 에 기록. 원인 확정 후 제거.
     installFocusForensics(this);
@@ -392,6 +396,51 @@ export default class StellaEnginePlugin extends Plugin {
   applyToolbarBottomGap(): void {
     const gap = this.data.settings?.toolbarBottomGap ?? 0;
     document.body.style.setProperty("--ggai-toolbar-bottom-gap", `${gap}px`);
+  }
+
+  /**
+   * 모바일 홈버튼 바(시스템 내비게이션) 높이를 --ggai-home-inset 에 고정한다.
+   *
+   * 왜 필요한가: 이 기기의 안드로이드 옵시디언은 웹 표준 env(safe-area-inset-bottom) 을
+   * 0 으로 두고, 자체 주입 변수 --safe-area-inset-bottom 에만 값을 넣는다. 그런데 그 변수는
+   * 소프트키보드가 뜨면 키보드 높이까지 커져(그대로 쓰면 툴바가 이중으로 뜸), 안 쓰면(env 만)
+   * 홈버튼 바 여백이 아예 없어 툴바가 홈 바 뒤로 숨는다.
+   *
+   * 해법: 키보드가 없는 순간에만 --safe-area-inset-bottom 을 읽어(=순수 홈바 높이)
+   * --ggai-home-inset 으로 고정하고, 키보드가 떠 있는 동안엔 갱신하지 않는다. 키보드
+   * 판정은 visualViewport 축소로 한다(레이아웃을 통째로 줄이는 기기·덮는 기기 모두 커버).
+   */
+  private installHomeBarInsetTracker(): void {
+    if (!Platform.isMobile) return;
+    const sample = () => {
+      const raw = getComputedStyle(document.body)
+        .getPropertyValue("--safe-area-inset-bottom")
+        .trim();
+      const px = parseFloat(raw);
+      if (Number.isFinite(px) && px >= 0) {
+        document.body.style.setProperty("--ggai-home-inset", `${px}px`);
+      }
+    };
+    // 시작 직후 몇 차례 재시도 — 옵시디언이 변수를 늦게 채우는 경우 대비.
+    for (const delay of [0, 300, 1000, 2500]) window.setTimeout(sample, delay);
+
+    const vv = window.visualViewport;
+    if (!vv) return;
+    let baseW = vv.width;
+    let baseH = vv.height;
+    const update = () => {
+      if (vv.width !== baseW) {
+        baseW = vv.width;
+        baseH = vv.height;
+      } else {
+        baseH = Math.max(baseH, vv.height);
+      }
+      const keyboardOpen = baseH - vv.height > 100;
+      // 키보드가 없을 때(=변수에 홈바 값만 있을 때)만 다시 측정해 고정.
+      if (!keyboardOpen) sample();
+    };
+    vv.addEventListener("resize", update);
+    this.register(() => vv.removeEventListener("resize", update));
   }
 
   /** 세션별 마지막 읽던 노드 앵커 조회 (없으면 null). */

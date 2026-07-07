@@ -4652,15 +4652,19 @@ body.is-mobile.ggai-stella-panel-active .ggai-session-body-wrap {
 }
 
 /* 모바일: 조작 패널을 시스템 내비게이션 바(홈버튼 바) 위로 자동으로 띄운다. PC 미적용.
-   반드시 env(safe-area-inset-bottom) 만 쓴다 — 이 값은 기기의 순수 안전영역(홈버튼 바)이라
-   소프트키보드 높이를 절대 포함하지 않는다. 옵시디언이 주입하는 --safe-area-inset-bottom
-   변수는 키보드가 뜨면 키보드 높이까지 커져, 옵시디언 자체 키보드 회피와 겹쳐 조작 패널이
-   키보드만큼 이중으로 떠 버린다(회귀 금지 — var(--safe-area-inset-bottom) 다시 넣지 말 것).
-   여기에 플러그인 설정 여백(--ggai-toolbar-bottom-gap, main.ts 가 body 에 주입)만 더한다.
+   홈바 높이는 두 소스 중 큰 값:
+     - env(safe-area-inset-bottom): 웹 표준. 되는 기기면 이걸로 충분(키보드 높이 미포함).
+     - --ggai-home-inset: main.ts 가 "키보드 없는 순간"에 측정해 고정한 순수 홈바 값.
+       env() 을 0 으로 두는 안드로이드 옵시디언 기기용 폴백.
+   절대 var(--safe-area-inset-bottom) 을 직접 쓰지 말 것 — 그 변수는 키보드가 뜨면 키보드
+   높이까지 커져 조작 패널이 이중으로 떠 버린다(회귀 금지). --ggai-home-inset 은 키보드가
+   없을 때만 갱신되므로 키보드 높이가 절대 섞이지 않는다.
+   여기에 플러그인 설정 여백(--ggai-toolbar-bottom-gap)을 더한다.
    패널 모드/일반 모드 모두 세션 툴바가 화면 맨 아래에 붙으므로 구분 없이 적용한다. */
 body.is-mobile .ggai-session-toolbar {
   padding-bottom: calc(
-    3px + var(--ggai-toolbar-bottom-gap, 0px) + env(safe-area-inset-bottom, 0px)
+    3px + var(--ggai-toolbar-bottom-gap, 0px) +
+      max(env(safe-area-inset-bottom, 0px), var(--ggai-home-inset, 0px))
   );
 }
 
