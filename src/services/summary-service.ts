@@ -140,7 +140,7 @@ export class SummaryService {
     if (!prompt) return fail("요약 프롬프트가 선택되어 있지 않습니다.");
     const profile =
       this.plugin.ai.getProfileById(summarize.modelProfileId) ??
-      this.plugin.ai.getDefaultChatProfile();
+      this.plugin.ai.getDefaultGenerationProfile();
     if (!profile) return fail("요약에 사용할 모델 프로필이 없습니다.");
     const threshold = Math.max(
       1,

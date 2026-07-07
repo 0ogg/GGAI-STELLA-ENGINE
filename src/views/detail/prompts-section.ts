@@ -862,7 +862,7 @@ export class PromptsSection {
     );
     const profile = settings.modelProfileId
       ? this.plugin.ai.getProfileById(settings.modelProfileId)
-      : this.plugin.ai.getDefaultChatProfile();
+      : this.plugin.ai.getDefaultGenerationProfile();
     return profile?.kind === "text";
   }
 

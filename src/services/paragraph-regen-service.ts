@@ -65,7 +65,7 @@ export class ParagraphRegenService {
     const settings = await this.plugin.resolveActiveSettings(sessionFile);
     const profile =
       this.plugin.ai.getProfileById(settings.modelProfileId) ??
-      this.plugin.ai.getDefaultChatProfile();
+      this.plugin.ai.getDefaultGenerationProfile();
     if (!profile) return fail("문단 재생성에 사용할 모델 프로필이 없습니다.");
 
     const body = buildParagraphRegenBody(instruction, opts.source, {

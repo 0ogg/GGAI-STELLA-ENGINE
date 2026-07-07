@@ -42,7 +42,8 @@ export const DEFAULT_MEDIA_PROMPTS: Record<MediaPromptBucket, MediaPromptItem[]>
         "- Render every Korean insertion into English and weave it seamlessly into the surrounding sentences.\n" +
         "- Match the tone, register, tense, and narrative voice of the surrounding English. It must read as native English fiction, never as a literal or word-for-word translation.\n" +
         "- Preserve the original meaning, plot progression, and nuance. Do not add new events, drop details, or reinterpret intent.\n" +
-        "Output the finished English passage only.",
+        "Output the finished English passage only.\n\n" +
+        "Generation:",
     },
     {
       id: "builtin:paragraphRegen:2",
@@ -52,7 +53,8 @@ export const DEFAULT_MEDIA_PROMPTS: Record<MediaPromptBucket, MediaPromptItem[]>
         "Rewrite the given passage to improve its flow, imagery, and character voice.\n" +
         "Keep every story fact, event, and the meaning of dialogue unchanged.\n" +
         "Write in the same language, tense, and narrative point of view as the original.\n" +
-        "Do not introduce new plot events.",
+        "Do not introduce new plot events.\n\n" +
+        "Generation:",
     },
   ],
 
@@ -71,7 +73,8 @@ export const DEFAULT_MEDIA_PROMPTS: Record<MediaPromptBucket, MediaPromptItem[]>
         "time/place, characters present and their condition, relationship dynamics, active goals, " +
         "tensions, and open threads.\n" +
         "Write both in the same language as the passage. Be specific with character names. " +
-        "Never invent facts that are not in the passage or the previous summary.",
+        "Never invent facts that are not in the passage or the previous summary.\n\n" +
+        "Generation:",
     },
   ],
 

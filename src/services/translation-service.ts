@@ -101,7 +101,7 @@ export class TranslationService {
     if (!prompt) return { ok: false, error: "번역 프롬프트가 선택되어 있지 않습니다." };
     const profile =
       this.plugin.ai.getProfileById(translation.modelProfileId) ??
-      this.plugin.ai.getDefaultChatProfile();
+      this.plugin.ai.getDefaultGenerationProfile();
     if (!profile) return { ok: false, error: "번역에 사용할 모델 프로필이 없습니다." };
 
     const text = spansToText(buildSpans(session));

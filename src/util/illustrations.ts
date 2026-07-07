@@ -17,16 +17,13 @@ import { uuidv4 } from "./uuid";
  * 저장된 출력 위치를 정규화한다.
  *  - "inline" / 레거시 "source-inline" / "translation-inline"(구 원문·번역 인라인
  *    분리) → "inline"
- *  - 그 외(생략/미지정/레거시 "top"=구 상단 고정/"panel") → "panel"(삽화 출력 전용 뷰)
+ *  - 명시적 "panel" / 레거시 "top"(구 상단 고정) → "panel"(삽화 출력 전용 뷰)
+ *  - 생략/미지정 → "inline"(기본값): 아무것도 고르지 않았으면 본문 안 인라인으로 보여준다.
  */
 export function resolveIllustrationOutput(
   output: string | undefined | null
 ): IllustrationOutputPosition {
-  return output === "inline" ||
-    output === "source-inline" ||
-    output === "translation-inline"
-    ? "inline"
-    : "panel";
+  return output === "panel" || output === "top" ? "panel" : "inline";
 }
 
 /** 노드의 현재 active 삽화 variant (없으면 null). */

@@ -233,6 +233,18 @@ export class AIService extends Events {
     return list.find((p) => p.isDefault) ?? list[0] ?? null;
   }
 
+  /**
+   * 기본 텍스트 생성 프로필 (chat + text 통합). 모델을 고르지 않았을 때의 폴백.
+   * Stella 는 텍스트 컴플리션 모델 사용을 전제하므로, 기본 프로필이 text 이면
+   * text 프로필을 그대로 돌려준다 (chat 한정 폴백은 text-only 환경에서 null 이 된다).
+   * 우선순위: isDefault → 목록 첫 항목(정렬상 chat 우선). generate()/chat() 는
+   * 호출자가 kind 로 분기하므로 어느 kind 든 안전하다.
+   */
+  getDefaultGenerationProfile(): GenerationProfileLite | null {
+    const list = this.listGenerationProfiles();
+    return list.find((p) => p.isDefault) ?? list[0] ?? null;
+  }
+
   /** id 로 단일 프로필 조회 (캐시 이용). 못 찾으면 null. */
   getProfileById(id: string | undefined): GenerationProfileLite | null {
     if (!id) return null;

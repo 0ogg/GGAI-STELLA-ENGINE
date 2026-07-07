@@ -116,7 +116,7 @@ export async function planSessionRequest(
   const allProfiles = plugin.ai.listGenerationProfiles();
   const profile = settings.modelProfileId
     ? allProfiles.find((p) => p.id === settings.modelProfileId) ?? null
-    : plugin.ai.getDefaultChatProfile();
+    : plugin.ai.getDefaultGenerationProfile();
   if (!profile) {
     return { error: "활성 프로필이 없습니다. 우측 사이드바에서 모델을 선택하세요." };
   }

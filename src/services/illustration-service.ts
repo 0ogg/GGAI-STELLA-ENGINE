@@ -56,7 +56,7 @@ export class IllustrationService {
 
     const genProfile =
       this.plugin.ai.getProfileById(ill.promptGenModelProfileId) ??
-      this.plugin.ai.getDefaultChatProfile();
+      this.plugin.ai.getDefaultGenerationProfile();
     if (!genProfile) {
       return fail("삽화 프롬프트 생성 모델이 선택되어 있지 않습니다.");
     }
