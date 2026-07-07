@@ -1,0 +1,6213 @@
+/*
+ * GGAI Stella Engine — 좌측 사이드바 스타일.
+ * 스케치 기준의 최소 구현. 전용 테마는 이후 단계에서 분리된 스타일 파일로 다룬다.
+ */
+
+.ggai-stella-sidebar {
+  display: flex;
+  flex-direction: column;
+  padding: var(--size-4-2, 0.5rem);
+  gap: var(--size-4-2, 0.5rem);
+  height: 100%;
+  box-sizing: border-box;
+  overflow-y: auto;
+}
+
+/* ── 공통 버튼 ───────────────────────── */
+.ggai-btn {
+  font-size: var(--font-ui-smaller);
+  padding: 4px 10px;
+  border-radius: var(--radius-s, 4px);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--interactive-normal);
+  color: var(--text-normal);
+  cursor: pointer;
+}
+.ggai-btn:hover {
+  background: var(--interactive-hover);
+}
+.ggai-btn-small {
+  font-size: var(--font-ui-smaller);
+  padding: 2px 8px;
+}
+.ggai-btn-danger {
+  color: var(--text-error);
+}
+.ggai-btn-danger:hover {
+  background: var(--background-modifier-error-hover, rgba(255, 0, 0, 0.08));
+}
+
+/* ── 상단 액션 바 ────────────────────── */
+.ggai-action-bar {
+  display: flex;
+  gap: var(--size-4-2, 0.5rem);
+}
+.ggai-action-bar .ggai-btn {
+  flex: 1 1 0;
+}
+
+.ggai-panel-open {
+  width: 100%;
+}
+
+.ggai-sidebar-divider {
+  height: 1px;
+  background: var(--background-modifier-border);
+  margin: var(--size-4-1, 0.25rem) 0;
+}
+
+/* ── 검색 ────────────────────────────── */
+.ggai-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  font-size: var(--font-ui-small);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+
+/* ── 리스트 헤더 ─────────────────────── */
+.ggai-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--size-4-2, 0.5rem);
+  padding-top: var(--size-4-1, 0.25rem);
+}
+.ggai-list-title {
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold, 600);
+  color: var(--text-muted);
+}
+.ggai-sort {
+  font-size: var(--font-ui-smaller);
+  padding: 2px 4px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+}
+.ggai-list-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.ggai-layout-select {
+  font-size: var(--font-ui-smaller);
+  padding: 2px 4px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+}
+
+/* ── 리스트 ──────────────────────────── */
+.ggai-scenario-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-1, 0.25rem);
+}
+.ggai-sidebar-empty {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  text-align: center;
+  padding: var(--size-4-4, 1rem) var(--size-4-2, 0.5rem);
+}
+
+/* ── 사이드바 탭 (L3a: 시나리오 | 로어북) ───── */
+.ggai-sidebar-tabs {
+  display: flex;
+  flex-direction: row;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.ggai-sidebar-tab {
+  flex: 1 1 50%;
+  padding: var(--size-4-1, 0.25rem) var(--size-4-3, 0.75rem);
+  text-align: center;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  border-bottom: 2px solid transparent;
+  user-select: none;
+}
+.ggai-sidebar-tab:hover {
+  color: var(--text-normal);
+}
+.ggai-sidebar-tab.is-active {
+  color: var(--text-normal);
+  border-bottom-color: var(--interactive-accent);
+  font-weight: 600;
+}
+
+/* ── 시나리오 카드 ────────────────────── */
+.ggai-scenario-card {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m, 6px);
+  padding: 6px 8px;
+  background: var(--background-primary);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ggai-scenario-card.is-expanded {
+  background: var(--background-secondary);
+}
+
+.ggai-scenario-card.is-active {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+
+.ggai-scenario-card.is-layout-cover .ggai-list-cover {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--background-secondary);
+  cursor: pointer;
+}
+.ggai-list-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center top;
+}
+.ggai-cover-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.5);
+}
+.ggai-cover-overlay-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold, 600);
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-cover-overlay .ggai-star {
+  color: #fff;
+}
+.ggai-scenario-card.is-layout-compact .ggai-card-body {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 6px 8px;
+  align-items: stretch;
+  min-width: 0;
+  cursor: pointer;
+}
+.ggai-scenario-card.is-layout-compact .ggai-list-cover {
+  grid-column: 1;
+  grid-row: 1;
+  width: 72px;
+  height: 72px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--background-secondary);
+}
+.ggai-scenario-card.is-layout-compact .ggai-name-box {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.ggai-card-meta {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ggai-card-row {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2, 0.5rem);
+  cursor: pointer;
+}
+
+.ggai-thumb-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: var(--text-faint);
+}
+.ggai-thumb-placeholder svg {
+  width: 20px;
+  height: 20px;
+}
+
+.ggai-name-box {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+.ggai-name {
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold, 600);
+  color: var(--text-normal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-folder-hint {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ggai-star {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: var(--text-accent);
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.ggai-star:hover {
+  filter: brightness(1.2);
+}
+
+.ggai-scenario-card.is-layout-compact .ggai-star {
+  grid-column: 3;
+  grid-row: 1;
+  align-self: start;
+  justify-self: end;
+  padding-top: 0;
+}
+
+/* ── 세션 리스트 (확장) ────────────────── */
+.ggai-session-list {
+  border-top: 1px solid var(--background-modifier-border);
+  padding-top: 4px;
+  padding-left: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ggai-session-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 2px 6px 2px;
+}
+.ggai-session-list-title {
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-semibold, 600);
+  color: var(--text-muted);
+}
+.ggai-session-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--font-ui-smaller);
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--interactive-normal);
+  color: var(--text-normal);
+  cursor: pointer;
+}
+.ggai-session-add-btn:hover {
+  background: var(--interactive-hover);
+}
+.ggai-session-add-btn svg {
+  width: 12px;
+  height: 12px;
+}
+.ggai-session-empty {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+  padding: 4px 2px;
+}
+.ggai-session-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: var(--radius-s, 4px);
+  cursor: pointer;
+}
+.ggai-session-row:hover {
+  background: var(--interactive-hover);
+}
+.ggai-session-row.is-active {
+  background: var(--background-modifier-active-hover, var(--interactive-hover));
+}
+.ggai-session-fav {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: var(--text-accent);
+  font-size: var(--font-ui-small);
+  padding: 0 2px;
+  cursor: pointer;
+  opacity: 0.55;
+}
+.ggai-session-fav.is-favorited {
+  opacity: 1;
+}
+.ggai-session-fav:hover {
+  filter: brightness(1.2);
+}
+.ggai-session-row .ggai-session-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ggai-session-row.is-active .ggai-session-name {
+  color: var(--text-accent);
+  font-weight: var(--font-semibold, 600);
+}
+.ggai-session-time {
+  flex: 0 0 auto;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+}
+
+/* ── 세션 뷰 (워크스페이스 메인) — 3단 flex ────────── */
+.ggai-stella-session {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+  overscroll-behavior: contain;
+  box-sizing: border-box;
+}
+
+.workspace-leaf-content[data-type="ggai-stella-session"],
+.workspace-leaf-content[data-type="ggai-stella-session"] > .view-content,
+.view-content.ggai-stella-session {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.workspace-leaf-content[data-type="ggai-stella-session"] > .view-content,
+.view-content.ggai-stella-session {
+  width: 100%;
+  max-width: none;
+  min-height: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.ggai-stella-dashboard {
+  height: 100%;
+}
+
+/* 세션 본문 내 공용 라벨 (사이드바와 공유) */
+.ggai-session-name {
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-fav-btn {
+  flex: 0 0 auto;
+  align-self: flex-start;
+}
+.ggai-fav-btn.is-favorited {
+  color: var(--text-accent);
+}
+
+/* 본문 스크롤 영역 */
+.ggai-session-body-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  /* 긴 본문의 레이아웃/페인트를 이 박스 안에 격리 — 워크스페이스(사이드바 등) 변화가
+     본문 전체 재계산으로 번지는 것을 줄인다. 클리핑은 기존 overflow 와 동일. */
+  contain: layout paint;
+}
+.ggai-session-body-wrap-split {
+  overflow: hidden;
+}
+.ggai-session-body {
+  font-size: var(--font-ui-medium, 0.95rem);
+  line-height: 1.6;
+  color: var(--text-normal);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  box-sizing: border-box;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  outline: none;
+  caret-color: var(--text-normal);
+}
+.ggai-session-translation-body {
+  color: var(--text-normal);
+  background: var(--background-primary);
+}
+.ggai-session-translation-empty {
+  color: var(--text-faint);
+  font-style: italic;
+}
+.ggai-session-split {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+.ggai-session-split-horizontal {
+  flex-direction: row;
+}
+.ggai-session-split-vertical {
+  flex-direction: column;
+}
+.ggai-session-split-pane {
+  flex: 1 1 50%;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.ggai-session-split-handle {
+  flex: 0 0 6px;
+  background: var(--background-modifier-border);
+  opacity: 0.7;
+}
+.ggai-session-split-horizontal > .ggai-session-split-handle {
+  cursor: col-resize;
+}
+.ggai-session-split-vertical > .ggai-session-split-handle {
+  cursor: row-resize;
+}
+.ggai-session-split-handle:hover {
+  background: var(--interactive-accent);
+  opacity: 1;
+}
+/* 삽화 출력 전용 뷰 — 활성 세션 최신 삽화를 패널 높이에 맞춰 표시. */
+.ggai-illus-output.view-content {
+  padding: 0;
+}
+.ggai-illus-output-body {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+.ggai-illus-output-empty {
+  margin: auto;
+  padding: 24px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.9em;
+}
+/* 출력 뷰 안의 캐러셀은 패널 세로를 꽉 채우고 이미지는 letterbox(contain). */
+.ggai-illus-output .ggai-illus-carousel {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.ggai-illus-output .ggai-illus-viewport {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.ggai-illus-output .ggai-illus-track,
+.ggai-illus-output .ggai-illus-slide {
+  height: 100%;
+}
+.ggai-illus-output .ggai-illus-img {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  object-fit: contain;
+}
+
+/* 삽화 캐러셀 (출력 뷰 / 인라인 재사용) */
+.ggai-illus-carousel {
+  position: relative;
+}
+.ggai-illus-carousel.is-empty {
+  display: none;
+}
+.ggai-illus-viewport {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+}
+.ggai-illus-track {
+  display: flex;
+  transition: transform 0.25s ease;
+}
+.ggai-illus-slide {
+  flex: 0 0 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ggai-illus-img {
+  width: 100%;
+  height: auto;
+  object-fit: contain;
+  cursor: zoom-in;
+}
+.ggai-illus-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 3;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--background-primary);
+  color: var(--text-muted);
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+.ggai-illus-prev {
+  left: 6px;
+}
+.ggai-illus-next {
+  right: 6px;
+}
+.ggai-illus-carousel:hover .ggai-illus-nav {
+  opacity: 0.85;
+}
+.ggai-illus-nav:hover {
+  color: var(--text-normal);
+}
+.ggai-illus-counter {
+  position: absolute;
+  bottom: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  font-size: var(--font-ui-smaller);
+  color: #fff;
+  background: rgba(0, 0, 0, 0.4);
+  padding: 1px 7px;
+  border-radius: 8px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+/* 카운터 글자는 텍스트 노드 대신 data 속성으로 — 인라인 삽화가 contenteditable
+   본문 안에 들어가도 textContent(편집 diff/offset)를 오염시키지 않는다. */
+.ggai-illus-counter::after {
+  content: attr(data-count);
+}
+.ggai-illus-carousel:hover .ggai-illus-counter {
+  opacity: 1;
+}
+.ggai-illus-regen {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 3;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-muted);
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+.ggai-illus-carousel:hover .ggai-illus-regen {
+  opacity: 0.92;
+}
+.ggai-illus-regen:hover {
+  opacity: 1;
+  color: var(--text-normal);
+}
+.ggai-illus-regen.is-busy svg {
+  animation: ggai-translate-busy 1s linear infinite;
+}
+.ggai-illus-nav svg,
+.ggai-illus-regen svg {
+  width: 16px;
+  height: 16px;
+}
+.ggai-illus-fav {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 3;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-muted);
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+.ggai-illus-carousel:hover .ggai-illus-fav {
+  opacity: 0.92;
+}
+.ggai-illus-fav:hover {
+  opacity: 1;
+  color: var(--text-normal);
+}
+.ggai-illus-fav.is-favorited {
+  color: var(--text-accent);
+  opacity: 1;
+}
+.ggai-illus-fav svg {
+  width: 16px;
+  height: 16px;
+}
+.ggai-illus-fav.is-favorited svg {
+  fill: currentColor;
+}
+
+/* 인라인 삽화 — 본문/번역 편집 영역 안의 원자 블록(contenteditable=false, 텍스트 0글자).
+   caret 이 안으로 들어가지 않고 선택/편집은 문단 텍스트에서만 일어난다. */
+.ggai-inline-illustration {
+  margin: 0.55em 0;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* AI 생성 시작 마커 — 가장 최근 AI 노드가 시작하는 지점, 다섯 잎 꽃(2026-07-06).
+   텍스트 0글자 contenteditable=false 원자 위젯. 색은 옵시디언 강조색(--interactive-accent). */
+.ggai-ai-start-marker {
+  --c: var(--interactive-accent);
+  display: inline-block;
+  position: relative;
+  vertical-align: text-top;
+  width: 0.55em;
+  height: 0.55em;
+  margin: 0 0.16em;
+  color: var(--c);
+  user-select: none;
+  -webkit-user-select: none;
+  animation: ggai-ai-start-flower-spin 2.4s ease-in-out infinite;
+}
+.ggai-ai-start-marker i {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0.18em;
+  height: 0.26em;
+  margin: -0.46em 0 0 -0.09em;
+  background: var(--c);
+  border-radius: 50% 50% 50% 50% / 65% 65% 35% 35%;
+  transform-origin: 50% 0.46em;
+  box-shadow: 0 0 0.2em 0.03em var(--c);
+  animation: ggai-ai-start-flower-petal 2.4s ease-in-out infinite;
+}
+.ggai-ai-start-marker i:nth-child(1) { rotate: 0deg;   animation-delay: 0s; }
+.ggai-ai-start-marker i:nth-child(2) { rotate: 72deg;  animation-delay: 0.12s; }
+.ggai-ai-start-marker i:nth-child(3) { rotate: 144deg; animation-delay: 0.24s; }
+.ggai-ai-start-marker i:nth-child(4) { rotate: 216deg; animation-delay: 0.36s; }
+.ggai-ai-start-marker i:nth-child(5) { rotate: 288deg; animation-delay: 0.48s; }
+.ggai-ai-start-marker::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0.14em;
+  height: 0.14em;
+  margin: -0.07em 0 0 -0.07em;
+  background: var(--text-on-accent, #fff);
+  border-radius: 50%;
+  box-shadow: 0 0 0.18em 0.06em color-mix(in srgb, var(--c) 70%, #fff);
+  animation: ggai-ai-start-flower-core 1.2s ease-in-out infinite;
+}
+@keyframes ggai-ai-start-flower-petal {
+  0%, 100% { scale: 0.82; opacity: 0.75; }
+  50%      { scale: 1.08; opacity: 1; }
+}
+@keyframes ggai-ai-start-flower-core {
+  0%, 100% { transform: translate(-50%, -50%) scale(0.7); opacity: 0.8; }
+  50%      { transform: translate(-50%, -50%) scale(1.15); opacity: 1; }
+}
+@keyframes ggai-ai-start-flower-spin {
+  0%, 100% { transform: rotate(0deg)  scale(0.85); }
+  50%      { transform: rotate(36deg) scale(1.08); }
+}
+
+/* 전체 화면 라이트박스 */
+.ggai-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.85);
+}
+.ggai-lightbox-img {
+  max-width: 92vw;
+  max-height: 92vh;
+  object-fit: contain;
+}
+.ggai-lightbox-caption {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 80vw;
+  padding: 6px 12px;
+  font-size: var(--font-ui-small);
+  color: #fff;
+  background: rgba(0, 0, 0, 0.5);
+  border-radius: 8px;
+  white-space: pre-wrap;
+}
+.ggai-lightbox-caption.is-hidden {
+  display: none;
+}
+.ggai-lightbox-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 48px;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  padding: 0 16px;
+  user-select: none;
+}
+.ggai-lightbox-nav:hover {
+  color: #fff;
+}
+.ggai-lightbox-prev {
+  left: 8px;
+}
+.ggai-lightbox-next {
+  right: 8px;
+}
+.ggai-lightbox-nav.is-hidden {
+  display: none;
+}
+
+/* 삽화 재생성 모달 */
+.ggai-regen-textarea {
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-small);
+  margin-bottom: 10px;
+}
+
+/* 문단 재생성 — 문단 선택 모드 */
+.ggai-session-body-wrap.ggai-para-select-mode .ggai-session-body,
+.ggai-session-body-wrap.ggai-para-select-mode .ggai-session-translation {
+  cursor: pointer;
+}
+.ggai-media-trigger-btn.is-select-on,
+.ggai-media-trigger-btn.is-select-on svg {
+  color: var(--color-accent, var(--interactive-accent));
+}
+
+/* ─── 파생 창(모달) 공통 뼈대 ───────────────────────────────────────────
+   고정 크기(L/M) + 제목(Obsidian 기본 titleEl) + 도구줄(고정, 선택) + 본문(유일한
+   스크롤 영역) + 액션줄(고정) 4구역. 창 크기는 내용 길이와 무관하게 항상 같다 —
+   본문만 안에서 스크롤된다. `src/views/modal-shell.ts` `createModalShell()` 참고. */
+.modal.ggai-modal-shell {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.modal.ggai-modal-shell .modal-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.ggai-modal-shell-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 8px;
+}
+.ggai-modal-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* 도구줄 안의 한 줄(예: 검색창 한 줄, 범위 조절+프롬프트 한 줄). 여러 줄을 쌓아도 된다. */
+.ggai-modal-toolbar-row {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.ggai-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.ggai-modal-footer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.ggai-modal-footer-aux,
+.ggai-modal-footer-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ggai-modal-footer-spacer {
+  flex: 1 1 auto;
+}
+
+/* 모바일: 안드로이드 상단 알림/하단 내비 바(safe-area)와 안 겹치게 여백·높이 제한.
+   Obsidian 이 노출하는 --safe-area-inset-* 우선, 없으면 env() 폴백. 높이는 뷰포트
+   (100vh)가 아니라 모달 컨테이너 기준(100%)이라 바 영역이 포함된 100vh 로 넘치지 않는다. */
+.modal.ggai-modal-shell {
+  --gms-safe-top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
+  --gms-safe-bottom: var(
+    --safe-area-inset-bottom,
+    env(safe-area-inset-bottom, 0px)
+  );
+  max-height: calc(100% - var(--gms-safe-top) - var(--gms-safe-bottom) - 24px);
+  margin-top: calc(var(--gms-safe-top) + 12px);
+  margin-bottom: calc(var(--gms-safe-bottom) + 12px);
+}
+.modal.ggai-modal-size-l {
+  height: min(80vh, 680px);
+}
+.modal.ggai-modal-size-m {
+  height: min(66vh, 540px);
+}
+.modal.ggai-modal-wide {
+  width: min(92vw, 860px);
+}
+
+/* 문단 재생성 모달 — 공용 모달 뼈대(M 규격) 위에 얹는 내부 레이아웃.
+   도구줄(.ggai-modal-toolbar-row) = 범위/프롬프트/직접입력 두 줄. 본문 = 편집
+   textarea(유일한 스크롤 영역). 액션줄(footerAux/footerMain) = 단계 이력 / 취소·적용 —
+   셸이 이미 고정 높이·스크롤을 보장하므로 이 아래는 그 안의 내부 레이아웃만 정의한다. */
+.ggai-pr-count {
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  min-width: 52px;
+  text-align: center;
+}
+.ggai-pr-prompts {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ggai-pr-retranslate-btn {
+  flex: 0 0 auto;
+}
+/* 직접 입력 + 재생성 — 한 줄. 입력란이 남는 폭을 차지. */
+.ggai-pr-gen-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.ggai-pr-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-bottom: 0;
+  resize: none;
+}
+.ggai-pr-gen-btn {
+  flex: 0 0 auto;
+}
+/* 본문(.ggai-modal-body) 자체는 스크롤하지 않는다 — 안의 textarea(.ggai-pr-edit-ta)
+   가 유일한 스크롤 영역. 셸 기본 overflow-y:auto 를 여기서 꺼서 이중 스크롤바를 막는다. */
+.ggai-pr-body {
+  overflow: hidden;
+}
+/* 편집 영역 — 본문(.ggai-modal-body)을 그대로 채운다. 셸이 그 안 스크롤을 보장한다. */
+.ggai-pr-edit-ta {
+  width: 100%;
+  height: 100%;
+  resize: none;
+  margin-bottom: 0;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-small);
+}
+/* 재번역 결과 미리보기 — 읽기 전용임을 살짝 드러낸다 (번역은 이미 반영됨). */
+.ggai-pr-edit-ta:read-only {
+  background: var(--background-secondary);
+  color: var(--text-muted);
+}
+/* 단계(history) 표시 — 액션 줄 왼쪽(footerAux). ◀ n/m ▶ + 단계 라벨 + 초안으로 점프. */
+.ggai-pr-steps {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ggai-pr-steps.is-hidden {
+  display: none;
+}
+.ggai-pr-step-btn {
+  padding: 2px 4px;
+}
+.ggai-pr-step-count {
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  min-width: 36px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.ggai-pr-step-label {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  padding: 1px 6px;
+  border-radius: var(--radius-s, 4px);
+  background: var(--background-secondary);
+}
+.ggai-pr-to-original {
+  flex: 0 0 auto;
+}
+
+/* ─── 보기 설정 팝오버 (문단 간격/들여쓰기/최대폭/글자 크기) ──────────────
+   툴바 버튼 위에 붙는 작은 플로팅 카드. 이북 뷰어 보기 설정 느낌. */
+.ggai-vs-popover {
+  position: fixed;
+  z-index: var(--layer-menu, 1000);
+  width: 232px;
+  box-sizing: border-box;
+  padding: 10px 12px 12px;
+  border-radius: 12px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  box-shadow: var(--shadow-s), 0 8px 28px rgba(0, 0, 0, 0.28);
+  animation: ggai-vs-pop 0.12s ease-out;
+}
+@keyframes ggai-vs-pop {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.ggai-vs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.ggai-vs-title {
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-semibold, 600);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.ggai-vs-reset {
+  --icon-size: 15px;
+  height: 24px;
+  width: 24px;
+  color: var(--text-muted);
+}
+.ggai-vs-row {
+  display: grid;
+  grid-template-columns: 18px 1fr auto;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 5px 0;
+}
+.ggai-vs-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+.ggai-vs-icon .svg-icon {
+  width: 15px;
+  height: 15px;
+}
+.ggai-vs-row-label {
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+}
+.ggai-vs-value {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-accent);
+  font-variant-numeric: tabular-nums;
+  justify-self: end;
+  min-width: 38px;
+  text-align: right;
+}
+input.ggai-vs-slider[type="range"] {
+  grid-column: 1 / -1;
+  display: block;
+  width: 100% !important;
+  max-width: none !important;
+  min-width: 0 !important;
+  box-sizing: border-box;
+  margin: 2px 0 0;
+  padding: 0;
+}
+
+/* 삽화 갤러리 모달 */
+.ggai-gallery-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.ggai-gallery-toolbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: var(--font-ui-smaller);
+}
+.ggai-gallery-toolbtn:hover {
+  color: var(--text-normal);
+}
+.ggai-gallery-toolbtn.is-active {
+  color: var(--text-accent);
+  border-color: var(--text-accent);
+}
+.ggai-gallery-toolbtn svg {
+  width: 14px;
+  height: 14px;
+}
+.ggai-gallery-toolbtn.is-active svg {
+  fill: currentColor;
+}
+.ggai-gallery-sort {
+  margin-left: auto;
+}
+.ggai-gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+}
+.ggai-gallery-cell {
+  position: relative;
+  aspect-ratio: 1;
+  overflow: hidden;
+  border-radius: 6px;
+  cursor: zoom-in;
+  background: var(--background-secondary);
+}
+.ggai-gallery-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: transform 0.15s ease;
+}
+.ggai-gallery-cell:hover .ggai-gallery-thumb {
+  transform: scale(1.05);
+}
+.ggai-gallery-actions {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.ggai-gallery-cell:hover .ggai-gallery-actions {
+  opacity: 1;
+}
+.ggai-gallery-action {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.ggai-gallery-action:hover {
+  color: var(--text-normal);
+}
+.ggai-gallery-action.ggai-gallery-delete:hover {
+  color: var(--text-error);
+  border-color: var(--text-error);
+}
+.ggai-gallery-action svg {
+  width: 15px;
+  height: 15px;
+}
+.ggai-gallery-fav {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  z-index: 2;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.ggai-gallery-cell:hover .ggai-gallery-fav,
+.ggai-gallery-fav.is-favorited {
+  opacity: 1;
+}
+.ggai-gallery-fav.is-favorited {
+  color: var(--text-accent);
+}
+.ggai-gallery-fav.is-favorited svg {
+  fill: currentColor;
+}
+.ggai-gallery-fav svg {
+  width: 15px;
+  height: 15px;
+}
+.ggai-session-illustration-img {
+  max-width: 100%;
+  max-height: 220px;
+  object-fit: contain;
+}
+.ggai-session-illustration-empty {
+  color: var(--text-faint);
+  font-size: var(--font-ui-small);
+}
+.ggai-session-body:focus {
+  outline: none;
+}
+.ggai-session-body:empty::before {
+  content: "아직 본문이 없습니다. 여기에 바로 입력하세요.";
+  color: var(--text-faint);
+  font-style: italic;
+  pointer-events: none;
+}
+
+/* 뷰 헤더 액션으로 등록된 뷰어 도구의 비활성 표시 (모바일 — 본문 위 우측 상단) */
+.view-action.ggai-action-disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* PC 뷰어 줄 — 모바일 뷰 헤더 액션과 같은 위치(본문 위 우측 상단)에 같은
+   모양(둥근 아이콘 가로 줄)으로 띄운다. 0높이 레이어라 본문을 밀지 않고,
+   탭 타이틀 바를 꺼도 항상 보인다. */
+.ggai-session-viewer-options {
+  position: relative;
+  z-index: 5;
+  height: 0;
+  overflow: visible;
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-end;
+  /* flex-start: 버튼이 0높이 레이어 아래쪽으로만 매달리게 한다 — center 는 버튼의
+     위쪽 절반이 레이어 위(탭 타이틀 바/프레임)로 삐져나가 잘려 보이는 원인이었다. */
+  align-items: flex-start;
+  gap: var(--size-4-2, 0.5rem);
+  padding-right: 10px;
+  pointer-events: none;
+}
+.ggai-session-viewer-options .clickable-icon {
+  pointer-events: auto;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  margin-top: 8px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--background-primary);
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.18);
+  /* 본문 위에 겹쳐 뜨므로 평소엔 살짝 흐리게 — hover/활성/선택 상태에선 또렷하게. */
+  opacity: 0.7;
+  transition: opacity 0.12s ease;
+}
+.ggai-session-viewer-options:hover .clickable-icon,
+.ggai-session-viewer-options .clickable-icon:hover,
+.ggai-session-viewer-options .clickable-icon:focus-visible,
+.ggai-session-viewer-options .clickable-icon.is-active,
+.ggai-session-viewer-options .clickable-icon.is-selection {
+  opacity: 1;
+}
+.ggai-session-viewer-options .clickable-icon:disabled {
+  opacity: 0.35;
+  pointer-events: none;
+}
+/* 활성(번역 보기 중) — 모바일처럼 강조색 틴트 원으로 표시 */
+.ggai-session-viewer-options .ggai-translation-toggle.is-active {
+  background: color-mix(
+    in srgb,
+    var(--interactive-accent) 18%,
+    var(--background-primary)
+  );
+}
+
+/* 번역 보기 (출력 방식: 원문 치환) — 세션 본문과 똑같이 보이고 똑같이 편집된다 */
+.ggai-session-body.is-hidden {
+  display: none;
+}
+.ggai-session-translation {
+  display: none;
+  width: 100%;
+  max-width: var(--ggai-view-max-width, 780px);
+  margin: 0 auto;
+  font-size: calc(var(--font-text-size, 16px) * var(--ggai-view-font-scale, 1));
+  line-height: 1.75;
+  color: var(--text-normal);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  min-height: 100%;
+}
+.ggai-session-translation.is-active {
+  display: block;
+}
+/* 번역 뷰 단일 편집 영역 — 문단을 넘는 드래그 선택 + 직접 편집 */
+.ggai-tr-edit {
+  outline: none;
+  caret-color: var(--text-normal);
+  min-height: 100%;
+}
+.ggai-tr-edit:focus {
+  outline: none;
+}
+/* 구분자(줄바꿈) — 편집 불가 원자 위젯이라 caret 이 문단 안에만 머문다.
+   보기 설정: 줄바꿈 자리 line-height 로 문단 사이 간격 (원문 뷰 .ggai-para-gap 과 동일). */
+.ggai-tr-sep {
+  user-select: text;
+  white-space: pre-wrap;
+  line-height: var(--ggai-view-para-gap, 36px);
+  vertical-align: top;
+}
+/* 보기 설정: 문단 첫 줄 들여쓰기 (원문 뷰 .ggai-para-indent 와 동일). */
+.ggai-tr-paragraph {
+  position: relative;
+  padding-left: var(--ggai-view-indent, 0em);
+}
+/* 번역 관련 도구 버튼(전환/일괄/되돌리기) — 번역 사용(enabled) 아니면 숨김.
+   뷰 헤더 액션 (PC/모바일 공통). */
+.ggai-tr-batch-btn.is-hidden,
+.ggai-tr-undo-btn.is-hidden {
+  display: none;
+}
+/* 갤러리 — 삽화 비활성이어도 이미 생성된 이미지가 있으면 노출, 없으면 숨김. */
+.ggai-gallery-btn.is-hidden {
+  display: none;
+}
+/* 드래그 선택 = 기능이 "선택 영역만 번역"으로 바뀜 → 활성(채운 강조) 스타일 */
+.ggai-tr-batch-btn.is-selection {
+  color: var(--text-on-accent);
+  background: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+}
+.ggai-tr-batch-btn.is-selection svg {
+  color: var(--text-on-accent);
+}
+
+/* 미디어 트리거 버튼 (번역/삽화/문단 재생성) + 원문↔번역 토글 */
+/* 자동 모드 on = 배경은 다른 버튼과 통일하고 아이콘만 강조색으로 점등.
+   툴바 그룹 셀렉터(.ggai-toolbar-group-* .ggai-icon-btn svg)보다 특이도가
+   높아야 이겨서 색이 적용된다. */
+.ggai-toolbar-group-left .ggai-media-trigger-btn.is-auto-on,
+.ggai-toolbar-group-right .ggai-media-trigger-btn.is-auto-on,
+.ggai-media-trigger-btn.is-auto-on {
+  color: var(--color-accent, var(--interactive-accent));
+}
+.ggai-toolbar-group-left .ggai-media-trigger-btn.is-auto-on svg,
+.ggai-toolbar-group-right .ggai-media-trigger-btn.is-auto-on svg,
+.ggai-media-trigger-btn.is-auto-on svg {
+  color: var(--color-accent, var(--interactive-accent));
+}
+.ggai-media-trigger-btn.is-busy svg {
+  animation: ggai-translate-busy 1s linear infinite;
+}
+@keyframes ggai-translate-busy {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.ggai-translation-toggle.is-active {
+  color: var(--text-accent);
+  border-color: var(--interactive-accent);
+}
+.ggai-translation-toggle.is-hidden {
+  display: none;
+}
+
+/* 출력 방식: 2분할 (좌우) — 원문 | 드래그 분할바 | 번역, 각 패널 독립 스크롤 */
+.ggai-session-body-wrap.is-split {
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+}
+.ggai-session-body-wrap.is-split > .ggai-session-body {
+  flex: 0 1 50%;
+  min-width: 0;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0 10px;
+}
+.ggai-session-body-wrap.is-split > .ggai-session-translation {
+  display: block;
+  flex: 0 1 50%;
+  min-width: 0;
+  max-width: none;
+  margin: 0;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0 10px;
+}
+.ggai-session-body-wrap.is-split > .ggai-session-split-handle {
+  position: relative;
+  flex: 0 0 2px;
+  align-self: stretch;
+  cursor: col-resize;
+  background: var(--background-modifier-border);
+  opacity: 0.6;
+}
+/* 시각적으론 2px 선이지만 잡기 쉽게 좌우로 넓은 투명 히트영역. */
+.ggai-session-body-wrap.is-split > .ggai-session-split-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  right: -4px;
+}
+.ggai-session-body-wrap.is-split > .ggai-session-split-handle:hover {
+  background: var(--interactive-accent);
+  opacity: 1;
+}
+/* 분할바 가운데 스크롤 체인(사슬) 토글 버튼 */
+.ggai-session-body-wrap.is-split > .ggai-session-split-handle > .ggai-split-chain-btn {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 2;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  color: var(--text-accent);
+  box-shadow: var(--shadow-s);
+  cursor: pointer;
+  opacity: 0.9;
+}
+.ggai-session-body-wrap.is-split > .ggai-session-split-handle > .ggai-split-chain-btn:hover {
+  opacity: 1;
+  border-color: var(--interactive-accent);
+}
+.ggai-session-body-wrap.is-split > .ggai-session-split-handle > .ggai-split-chain-btn.is-off {
+  color: var(--text-faint);
+}
+.ggai-split-chain-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* 하단 툴바 (고정) */
+.ggai-session-toolbar {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow-x: hidden;
+  padding: var(--size-4-2, 0.5rem) var(--size-4-3, 0.75rem);
+  border-top: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+}
+.ggai-toolbar-group-left,
+.ggai-toolbar-group-center,
+.ggai-toolbar-group-right {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+}
+.ggai-toolbar-group-center {
+  flex: 1 1 44px;
+  justify-content: center;
+}
+.ggai-toolbar-group-right {
+  justify-content: flex-end;
+}
+.ggai-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 6px;
+}
+.ggai-icon-btn.is-active,
+.ggai-icon-btn.is-favorited {
+  color: var(--text-on-accent);
+  background: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+}
+.ggai-translation-edit-textarea {
+  width: 100%;
+  min-height: 280px;
+  resize: vertical;
+}
+.ggai-cta-btn {
+  padding: 6px 18px;
+  font-size: var(--font-ui-medium, 0.95rem);
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+.ggai-cta-btn:hover {
+  background: var(--interactive-accent-hover);
+}
+/* 생성 중 이어쓰기 버튼 펄스 */
+.ggai-cta-generating {
+  animation: ggai-cta-pulse 1s ease-in-out infinite;
+}
+@keyframes ggai-cta-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.5; }
+}
+.ggai-sibling-indicator {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  min-width: 32px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.ggai-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* placeholder (세션 미선택 등) */
+.ggai-session-placeholder {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  text-align: center;
+  padding: var(--size-4-8, 2rem) var(--size-4-2, 0.5rem);
+}
+.ggai-session-empty-body,
+.ggai-session-placeholder {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  text-align: center;
+  padding: var(--size-4-8, 2rem) var(--size-4-2, 0.5rem);
+}
+.ggai-span-ai {
+  color: var(--text-normal);
+}
+.ggai-span-user {
+  color: var(--text-accent);
+}
+/* 본문 마크다운 표기(**굵게**, *기울임*, `코드`) — 표시(marker) 문자는 textContent 를
+   바꾸지 않고(오프셋 매핑·diff 유지) 시각적으로만 접는다. 실제 지우면 undo/재생성 등
+   문자 오프셋 기반 로직이 전부 깨지므로 folding 방식을 쓴다. */
+.ggai-md-marker {
+  font-size: 0;
+  line-height: 0;
+}
+.ggai-md-bold {
+  font-weight: 700;
+}
+.ggai-md-italic {
+  font-style: italic;
+}
+.ggai-md-code {
+  font-family: var(--font-monospace, monospace);
+  font-size: 0.9em;
+  background: var(--code-background, rgba(127, 127, 127, 0.15));
+  border-radius: 3px;
+  padding: 0 3px;
+}
+.ggai-span-undo-preview {
+  background: var(--text-highlight-bg, rgba(255, 214, 102, 0.32));
+  border-radius: 3px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+/* 번역 보기에서 undo/재생성 호버 시 사라질 문단(대략) 강조 */
+.ggai-tr-removal-preview {
+  background: var(--text-highlight-bg, rgba(255, 214, 102, 0.32));
+  border-radius: 3px;
+}
+
+/* ─── 우측 detail view (R3) ─────────────────────────────────────────── */
+.ggai-detail {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0;
+}
+.ggai-detail-tabs {
+  display: flex;
+  flex-direction: row;
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+}
+.ggai-detail-tab {
+  flex: 1 1 50%;
+  padding: var(--size-4-2, 0.5rem) var(--size-4-3, 0.75rem);
+  text-align: center;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  border-bottom: 2px solid transparent;
+  user-select: none;
+}
+.ggai-detail-tab:hover {
+  color: var(--text-normal);
+}
+.ggai-detail-tab.is-active {
+  color: var(--text-normal);
+  border-bottom-color: var(--interactive-accent);
+}
+.ggai-detail-tab.is-disabled {
+  opacity: 0.5;
+}
+.ggai-detail-content {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: var(--size-4-3, 0.75rem);
+}
+.ggai-detail-empty {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  text-align: center;
+  padding: var(--size-4-8, 2rem) var(--size-4-2, 0.5rem);
+}
+
+/* 전체 접기/펼치기 — 스크롤을 따라오는 작은 플로팅 버튼, 우측 하단 구석.
+   position: sticky 로 탭 콘텐츠(스크롤 컨테이너) 안에서 항상 보이되, 높이를 0으로
+   접어 일반 흐름에 여백을 차지하지 않는다(방해 안 되게). */
+.ggai-detail-collapse-footer {
+  position: sticky;
+  bottom: var(--size-4-2, 0.5rem);
+  z-index: 5;
+  display: flex;
+  justify-content: flex-end;
+  height: 0;
+  margin-top: var(--size-4-2, 0.5rem);
+  pointer-events: none;
+}
+.ggai-collapse-all-btn {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  padding: 3px 9px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+}
+.ggai-collapse-all-btn:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+.ggai-collapse-all-icon {
+  display: inline-flex;
+  align-items: center;
+}
+.ggai-collapse-all-icon .svg-icon {
+  width: 1em;
+  height: 1em;
+}
+
+.ggai-editor-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--size-4-3, 0.75rem);
+  padding-bottom: var(--size-4-2, 0.5rem);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.ggai-editor-header-main {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--size-4-3, 0.75rem);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.ggai-editor-title {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.ggai-editor-name {
+  color: var(--text-normal);
+  font-size: 1.35rem;
+  font-weight: 700;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.ggai-editor-header .ggai-folder-hint {
+  margin-top: 4px;
+}
+
+/* Hero 편집기 헤더 — 표지를 크게 가운데, 그 아래 클릭-편집 이름 (경로 표시 없음). */
+.ggai-editor-header.is-hero {
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  text-align: center;
+  gap: 12px;
+  padding-bottom: 14px;
+}
+.ggai-editor-header.is-hero .ggai-editor-cover {
+  width: 160px;
+  height: 213px; /* 3:4 표지 */
+  flex: 0 0 auto;
+  border-radius: 12px;
+}
+.ggai-editor-header.is-hero .ggai-editor-cover .ggai-thumb-placeholder svg {
+  width: 40px;
+  height: 40px;
+}
+/* 편집기 헤더 아이콘 액션 — 한글 네모 버튼 대신 둥근 아이콘 버튼 + 툴팁 */
+.ggai-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.ggai-editor-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.ggai-editor-action-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+.ggai-editor-action-btn svg {
+  width: 17px;
+  height: 17px;
+}
+.ggai-editor-action-btn.is-danger:hover {
+  color: var(--text-error);
+  border-color: var(--text-error);
+}
+
+.ggai-editor-name.is-editable {
+  cursor: text;
+  border-radius: var(--radius-s, 4px);
+  padding: 2px 8px;
+  transition: background 120ms ease;
+}
+.ggai-editor-name.is-editable:hover {
+  background: var(--background-modifier-hover);
+}
+.ggai-editor-name-input {
+  font-size: 1.35rem;
+  font-weight: 700;
+  line-height: 1.2;
+  text-align: center;
+  padding: 2px 8px;
+  border: 1px solid var(--interactive-accent);
+  border-radius: var(--radius-s, 4px);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  min-width: 12ch;
+}
+.ggai-editor-header.is-hero .ggai-scenario-form-actions {
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+/* 전용 시나리오 선택 (유저 편집기) */
+.ggai-user-scenarios {
+  margin-top: 14px;
+}
+.ggai-user-scenario-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 6px;
+}
+.ggai-user-scenario-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: var(--font-ui-small);
+}
+.ggai-user-scenario-row:hover {
+  background: var(--interactive-hover);
+}
+.ggai-field-hint {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+  margin-top: 2px;
+}
+.ggai-editor-cover {
+  position: relative;
+  width: 96px;
+  height: 96px;
+  flex: 0 0 96px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m, 6px);
+  overflow: hidden;
+  background: var(--background-secondary);
+  cursor: pointer;
+}
+.ggai-editor-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.ggai-editor-cover .ggai-thumb-placeholder svg {
+  width: 28px;
+  height: 28px;
+}
+/* 표지 변경 힌트 — 평소엔 숨기고 hover/focus(모바일은 탭=바로 선택창) 때만 오버레이로. */
+.ggai-editor-cover-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  font-size: var(--font-ui-smaller);
+  color: #fff;
+  background: rgba(0, 0, 0, 0.42);
+  opacity: 0;
+  transition: opacity 140ms ease;
+  pointer-events: none;
+}
+.ggai-editor-cover-hint svg {
+  width: 18px;
+  height: 18px;
+}
+.ggai-editor-cover:hover .ggai-editor-cover-hint,
+.ggai-editor-cover:focus-visible .ggai-editor-cover-hint {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ggai-editor-cover-hint {
+    transition: none;
+  }
+}
+
+/* ─── R4a: 기본 탭 / preset section ─────────────────────────────────── */
+.ggai-section-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--size-4-1, 0.25rem) 0;
+  margin-bottom: var(--size-4-1, 0.25rem);
+}
+.ggai-section-title {
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.ggai-preset-section {
+  margin-bottom: var(--size-4-3, 0.75rem);
+}
+.ggai-preset-grid {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: var(--size-4-1, 0.25rem);
+}
+.ggai-preset-btn {
+  flex: 0 1 auto;
+  padding: var(--size-4-1, 0.25rem) var(--size-4-2, 0.5rem);
+  border-radius: var(--radius-s, 4px);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ggai-preset-btn:hover {
+  background: var(--background-modifier-hover);
+}
+.ggai-preset-btn.is-active {
+  border-color: var(--interactive-accent);
+  background: var(--background-modifier-active-hover, var(--background-modifier-hover));
+  color: var(--text-normal);
+}
+.ggai-preset-btn.is-favorite::before {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  color: var(--text-accent);
+}
+.ggai-preset-btn.is-modified::after {
+  content: "*";
+  margin-left: 3px;
+  color: var(--text-accent);
+  font-weight: 700;
+}
+.ggai-preset-btn.ggai-preset-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  padding: var(--size-4-1, 0.25rem);
+}
+
+/* 프리셋 자동 순환 옵션 */
+.ggai-preset-rotate-row {
+  margin-top: var(--size-4-2, 0.5rem);
+}
+.ggai-preset-rotate-label {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2, 0.5rem);
+  cursor: pointer;
+  font-size: var(--font-ui-small);
+}
+/* collapsible 공통 — 헤더 클릭으로 body 의 .is-collapsed 토글 */
+.ggai-section-header.is-clickable {
+  cursor: pointer;
+  user-select: none;
+}
+.ggai-collapsible {
+  margin-bottom: var(--size-4-3, 0.75rem);
+}
+.ggai-model-body.is-collapsed,
+.ggai-params-body.is-collapsed,
+.ggai-media-body.is-collapsed,
+.ggai-session-meta-body.is-collapsed,
+.ggai-scenario-form-body.is-collapsed,
+.ggai-session-lorebook-body.is-collapsed,
+.ggai-preset-body.is-collapsed,
+.ggai-prompts-content.is-collapsed {
+  display: none;
+}
+.ggai-params-section,
+.ggai-params-body {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* ─── R4b: 모델 섹션 ────────────────────────────────────────────── */
+.ggai-model-section {
+}
+.ggai-model-row {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: var(--size-4-1, 0.25rem);
+  align-items: center;
+}
+.ggai-model-btn {
+  flex: 0 1 auto;
+  padding: var(--size-4-1, 0.25rem) var(--size-4-2, 0.5rem);
+  border-radius: var(--radius-s, 4px);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ggai-model-btn:hover {
+  background: var(--background-modifier-hover);
+}
+.ggai-model-btn.is-active {
+  border-color: var(--interactive-accent);
+  background: var(--background-modifier-active-hover, var(--background-modifier-hover));
+  color: var(--text-normal);
+}
+.ggai-model-btn.is-default::before {
+  content: "● ";
+  color: var(--text-accent);
+}
+.ggai-model-btn .ggai-model-kind-tag {
+  display: inline-block;
+  margin-left: var(--size-4-1, 0.25rem);
+  padding: 0 var(--size-4-1, 0.25rem);
+  font-size: 0.7em;
+  border-radius: var(--radius-s, 4px);
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+  vertical-align: middle;
+}
+.ggai-model-btn.ggai-model-settings {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  padding: var(--size-4-1, 0.25rem);
+}
+
+/* ─── R4b: 파라미터 섹션 ────────────────────────────────────────── */
+.ggai-params-section {
+}
+.ggai-param-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--size-4-1, 0.25rem);
+  margin-bottom: var(--size-4-2, 0.5rem);
+}
+.ggai-param-label-row {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.ggai-param-label {
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+}
+.ggai-param-label.is-unset {
+  color: var(--text-muted);
+  font-style: italic;
+}
+.ggai-param-value {
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+input.ggai-param-value[type="number"] {
+  width: 76px;
+  min-width: 0;
+  height: 24px;
+  padding: 2px 6px;
+  text-align: right;
+}
+input.ggai-param-value.is-unset {
+  color: var(--text-faint);
+}
+/*
+ * 옵시디언 user-agent 가 input[type=range] 에 max-width 같은 걸 줄 수 있어
+ * specificity 를 올리고 !important 로 100% 강제.
+ */
+input.ggai-param-slider[type="range"] {
+  display: block;
+  width: 100% !important;
+  max-width: none !important;
+  min-width: 0 !important;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+.ggai-param-slider.is-unset {
+  opacity: 0.5;
+}
+
+/* ─── R4c: 프롬프트 섹션 ─────────────────────────────────────────── */
+.ggai-prompts-section {
+  margin-bottom: var(--size-4-3, 0.75rem);
+}
+.ggai-prompts-toolbar {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--size-4-1, 0.25rem);
+  margin-bottom: var(--size-4-1, 0.25rem);
+}
+.ggai-prompts-nai-row {
+  margin-bottom: var(--size-4-2, 0.5rem);
+}
+.ggai-prompts-nai-label {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2, 0.5rem);
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.ggai-prompts-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--font-ui-small);
+  border-radius: var(--radius-s, 4px);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  padding: 2px var(--size-4-1, 0.25rem);
+}
+.ggai-prompts-tb-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 24px;
+  min-width: 24px;
+  padding: 0 var(--size-4-1, 0.25rem);
+  border-radius: var(--radius-s, 4px);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  cursor: pointer;
+}
+.ggai-prompts-tb-btn:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+.ggai-prompts-tb-text {
+  padding: 0 var(--size-4-2, 0.5rem);
+}
+.ggai-prompts-body {
+  margin-top: var(--size-4-2, 0.5rem);
+}
+.ggai-prompts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ggai-prompt-item {
+  border-radius: var(--radius-s, 4px);
+  border: 1px solid transparent;
+  background: var(--background-secondary);
+  transition: border-color 0.1s, background 0.1s;
+  cursor: grab;
+}
+.ggai-prompt-item:active {
+  cursor: grabbing;
+}
+.ggai-prompt-item.drag-over {
+  border-color: var(--interactive-accent);
+}
+.ggai-prompt-item.is-dragging {
+  opacity: 0.5;
+}
+.ggai-prompt-item.is-disabled .ggai-prompt-row {
+  opacity: 0.5;
+}
+.ggai-prompt-item.is-expanded {
+  background: var(--background-primary-alt, var(--background-secondary));
+  border-color: var(--background-modifier-border);
+}
+.ggai-prompt-row {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-1, 0.25rem);
+  padding: 4px var(--size-4-2, 0.5rem);
+  min-height: 28px;
+  cursor: grab;
+}
+.ggai-prompt-item.is-dragging .ggai-prompt-row {
+  cursor: grabbing;
+}
+.ggai-prompt-row:hover {
+  background: var(--background-modifier-hover);
+}
+/* 토글 스위치 (체크박스 기반, CSS 시각만 스위치) */
+.ggai-prompt-toggle {
+  flex: 0 0 auto;
+  position: relative;
+  display: inline-block;
+  width: 28px;
+  height: 16px;
+  cursor: pointer;
+}
+.ggai-prompt-toggle input[type="checkbox"] {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  margin: 0;
+  cursor: pointer;
+}
+.ggai-prompt-toggle-track {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--background-modifier-border);
+  transition: background 0.15s;
+  position: relative;
+}
+.ggai-prompt-toggle-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--background-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  transition: transform 0.15s;
+}
+.ggai-prompt-toggle input:checked ~ .ggai-prompt-toggle-track {
+  background: var(--interactive-accent);
+}
+.ggai-prompt-toggle input:checked ~ .ggai-prompt-toggle-track::after {
+  transform: translateX(12px);
+}
+.ggai-prompt-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: none;
+}
+/* 펼친 항목의 row 이름은 굵게 — "편집 중인 헤더" */
+.ggai-prompt-item.is-expanded .ggai-prompt-name {
+  font-weight: var(--font-bold, 700);
+}
+.ggai-prompt-badge {
+  flex: 0 0 auto;
+  font-size: 0.65em;
+  font-weight: var(--font-semibold, 600);
+  padding: 1px 4px;
+  border-radius: var(--radius-s, 4px);
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+  letter-spacing: 0.03em;
+}
+.ggai-prompt-badge.is-marker {
+  background: var(--color-purple, #8b5cf6);
+  color: #fff;
+}
+.ggai-prompt-badge.is-system {
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+}
+.ggai-prompt-badge.is-user {
+  background: var(--color-blue, #3b82f6);
+  color: #fff;
+}
+.ggai-prompt-badge.is-assistant {
+  background: var(--color-green, #10b981);
+  color: #fff;
+}
+.ggai-prompt-caret {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-s, 4px);
+  color: var(--text-faint);
+}
+.ggai-prompt-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--size-4-2, 0.5rem);
+}
+.ggai-prompt-edit-del {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px var(--size-4-2, 0.5rem);
+  border-radius: var(--radius-s, 4px);
+  border: 1px solid var(--background-modifier-border);
+  background: transparent;
+  color: var(--text-error, #e53e3e);
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+}
+.ggai-prompt-edit-del:hover {
+  background: var(--background-modifier-hover);
+  border-color: var(--text-error, #e53e3e);
+}
+.ggai-prompt-edit-panel {
+  padding: var(--size-4-1, 0.25rem) var(--size-4-2, 0.5rem)
+    var(--size-4-2, 0.5rem);
+  cursor: default;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.ggai-prompt-edit-panel * {
+  cursor: auto;
+}
+.ggai-prompt-edit-info {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  margin-bottom: var(--size-4-1, 0.25rem);
+}
+.ggai-prompt-edit-info code {
+  font-size: 0.85em;
+  background: var(--background-modifier-border);
+  padding: 1px 4px;
+  border-radius: var(--radius-s, 4px);
+}
+.ggai-prompt-edit-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: var(--size-4-1, 0.25rem);
+}
+.ggai-prompt-edit-label {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+.ggai-prompt-edit-input,
+.ggai-prompt-edit-select {
+  width: 100%;
+  font-size: var(--font-ui-small);
+  border-radius: var(--radius-s, 4px);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  padding: 3px var(--size-4-1, 0.25rem);
+}
+.ggai-prompt-edit-input:focus,
+.ggai-prompt-edit-select:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+.ggai-prompt-content-ta {
+  width: 100%;
+  resize: vertical;
+  font-size: var(--font-ui-small);
+  font-family: var(--font-monospace, monospace);
+  border-radius: var(--radius-s, 4px);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  padding: var(--size-4-1, 0.25rem) var(--size-4-2, 0.5rem);
+  line-height: 1.5;
+}
+.ggai-prompt-content-ta:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+.ggai-prompt-wrap-head {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2, 0.5rem);
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+  cursor: pointer;
+}
+.ggai-prompt-wrap-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: var(--size-4-1, 0.25rem);
+}
+.ggai-prompt-wrap-body.is-hidden {
+  display: none;
+}
+.ggai-prompt-wrap-hint {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+/* ─── R5: 시나리오 탭 ────────────────────────────────────────────── */
+.ggai-scenario-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-2, 0.5rem);
+}
+.ggai-text-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ggai-text-field-label {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.ggai-text-field-hint {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+}
+.ggai-text-field-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: inherit;
+  font-size: var(--font-ui-small);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  padding: var(--size-4-1, 0.25rem) var(--size-4-2, 0.5rem);
+  resize: vertical;
+}
+.ggai-text-field-input:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+.ggai-session-meta-body,
+.ggai-session-lorebook-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-2, 0.5rem);
+}
+.ggai-scenario-form-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-2, 0.5rem);
+  padding-top: var(--size-4-2, 0.5rem);
+}
+
+/* ── 시나리오 폼 안 로어북 영역 (L4) ────────── */
+.ggai-scenario-lorebooks {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--size-4-2, 0.5rem);
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+}
+
+/* ── 폼 렌더러 공통 (L3e-A) ──────────────── */
+.ggai-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-2, 0.5rem);
+}
+.ggai-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ggai-form-label {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.ggai-form-label.is-inline {
+  display: inline;
+  margin-left: 6px;
+}
+.ggai-form-hint {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+}
+.ggai-form-input,
+.ggai-form-textarea,
+.ggai-form-select {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: inherit;
+  font-size: var(--font-ui-small);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  padding: var(--size-4-1, 0.25rem) var(--size-4-2, 0.5rem);
+}
+.ggai-form-textarea {
+  resize: vertical;
+}
+.ggai-form-input:focus,
+.ggai-form-textarea:focus,
+.ggai-form-select:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+.ggai-form-checkbox {
+  margin: 0;
+}
+.ggai-form-advanced {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-2, 0.5rem);
+  padding-top: var(--size-4-2, 0.5rem);
+}
+.ggai-form-advanced.is-collapsed {
+  display: none;
+}
+
+/* ── 로어북 편집기 (L3e) ────────────────── */
+.ggai-lorebook-editor {
+  padding: var(--size-4-3, 0.75rem);
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-3, 0.75rem);
+  height: 100%;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+/* 대시보드 프롬프트 탭 — 세트 라이브러리(세로 목록, 세션과 무관). */
+.ggai-dash-prompt-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ggai-dash-prompt-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m, 6px);
+  background: var(--background-primary);
+  cursor: pointer;
+}
+.ggai-dash-prompt-row:hover {
+  background: var(--background-modifier-hover);
+}
+.ggai-dash-prompt-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+.ggai-dash-prompt-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.ggai-dash-prompt-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-dash-prompt-meta {
+  font-size: 0.8em;
+  color: var(--text-muted);
+}
+.ggai-lorebook-meta {
+  padding: var(--size-4-2, 0.5rem);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m, 6px);
+  background: var(--background-secondary);
+}
+.ggai-lorebook-entries-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--size-4-2, 0.5rem);
+}
+.ggai-lorebook-entries {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-2, 0.5rem);
+}
+.ggai-entry-card {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m, 6px);
+  background: var(--background-primary);
+}
+.ggai-entry-card.is-expanded {
+  background: var(--background-secondary);
+}
+.ggai-entry-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+}
+.ggai-entry-toggle {
+  display: inline-flex;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+.ggai-entry-name {
+  flex: 0 0 auto;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: var(--font-ui-small);
+}
+.ggai-entry-keyword-preview {
+  flex: 1 1 auto;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-entry-actions {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.ggai-entry-body {
+  padding: var(--size-4-2, 0.5rem) var(--size-4-3, 0.75rem) var(--size-4-3, 0.75rem);
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-3, 0.75rem);
+}
+
+/* ── 컨텍스트 미리보기 (CTX) ─────────────── */
+.ggai-ctx-button-row {
+  display: flex;
+  margin-bottom: 6px;
+}
+.ggai-ctx-button-row .ggai-btn {
+  flex: 1 1 auto;
+  font-weight: 600;
+}
+.ggai-ctx-preview {
+  max-width: 800px;
+}
+.ggai-ctx-summary {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  padding: 10px 12px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  font-size: var(--font-ui-small);
+  margin-bottom: 12px;
+}
+.ggai-ctx-meta-row {
+  display: contents;
+}
+.ggai-ctx-meta-label {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.ggai-ctx-meta-value {
+  color: var(--text-normal);
+  word-break: break-all;
+}
+.ggai-ctx-find {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ggai-ctx-find-input {
+  flex: 1;
+  min-width: 0;
+}
+.ggai-ctx-find-count {
+  flex: 0 0 auto;
+  min-width: 64px;
+  text-align: right;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+.ggai-ctx-hit {
+  background: var(--text-highlight-bg, rgba(255, 208, 0, 0.4));
+  border-radius: 2px;
+}
+.ggai-ctx-hit.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+.ggai-ctx-section {
+  margin-top: 12px;
+}
+.ggai-ctx-section h4 {
+  margin: 0 0 6px;
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+}
+.ggai-ctx-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.ggai-ctx-tag {
+  font-size: var(--font-ui-smaller);
+  padding: 2px 8px;
+  background: var(--background-modifier-hover);
+  border-radius: 10px;
+}
+.ggai-ctx-msg-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ggai-ctx-msg {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-primary);
+  border-left-width: 4px;
+}
+.ggai-ctx-msg-system { border-left-color: #ffc107; }
+.ggai-ctx-msg-user   { border-left-color: #5cb6e6; }
+.ggai-ctx-msg-assistant { border-left-color: #b0d97c; }
+.ggai-ctx-msg-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  background: var(--background-secondary);
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+  user-select: none;
+}
+.ggai-ctx-msg-head:hover {
+  background: var(--background-modifier-hover);
+}
+.ggai-ctx-msg-caret {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  transition: transform 0.1s ease;
+}
+.ggai-ctx-msg.is-collapsed .ggai-ctx-msg-caret {
+  transform: rotate(-90deg);
+}
+.ggai-ctx-msg.is-collapsed .ggai-ctx-msg-body {
+  display: none;
+}
+.ggai-ctx-msg-role {
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+  margin-right: auto;
+}
+.ggai-ctx-msg-source {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ggai-ctx-msg-len {
+  color: var(--text-faint);
+}
+.ggai-ctx-msg-body {
+  padding: 8px 10px;
+  font-size: var(--font-ui-small);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ggai-ctx-textprompt {
+  /* 자체 스크롤 없음 — 이 창의 유일한 스크롤 영역은 .ggai-modal-body. */
+  padding: 10px;
+  margin: 0;
+  font-size: var(--font-ui-smaller);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--background-primary-alt, var(--background-secondary));
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+}
+/* 파트별 형광펜 — 합쳐진 전송본에서 구간 구분 */
+.ggai-ctx-part {
+  border-radius: 2px;
+}
+.ggai-ctx-part-token {
+  color: var(--text-faint);
+  font-weight: 600;
+}
+.ggai-ctx-part-system { background: rgba(120, 120, 120, 0.22); }
+.ggai-ctx-part-scenario { background: rgba(64, 160, 255, 0.22); }
+.ggai-ctx-part-description { background: rgba(64, 200, 160, 0.22); }
+.ggai-ctx-part-personality { background: rgba(120, 200, 80, 0.22); }
+.ggai-ctx-part-examples { background: rgba(180, 200, 60, 0.22); }
+.ggai-ctx-part-lorebook { background: rgba(180, 120, 255, 0.24); }
+.ggai-ctx-part-memory { background: rgba(255, 170, 60, 0.26); }
+.ggai-ctx-part-body { background: rgba(255, 120, 150, 0.20); }
+.ggai-ctx-part-authornote { background: rgba(255, 90, 90, 0.26); }
+.ggai-ctx-part-other { background: rgba(140, 140, 140, 0.15); }
+/* 범례 */
+.ggai-ctx-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin: 6px 0;
+}
+.ggai-ctx-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+.ggai-ctx-legend-dot {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  border: 1px solid var(--background-modifier-border);
+}
+.ggai-ctx-legend-dot.ggai-ctx-part-token {
+  background: var(--background-modifier-border);
+}
+.ggai-ctx-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  justify-content: flex-end;
+}
+
+/* ── 분기 탭 (B-시리즈) ────────────────────── */
+.ggai-branch-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  min-height: 0;
+}
+.ggai-branch-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  flex: 0 0 auto;
+}
+.ggai-branch-mode-toggle {
+  display: inline-flex;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  overflow: hidden;
+  align-self: stretch;
+}
+.ggai-branch-mode-btn {
+  flex: 1 1 0;
+  padding: 4px 8px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  border: none;
+  border-right: 1px solid var(--background-modifier-border);
+  cursor: pointer;
+  font-size: var(--font-ui-smaller);
+}
+.ggai-branch-mode-btn:last-child { border-right: none; }
+.ggai-branch-mode-btn:hover { color: var(--text-normal); }
+.ggai-branch-mode-btn.is-on {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+  font-weight: 600;
+}
+.ggai-branch-nav {
+  display: flex;
+  gap: 4px;
+}
+.ggai-branch-nav .ggai-btn {
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+.ggai-branch-nav .ggai-btn.is-on {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+  border-color: var(--interactive-accent);
+}
+.ggai-branch-nav .ggai-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.ggai-branch-search {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: var(--font-ui-small);
+  padding: 4px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+.ggai-branch-body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px;
+}
+.ggai-branch-count {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+/* 들여쓰기 트리 (full mode) */
+/* 즐겨찾기(세이브 포인트) 슬롯 — 1줄 1개 묵직한 카드 */
+.ggai-bt-slots {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ggai-bt-slot-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ggai-bt-slot {
+  border: 1px solid var(--background-modifier-border);
+  border-left: 4px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-secondary);
+  padding: 10px 12px;
+  cursor: default;
+}
+.ggai-bt-slot.is-ai {
+  border-left-color: var(--interactive-accent);
+}
+.ggai-bt-slot.is-user {
+  border-left-color: var(--text-accent, #e0a030);
+}
+.ggai-bt-slot.on-active {
+  background: var(--background-secondary-alt, var(--background-secondary));
+}
+.ggai-bt-slot.is-current {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+.ggai-bt-slot-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.ggai-bt-slot-star {
+  display: inline-flex;
+  color: var(--text-accent, #e0a030);
+}
+.ggai-bt-slot-star svg {
+  width: 15px;
+  height: 15px;
+}
+.ggai-bt-slot-kind {
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-semibold, 600);
+  color: var(--text-normal);
+}
+.ggai-bt-slot-depth {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+.ggai-bt-slot-spacer {
+  flex: 1 1 auto;
+}
+.ggai-bt-slot-badge {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-on-accent, #fff);
+  background: var(--interactive-accent);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.ggai-bt-slot-time {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+}
+.ggai-bt-slot-preview {
+  font-size: var(--font-ui-smaller);
+  line-height: 1.5;
+  color: var(--text-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.ggai-bt-slot-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.ggai-bt-slot-load {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ggai-bt-slot-load svg {
+  width: 15px;
+  height: 15px;
+}
+.ggai-bt-slot-foot .ggai-btn:last-child {
+  margin-left: auto;
+}
+
+/* 활성 경로 모드 카드 컬럼 (기존 ggai-bt-col 재사용) */
+.ggai-bt-node.is-match {
+  outline: 2px solid var(--text-accent, #ffc107);
+}
+.ggai-bt-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+}
+.ggai-bt-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+}
+.ggai-bt-row + .ggai-bt-row::before {
+  content: "";
+  width: 2px;
+  height: 16px;
+  background: var(--interactive-accent);
+  margin: 2px 0;
+  flex: 0 0 auto;
+}
+.ggai-bt-node {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 14px;
+  border: 1.5px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  line-height: 1.2;
+  cursor: pointer;
+  user-select: none;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-bt-node:hover {
+  border-color: var(--interactive-accent);
+}
+.ggai-bt-node.on-active {
+  border-color: var(--interactive-accent);
+  background: var(--background-modifier-hover);
+}
+.ggai-bt-node.is-current {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent-hover);
+  font-weight: 600;
+}
+.ggai-bt-node.is-opened {
+  box-shadow: 0 0 0 2px var(--background-modifier-border);
+}
+.ggai-bt-author {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.ggai-bt-node.is-current .ggai-bt-author {
+  color: var(--text-on-accent);
+  opacity: 0.7;
+}
+.ggai-bt-author-ai { color: #5cb6e6; }
+.ggai-bt-author-user { color: #b0d97c; }
+.ggai-bt-author-root { color: var(--text-faint); }
+.ggai-bt-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-bt-star {
+  color: #ffc107;
+  font-size: 11px;
+}
+.ggai-bt-current-mark {
+  font-size: 11px;
+  margin-left: 2px;
+}
+.ggai-bt-branch-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-weight: 600;
+  margin-left: 4px;
+}
+.ggai-bt-node.is-current .ggai-bt-branch-badge {
+  background: rgba(255, 255, 255, 0.2);
+  color: var(--text-on-accent);
+}
+
+/* 디테일 카드 */
+.ggai-bt-detail {
+  margin-top: 8px;
+  width: 100%;
+  background: var(--background-primary);
+  border: 1.5px solid var(--interactive-accent);
+  border-radius: 6px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ggai-bt-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.ggai-bt-detail-meta {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.ggai-bt-detail-close {
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 4px;
+}
+.ggai-bt-detail-close:hover { color: var(--text-normal); }
+.ggai-bt-detail-body {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 8px;
+  font-size: var(--font-ui-small);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ggai-bt-detail-actions {
+  display: flex;
+  gap: 6px;
+}
+.ggai-bt-danger-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--background-modifier-border);
+}
+.ggai-bt-danger-actions .ggai-btn {
+  min-width: 0;
+  white-space: normal;
+  line-height: 1.25;
+}
+.ggai-btn-primary {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent-hover);
+  font-weight: 600;
+}
+.ggai-btn-primary:hover {
+  background: var(--interactive-accent-hover);
+}
+.ggai-btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ggai-bt-children {
+  border-top: 1px dashed var(--background-modifier-border);
+  padding-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ggai-bt-children-title {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 4px;
+  letter-spacing: 0.05em;
+}
+.ggai-bt-child-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: var(--font-ui-small);
+}
+.ggai-bt-child-row:hover {
+  background: var(--background-modifier-hover);
+}
+.ggai-bt-child-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex: 0 0 auto;
+}
+.ggai-bt-child-dot.is-active {
+  background: var(--interactive-accent);
+}
+.ggai-bt-child-text {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+}
+.ggai-bt-child-row.is-active .ggai-bt-child-text {
+  color: var(--text-normal);
+  font-weight: 600;
+}
+.ggai-bt-child-meta {
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+}
+
+/* ── 세션 단위 로어북 영역 (L2) ─────────────── */
+.ggai-bt-map-sortrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.ggai-bt-map-sort {
+  flex: 0 0 auto;
+}
+.ggai-bt-map-count {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+  font-variant-numeric: tabular-nums;
+}
+.ggai-bt-map-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+.ggai-bt-map-controls .ggai-btn {
+  flex: 0 0 auto;
+  min-width: 28px;
+}
+.ggai-bt-map-zoom {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ggai-bt-map-zoom-label {
+  flex: 0 0 38px;
+  text-align: right;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-variant-numeric: tabular-nums;
+}
+.ggai-bt-map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  margin-bottom: 4px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+.ggai-bt-map-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.ggai-bt-map-legend-item::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+.ggai-bt-map-legend-ai::before {
+  background: #5cb6e6;
+}
+.ggai-bt-map-legend-user::before {
+  background: #b0d97c;
+}
+.ggai-bt-map-legend-regen::before {
+  background: #ffc107;
+}
+.ggai-bt-map-legend-active::before {
+  background: var(--interactive-accent);
+  box-shadow: 0 0 0 2px var(--background-modifier-border);
+}
+.ggai-bt-map-viewport {
+  position: relative;
+  flex: 1 1 0;
+  min-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+  background:
+    linear-gradient(var(--background-modifier-border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--background-modifier-border) 1px, transparent 1px),
+    var(--background-secondary);
+  background-size: 24px 24px;
+}
+.ggai-bt-map-inner {
+  position: relative;
+  transform-origin: top left;
+}
+.ggai-bt-map-svg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+.ggai-bt-map-line {
+  fill: none;
+  stroke: var(--text-faint);
+  stroke-width: 2;
+  opacity: 0.65;
+}
+.ggai-bt-map-line.is-active {
+  stroke: var(--interactive-accent);
+  stroke-width: 3;
+  opacity: 1;
+}
+.ggai-bt-map-node {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  cursor: pointer;
+  overflow: hidden;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.18);
+}
+.ggai-bt-map-node:hover {
+  border-color: var(--interactive-accent);
+  background: var(--background-modifier-hover);
+}
+.ggai-bt-map-node.is-active {
+  border-color: var(--interactive-accent);
+  background: var(--background-modifier-active-hover, var(--background-modifier-hover));
+}
+.ggai-bt-map-node.is-current {
+  box-shadow: 0 0 0 3px rgba(var(--color-accent-rgb), 0.22), 0 4px 10px rgba(0, 0, 0, 0.24);
+}
+.ggai-bt-map-node.is-opened {
+  outline: 2px solid var(--text-accent);
+}
+.ggai-bt-map-node-top {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 4px;
+}
+.ggai-bt-map-kind {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 700;
+}
+.ggai-bt-map-node.is-ai .ggai-bt-map-kind {
+  color: #5cb6e6;
+}
+.ggai-bt-map-node.is-user .ggai-bt-map-kind {
+  color: #b0d97c;
+}
+.ggai-bt-map-node.is-regen .ggai-bt-map-kind {
+  color: #ffc107;
+}
+.ggai-bt-map-label {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+}
+.ggai-bt-map-star {
+  flex: 0 0 auto;
+  color: #ffc107;
+  font-size: var(--font-ui-smaller);
+}
+.ggai-bt-map-preview {
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-bt-map-hint {
+  margin-top: 5px;
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+}
+
+.ggai-session-lorebooks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--size-4-2, 0.5rem);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+  background: var(--background-secondary);
+}
+.ggai-session-lorebook-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ggai-lorebook-checklist-label.is-faint {
+  color: var(--text-faint);
+  font-style: italic;
+}
+.ggai-select {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: var(--font-ui-small);
+  padding: var(--size-4-1, 0.25rem) var(--size-4-2, 0.5rem);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+.ggai-lorebook-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+  padding: 4px;
+  background: var(--background-secondary);
+}
+/* 로어북 선택 모달(lorebook-select-modal) 전용 — 폼에 끼워 넣는 용도가 아니라
+   모달 본문(.ggai-modal-body) 전체를 차지하는 유일한 목록이므로, 자체 180px 캡을
+   없애고 모달의 유일한 스크롤 영역(body)에 맡긴다. 큰 창인데 내부에 작은 스크롤
+   박스가 따로 생기는 문제 방지. */
+.ggai-lorebook-checklist-fill {
+  max-height: none;
+  overflow-y: visible;
+}
+.ggai-lorebook-checklist-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  cursor: pointer;
+  border-radius: var(--radius-s, 4px);
+}
+.ggai-lorebook-checklist-row:hover {
+  background: var(--background-modifier-hover);
+}
+.ggai-lorebook-checklist-label {
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+  flex: 1 1 auto;
+  user-select: none;
+}
+
+.ggai-scenario-form-actions {
+  display: flex;
+  gap: var(--size-4-2, 0.5rem);
+}
+
+.ggai-favorites-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-1, 0.25rem);
+}
+.ggai-favorites-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.ggai-favorites-count {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+  font-weight: normal;
+}
+.ggai-favorites-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ggai-favorite-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--size-4-1, 0.25rem);
+  padding: 4px 6px;
+  border-radius: var(--radius-s, 4px);
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.ggai-favorite-row:hover {
+  background: var(--background-modifier-hover);
+}
+.ggai-favorite-row.is-active {
+  border-color: var(--interactive-accent);
+  background: var(--background-modifier-active-hover);
+}
+.ggai-favorite-star {
+  color: var(--text-accent);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  margin-top: 2px;
+}
+.ggai-favorite-body {
+  flex: 1;
+  min-width: 0;
+}
+.ggai-favorite-label {
+  font-size: var(--font-ui-small);
+  font-weight: 600;
+  color: var(--text-normal);
+}
+.ggai-favorite-preview {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+body.is-mobile.ggai-stella-panel-active .mobile-navbar,
+body.is-mobile.ggai-stella-panel-active .mobile-navbar-spacer,
+body.is-mobile.ggai-stella-panel-active .mobile-toolbar,
+body.is-mobile.ggai-stella-panel-active .mobile-toolbar-container,
+body.is-mobile.ggai-stella-panel-active .mobile-toolbar-options-container,
+body.is-mobile.ggai-stella-panel-active .workspace-tab-header-container {
+  display: none !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  pointer-events: none !important;
+}
+
+/* 모바일 패널 모드: 위 규칙이 상단 내비/툴바를 지워 본문이 화면 맨 위(시스템 상태바·
+   모바일 툴바 영역)까지 붙는다. 첫 줄이 그 영역에 가려 안 보이는 문제를 막기 위해
+   스크롤 영역(body-wrap) 안쪽에 여백을 둔다 — 컨테이너 padding 이라 스크롤을 조금만
+   내려도 같이 밀려 올라가 사라진다(콘텐츠 높이에 포함되는 여백일 뿐, 고정 마진이 아님). */
+body.is-mobile.ggai-stella-panel-active .ggai-session-body-wrap {
+  padding-top: max(
+    36px,
+    calc(
+      12px +
+        var(--safe-area-inset-top, env(safe-area-inset-top, 0px))
+    )
+  );
+}
+
+.ggai-media-section {
+  padding-top: var(--size-4-2, 0.5rem);
+  border-top: 1px solid var(--background-modifier-border);
+}
+.ggai-media-panel {
+  margin-bottom: var(--size-4-3, 0.75rem);
+}
+.ggai-media-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-3, 0.75rem);
+}
+.ggai-media-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-1, 0.25rem);
+}
+.ggai-media-label {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.ggai-media-prompt-grid {
+  min-height: 28px;
+}
+.ggai-media-number-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--size-4-2, 0.5rem);
+}
+.ggai-media-number-input {
+  width: 7rem;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  padding: var(--size-4-1, 0.25rem) var(--size-4-2, 0.5rem);
+}
+.ggai-media-modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-1, 0.25rem);
+  margin-top: var(--size-4-2, 0.5rem);
+}
+/* 프롬프트/삽화 재생성 등 M 규격 편집창 — 본문을 세로 flex 로 바꿔, 편집 textarea 가
+   남는 높이를 전부 차지하게 한다(.ggai-modal-grow). 힌트/안내문은 제자리 크기 유지. */
+.ggai-modal-body-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ggai-modal-body-col > .ggai-modal-grow {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.ggai-modal-body-col > .ggai-modal-grow > textarea {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.ggai-media-hint {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+/* 프롬프트 편집 모달 — 엔진 고정 형식 지시를 프롬프트 입력란과 한 칸에 표시.
+   실제 결합 위치대로(지침 앞) 반투명 pre + 편집 textarea 를 하나의 입력란처럼 감싼다. */
+/* 지침(반투명 pre) + 프롬프트(textarea)를 하나의 스크롤 상자로 묶는다.
+   스크롤은 이 compose 하나만 — pre 도 textarea 도 자체 스크롤을 만들지 않고,
+   textarea 는 JS(autosize)로 내용 높이에 맞춰 늘어나므로 지침 밑에 프롬프트가
+   자연스럽게 이어지는 한 칸처럼 보인다. */
+.ggai-media-prompt-compose {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  background: var(--background-primary);
+  overflow-y: auto;
+}
+.ggai-media-prompt-compose:focus-within {
+  border-color: var(--interactive-accent);
+}
+.ggai-media-io-inline {
+  margin: 0;
+  padding: 7px 10px 0 10px;
+  flex: 0 0 auto;
+  overflow: visible;
+  opacity: 0.45;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: var(--font-ui-small);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: none;
+}
+.ggai-media-prompt-compose > .ggai-form-textarea {
+  border: none;
+  border-radius: 0;
+  flex: 0 0 auto;
+  min-height: 4em;
+  overflow-y: hidden;
+  resize: none;
+  background: transparent;
+}
+.ggai-media-prompt-compose > .ggai-form-textarea:focus {
+  border: none;
+}
+/* grow 필드 안에서는 결합 입력란이 남는 높이를 전부 차지 */
+.ggai-modal-body-col > .ggai-modal-grow > .ggai-media-prompt-compose {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* 요약 설정 — 현재 요약 컨텍스트({{summary}} 주입 텍스트) 읽기 전용 표시 */
+.ggai-media-summary-context {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+  background: var(--background-primary);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.5;
+  padding: var(--size-4-2, 0.5rem);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+.ggai-media-enable {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+}
+/* 요약 설정 — 수동 요약 / 요약 관리 버튼 줄 */
+.ggai-summary-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--size-4-2, 0.5rem);
+  margin-top: var(--size-4-2, 0.5rem);
+}
+.ggai-summary-actions .ggai-btn {
+  min-height: 30px;
+}
+.ggai-summary-progress:empty {
+  display: none;
+}
+.ggai-summary-progress {
+  margin-top: var(--size-4-1, 0.25rem);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+/* 요약 관리 창 — 아코디언 두 패널(현재 요약 / 요약 관리). 한 번에 하나만 펼쳐지고,
+   펼쳐진 패널이 남은 높이를 채워 그 **안에서만** 스크롤한다 (모달 body 는 스크롤 없음).
+   그래야 패널 헤더·번역 토글·일괄 동작 줄이 항상 고정되고 스크롤은 내용 한 곳에만 생긴다. */
+.ggai-summary-mgr-modal-body {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-2, 0.5rem);
+}
+.ggai-summary-mgr-panel {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+  overflow: hidden;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.ggai-summary-mgr-panel.is-open {
+  flex: 1 1 auto;
+}
+.ggai-summary-mgr-panel-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2, 0.5rem);
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--size-4-2, 0.5rem);
+  background: var(--background-secondary);
+  border: none;
+  box-shadow: none;
+  cursor: pointer;
+  text-align: left;
+  color: var(--text-normal);
+}
+.ggai-summary-mgr-panel-head:hover {
+  background: var(--background-modifier-hover);
+}
+.ggai-summary-mgr-panel.is-open .ggai-summary-mgr-panel-head {
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.ggai-summary-mgr-panel-caret {
+  display: inline-flex;
+  color: var(--text-muted);
+}
+.ggai-summary-mgr-panel-title {
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold, 600);
+}
+/* 열린 패널 본문 — 세로 flex. 고정 줄(도구/일괄) + 스크롤 영역으로 나뉜다. */
+.ggai-summary-mgr-panel-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: var(--size-4-2, 0.5rem);
+}
+/* 현재 요약 패널 도구줄(번역 토글) — 고정 */
+.ggai-summary-mgr-context-tools {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: var(--size-4-2, 0.5rem);
+}
+/* 현재 요약 본문 박스 — 이 패널의 유일한 스크롤 영역 */
+.ggai-summary-mgr-panel-body > .ggai-media-summary-context {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+/* 사건 조각 카드 목록 — 이 패널의 유일한 스크롤 영역 */
+.ggai-summary-mgr-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.ggai-summary-mgr-empty {
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  padding: var(--size-4-2, 0.5rem) 0;
+}
+.ggai-summary-mgr-card {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+  padding: var(--size-4-2, 0.5rem);
+  margin-bottom: var(--size-4-2, 0.5rem);
+}
+.ggai-summary-mgr-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--size-4-2, 0.5rem);
+  margin-bottom: var(--size-4-1, 0.25rem);
+}
+.ggai-summary-mgr-card-title {
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold, 600);
+  color: var(--text-muted);
+}
+/* 사건 조각 본문 — 상자 스크롤 없이 내용 높이만큼 펼쳐 쭉 읽고 그 자리에서 고친다 */
+.ggai-summary-mgr-events {
+  width: 100%;
+  box-sizing: border-box;
+  resize: none;
+  overflow: hidden;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-s, 4px);
+  box-shadow: none !important;
+  padding: 2px 4px;
+  font-size: var(--font-ui-small);
+  line-height: 1.5;
+  color: var(--text-normal);
+}
+.ggai-summary-mgr-events:hover {
+  border-color: var(--background-modifier-border);
+}
+.ggai-summary-mgr-events:focus {
+  border-color: var(--interactive-accent);
+  background: var(--background-primary);
+}
+/* 현재 상황 스냅샷 — 마지막 조각 것만 주입되므로 접어서 덜 강조 */
+.ggai-summary-mgr-state {
+  margin-top: var(--size-4-1, 0.25rem);
+}
+.ggai-summary-mgr-state > summary {
+  cursor: pointer;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  user-select: none;
+}
+.ggai-summary-mgr-card-actions {
+  display: flex;
+  gap: var(--size-4-2, 0.5rem);
+}
+.ggai-summary-mgr-card-actions .ggai-preset-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--size-4-1, 0.25rem);
+}
+/* 일괄 동작 줄 — 전체 재작성/삭제. 카드 목록 위에 오른쪽 정렬 */
+.ggai-summary-mgr-bulk {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--size-4-2, 0.5rem);
+  margin-bottom: var(--size-4-2, 0.5rem);
+}
+.ggai-summary-mgr-bulk .ggai-preset-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--size-4-1, 0.25rem);
+}
+/* 삭제류 버튼 — hover 시에만 경고색으로 강조 */
+.ggai-summary-mgr-danger:hover:not(:disabled) {
+  color: var(--text-error);
+  border-color: var(--text-error);
+}
+/* 몰아서 요약할 때 진행률 줄(완료/전체 % + 막대) */
+.ggai-summary-mgr-progress {
+  margin-bottom: var(--size-4-2, 0.5rem);
+}
+.ggai-summary-mgr-progress-label {
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  margin-bottom: var(--size-4-1, 0.25rem);
+}
+.ggai-summary-mgr-progress-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--background-modifier-border);
+  overflow: hidden;
+}
+.ggai-summary-mgr-progress-fill {
+  height: 100%;
+  background: var(--interactive-accent);
+  border-radius: 3px;
+  transition: width 0.2s ease;
+}
+.ggai-media-lorebook-btn {
+  align-self: flex-start;
+}
+.ggai-media-lorebook-search {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: var(--size-4-2, 0.5rem);
+}
+.ggai-lorebook-checklist-row.is-hidden {
+  display: none;
+}
+
+/* Mockup shape system: preserve theme colors, DOM structure, and behavior. */
+.ggai-stella-sidebar {
+  padding: 12px;
+  gap: 8px;
+}
+
+.ggai-btn {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border-radius: 10px;
+  box-shadow: none !important;
+  line-height: 1;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+}
+.ggai-btn:active:not(:disabled) {
+  transform: scale(0.985);
+}
+.ggai-action-bar {
+  gap: 8px;
+}
+.ggai-action-bar .ggai-btn,
+.ggai-panel-open {
+  min-height: 32px;
+}
+.ggai-action-bar .ggai-btn {
+  padding: 0 12px;
+  border-radius: 10px;
+  font-weight: var(--font-semibold, 600);
+}
+.ggai-panel-open {
+  padding: 0 12px;
+  border-radius: 10px;
+  box-shadow: none !important;
+}
+.ggai-sidebar-divider {
+  margin: 0;
+}
+.ggai-search {
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: 16px;
+}
+.ggai-sidebar-tabs {
+  margin: 0 2px;
+}
+.ggai-sidebar-tab {
+  padding: 8px 12px;
+  font-weight: var(--font-medium, 500);
+  letter-spacing: 0.01em;
+}
+.ggai-list-header {
+  padding-top: 2px;
+}
+.ggai-list-title {
+  font-size: 11px;
+  font-weight: var(--font-semibold, 600);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.ggai-sort,
+.ggai-layout-select {
+  min-height: 28px;
+  border-radius: 10px;
+  padding: 3px 5px;
+  box-shadow: none !important;
+}
+.ggai-scenario-list {
+  gap: 6px;
+}
+.ggai-scenario-card {
+  gap: 6px;
+  padding: 10px;
+  border-radius: 16px;
+  box-shadow: none;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.ggai-scenario-card:hover {
+  transform: translateY(-1px);
+}
+.ggai-scenario-card.is-layout-cover .ggai-list-cover {
+  border-radius: 12px;
+}
+.ggai-scenario-card.is-layout-compact .ggai-card-body {
+  grid-template-columns: 52px minmax(0, 1fr) auto;
+  gap: 6px 10px;
+}
+.ggai-scenario-card.is-layout-compact .ggai-list-cover {
+  width: 52px;
+  height: 52px;
+  border-radius: 10px;
+}
+.ggai-card-title,
+.ggai-name {
+  line-height: 1.25;
+}
+.ggai-card-meta,
+.ggai-folder-hint {
+  margin-top: 3px;
+  line-height: 1.3;
+}
+.ggai-star,
+.ggai-session-fav,
+.ggai-fav-btn {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border: 0 !important;
+  border-radius: 6px;
+  background: transparent !important;
+  box-shadow: none !important;
+  line-height: 1;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+}
+.ggai-star:hover,
+.ggai-session-fav:hover,
+.ggai-fav-btn:hover {
+  background: transparent !important;
+  transform: scale(1.08);
+}
+.ggai-session-body-wrap {
+  padding: clamp(24px, 4vw, 32px);
+}
+.ggai-session-body {
+  max-width: var(--ggai-view-max-width, 780px);
+  margin: 0 auto;
+  font-size: calc(var(--font-text-size, 16px) * var(--ggai-view-font-scale, 1));
+  line-height: 1.75;
+}
+/* 보기 설정: 줄바꿈("\n") 자리의 줄 높이만 키워 문단 사이 간격을 만든다.
+   문단 안 줄의 기본 line-height(위 1.75)에는 영향을 주지 않는다
+   (session-view.ts renderBodySpans 가 매 "\n" 을 이 span 으로 감싼다).
+   vertical-align: top — 이 span 이 문단의 마지막 텍스트와 같은 줄을 공유하기 때문에,
+   기본(baseline) 정렬이면 늘어난 line-height 가 그 줄 위아래로 절반씩 나뉘어 텍스트가
+   샌드위치처럼 눌린다. top 정렬로 바꾸면 텍스트는 제자리에 남고 늘어난 여백은 줄
+   아래쪽으로만 붙어 "문단 아래 마진"처럼 보인다. */
+.ggai-para-gap {
+  line-height: var(--ggai-view-para-gap, 36px);
+  vertical-align: top;
+}
+/* 각 줄 첫 텍스트 span 의 첫 줄 들여쓰기 (빈 span 은 contenteditable 에서 사라져 실제 텍스트에 적용). */
+.ggai-para-indent {
+  padding-left: var(--ggai-view-indent, 0em);
+}
+.ggai-session-toolbar {
+  min-height: 58px;
+  gap: 12px;
+  padding: 8px 16px;
+}
+.ggai-toolbar-group-left,
+.ggai-toolbar-group-center,
+.ggai-toolbar-group-right {
+  gap: 4px;
+}
+.ggai-icon-btn {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 6px;
+  border-radius: 16px;
+  box-shadow: none !important;
+}
+.ggai-cta-btn {
+  min-height: 40px;
+  padding: 8px 28px;
+  border-radius: 20px;
+  box-shadow: none !important;
+  font-weight: var(--font-semibold, 600);
+}
+.ggai-sibling-indicator {
+  min-width: 38px;
+  padding: 0 4px;
+}
+
+.ggai-detail-tab {
+  padding: 10px 0;
+  font-weight: var(--font-medium, 500);
+}
+.ggai-detail-tab.is-active {
+  font-weight: var(--font-semibold, 600);
+}
+.ggai-detail-content {
+  padding: 12px;
+}
+.ggai-section-header {
+  padding: 4px 2px;
+  margin-bottom: 6px;
+}
+.ggai-section-title {
+  font-size: 11px;
+  font-weight: var(--font-semibold, 600);
+}
+.ggai-collapsible,
+.ggai-preset-section,
+.ggai-prompts-section {
+  margin-bottom: 16px;
+}
+.ggai-preset-grid,
+.ggai-model-row {
+  gap: 6px;
+}
+.ggai-preset-btn,
+.ggai-model-btn {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 4px 10px;
+  border-radius: 14px;
+  box-shadow: none !important;
+}
+.ggai-param-row {
+  margin-bottom: 12px;
+}
+.ggai-prompts-toolbar {
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.ggai-prompts-select {
+  min-height: 30px;
+  padding: 4px 8px;
+  border-radius: 12px;
+  box-shadow: none !important;
+}
+.ggai-prompts-tb-btn {
+  height: 28px;
+  min-width: 28px;
+  border-radius: 10px;
+  box-shadow: none !important;
+}
+.ggai-prompts-list {
+  gap: 4px;
+}
+.ggai-prompt-item {
+  border-radius: 12px;
+}
+.ggai-prompt-row {
+  min-height: 32px;
+  padding: 6px 8px;
+}
+.ggai-prompt-edit-panel {
+  padding: 8px 10px 10px;
+}
+.ggai-prompt-edit-del,
+.ggai-prompt-edit-input,
+.ggai-prompt-edit-select,
+.ggai-prompt-content-ta,
+.ggai-text-field-input,
+.ggai-form-input,
+.ggai-form-textarea,
+.ggai-form-select,
+.ggai-media-number-input,
+.ggai-select {
+  border-radius: 12px;
+  box-shadow: none !important;
+}
+.ggai-prompt-edit-input,
+.ggai-prompt-edit-select,
+.ggai-text-field-input,
+.ggai-form-input,
+.ggai-form-textarea,
+.ggai-form-select,
+.ggai-media-number-input,
+.ggai-select {
+  padding: 7px 10px;
+}
+.ggai-media-section {
+  padding-top: 12px;
+}
+.ggai-media-body {
+  gap: 8px;
+}
+.ggai-media-block {
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 14px;
+}
+.ggai-session-lorebooks,
+.ggai-lorebook-checklist {
+  border-radius: 12px;
+}
+
+.ggai-branch-mode-toggle,
+.ggai-branch-search,
+.ggai-bt-detail,
+.ggai-bt-detail-body,
+.ggai-bt-map-viewport,
+.ggai-bt-map-node {
+  border-radius: 12px;
+}
+.ggai-bt-node {
+  border-radius: 16px;
+}
+.ggai-bt-child-row,
+.ggai-favorite-row {
+  border-radius: 10px;
+}
+.ggai-entry-card,
+.ggai-lorebook-meta {
+  border-radius: 12px;
+}
+.ggai-entry-header {
+  min-height: 36px;
+  padding: 8px 10px;
+}
+.ggai-editor-header {
+  padding-bottom: 12px;
+}
+.ggai-lorebook-editor {
+  gap: 12px;
+  padding: 12px;
+}
+.ggai-ctx-summary,
+.ggai-ctx-msg {
+  border-radius: 12px;
+}
+.ggai-ctx-tag {
+  border-radius: 12px;
+}
+
+/* Product polish: strengthen hierarchy without changing exposed controls. */
+.ggai-scenario-card.is-layout-compact .ggai-card-body {
+  grid-template-columns: 62px minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 8px 10px;
+}
+.ggai-scenario-card.is-layout-compact .ggai-list-cover {
+  width: 62px;
+  height: 62px;
+  border-radius: 12px;
+  box-shadow: 0 0 0 1px var(--background-modifier-border);
+}
+.ggai-scenario-card.is-layout-cover .ggai-list-cover {
+  box-shadow: 0 0 0 1px var(--background-modifier-border);
+}
+.ggai-list-cover img,
+.ggai-editor-cover img {
+  display: block;
+}
+.ggai-name {
+  font-weight: var(--font-semibold, 600);
+  letter-spacing: -0.01em;
+}
+.ggai-star {
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
+  font-size: 18px;
+  opacity: 0.78;
+}
+.ggai-star:hover,
+.ggai-session-fav:hover,
+.ggai-fav-btn:hover {
+  opacity: 1;
+}
+.ggai-session-fav {
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  min-height: 22px;
+}
+
+.ggai-section-header.is-clickable {
+  min-height: 32px;
+  margin: 0;
+  padding: 6px 8px 6px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+  border-radius: 0;
+  transition: background 0.15s ease;
+}
+.ggai-section-header.is-clickable:hover {
+  background: var(--background-modifier-hover);
+}
+.ggai-section-header.is-clickable:focus-visible,
+.ggai-sidebar-tab:focus-visible,
+.ggai-detail-tab:focus-visible,
+.ggai-entry-name:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: -2px;
+}
+.ggai-section-header.is-clickable .ggai-section-title {
+  position: relative;
+  padding-left: 9px;
+  font-size: 13px;
+  font-weight: var(--font-bold, 700);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-normal);
+}
+/* 헤더임을 분명히 하는 좌측 액센트 바 */
+.ggai-section-header.is-clickable .ggai-section-title::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 0.95em;
+  border-radius: 2px;
+  background: var(--interactive-accent);
+}
+.ggai-section-header.is-clickable::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  margin: 0 4px 3px 8px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  opacity: 0.8;
+  transform: rotate(45deg);
+  transition: transform 0.15s ease, margin 0.15s ease;
+}
+.ggai-section-header.is-clickable[aria-expanded="false"]::after,
+.ggai-collapsible:has(> .is-collapsed) > .ggai-section-header.is-clickable::after {
+  margin-bottom: 0;
+  transform: rotate(-45deg);
+}
+.ggai-collapsible {
+  margin-bottom: 14px;
+}
+.ggai-collapsible > .ggai-section-header.is-clickable + *:not(.is-collapsed) {
+  padding: 10px 4px 2px 10px;
+}
+.ggai-media-panel {
+  margin-bottom: 10px;
+}
+.ggai-media-section {
+  padding-top: 10px;
+}
+
+.ggai-session-toolbar {
+  display: grid;
+  grid-template-columns:
+    minmax(0, 1fr)
+    minmax(68px, 0.76fr)
+    minmax(0, 1fr);
+  align-items: center;
+  gap: clamp(3px, 1%, 12px);
+  min-height: 72px;
+  padding: 4px 6px;
+  overflow: hidden;
+  border-top: 0;
+  background: transparent;
+}
+.ggai-toolbar-group-left,
+.ggai-toolbar-group-right {
+  display: grid;
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  height: 72px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.ggai-toolbar-group-left {
+  width: min(100%, 174px);
+  justify-self: start;
+  justify-content: stretch;
+}
+.ggai-toolbar-group-right {
+  width: min(100%, 174px);
+  justify-self: end;
+  justify-content: stretch;
+}
+.ggai-toolbar-group-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 72px;
+  min-width: 0;
+}
+.ggai-toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-height: 30px;
+  min-width: 0;
+  padding: 2px;
+  overflow: hidden;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 16px;
+  background: var(--background-primary);
+}
+.ggai-toolbar-row-bottom {
+  border-color: var(--background-modifier-border-hover, var(--background-modifier-border));
+  background: var(--background-secondary-alt, var(--background-secondary));
+}
+.ggai-toolbar-group-left .ggai-toolbar-row {
+  justify-self: start;
+  justify-content: flex-start;
+}
+.ggai-toolbar-group-right .ggai-toolbar-row {
+  justify-self: end;
+  justify-content: flex-end;
+}
+.ggai-toolbar-group-left .ggai-icon-btn,
+.ggai-toolbar-group-right .ggai-icon-btn {
+  flex: 1 1 0;
+  width: auto;
+  height: 30px;
+  min-width: 0;
+  min-height: 26px;
+  padding: 5px;
+  border: 0;
+  border-radius: 13px;
+  background: transparent;
+}
+.ggai-toolbar-group-left .ggai-icon-btn svg,
+.ggai-toolbar-group-right .ggai-icon-btn svg {
+  max-width: 100%;
+  max-height: 100%;
+}
+.ggai-toolbar-group-left .ggai-icon-btn:hover,
+.ggai-toolbar-group-right .ggai-icon-btn:hover {
+  background: var(--background-modifier-hover);
+}
+.ggai-sibling-indicator {
+  display: inline-flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+  min-width: 0;
+  padding: 0 1px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+.ggai-cta-btn {
+  box-sizing: border-box;
+  width: min(100%, 148px);
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border-radius: 22px;
+}
+.ggai-cta-btn svg {
+  width: 19px;
+  height: 19px;
+  max-width: 100%;
+}
+.ggai-toolbar-placeholder:disabled {
+  border: 0 !important;
+  background: var(--background-modifier-hover);
+  opacity: 0.24;
+}
+
+.ggai-action-bar .ggai-panel-open {
+  flex: 0 0 34px;
+  width: 34px;
+  min-width: 34px;
+  padding: 0;
+}
+.ggai-action-bar .ggai-btn svg {
+  width: 14px;
+  height: 14px;
+}
+.ggai-star svg,
+.ggai-session-fav svg,
+.ggai-fav-btn svg {
+  width: 16px;
+  height: 16px;
+}
+.ggai-star.is-favorited svg,
+.ggai-session-fav.is-favorited svg,
+.ggai-fav-btn.is-favorited svg,
+.ggai-bt-detail-fav.is-favorited svg {
+  fill: currentColor;
+}
+.ggai-bt-detail-close {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+}
+.ggai-bt-detail-close:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+.ggai-entry-toggle {
+  border: 0;
+  background: transparent;
+}
+.ggai-bt-map-star svg {
+  width: 12px;
+  height: 12px;
+  fill: currentColor;
+}
+.ggai-detail-tabs {
+  min-height: 42px;
+}
+.ggai-detail-tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 4px;
+  font-weight: var(--font-medium, 500);
+}
+.ggai-detail-tab.is-active {
+  font-weight: var(--font-bold, 700);
+}
+.ggai-detail-content {
+  padding: 0 0 32px;
+}
+.ggai-prompts-section > .ggai-section-header,
+.ggai-session-lorebooks > .ggai-section-title {
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.ggai-preset-grid,
+.ggai-model-row {
+  gap: 7px;
+}
+.ggai-preset-btn,
+.ggai-model-btn {
+  min-height: 28px;
+  padding: 5px 11px;
+  line-height: 1.15;
+}
+.ggai-model-btn.ggai-model-settings,
+.ggai-preset-btn.ggai-preset-add {
+  min-width: 28px;
+  padding: 5px;
+}
+.ggai-param-row {
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.ggai-param-label-row {
+  padding: 0 2px;
+}
+.ggai-prompts-list {
+  gap: 5px;
+}
+.ggai-prompt-item {
+  overflow: hidden;
+}
+.ggai-prompt-row {
+  min-height: 36px;
+  gap: 7px;
+  padding: 7px 9px;
+}
+.ggai-prompt-caret {
+  width: 20px;
+  height: 20px;
+}
+.ggai-media-block {
+  padding: 11px;
+}
+.ggai-text-field,
+.ggai-form-field {
+  gap: 5px;
+}
+.ggai-text-field + .ggai-text-field,
+.ggai-form-field + .ggai-form-field {
+  margin-top: 6px;
+}
+.ggai-scenario-lorebooks,
+.ggai-session-lorebooks {
+  gap: 8px;
+  padding: 10px;
+  border-style: solid;
+  border-radius: 12px;
+}
+.ggai-lorebook-checklist {
+  gap: 3px;
+  padding: 6px;
+}
+.ggai-lorebook-checklist-row {
+  min-height: 28px;
+  padding: 4px 6px;
+  border-radius: 8px;
+}
+.ggai-scenario-form-actions {
+  flex-wrap: wrap;
+}
+.ggai-scenario-form-actions .ggai-btn {
+  min-height: 30px;
+}
+
+@media (max-width: 720px) {
+  .ggai-session-toolbar {
+    grid-template-columns:
+      minmax(0, 1fr)
+      minmax(54px, 0.7fr)
+      minmax(0, 1fr);
+    gap: 2px;
+    min-height: 68px;
+    padding: 3px 4px;
+  }
+  .ggai-toolbar-group-left,
+  .ggai-toolbar-group-right,
+  .ggai-toolbar-group-center {
+    height: 68px;
+  }
+  .ggai-toolbar-group-left .ggai-icon-btn,
+  .ggai-toolbar-group-right .ggai-icon-btn {
+    flex-basis: 0;
+    width: 26px;
+    height: 26px;
+    min-width: 0;
+    min-height: 26px;
+    padding: 4px;
+  }
+  .ggai-toolbar-row {
+    gap: 0;
+    padding: 1px;
+  }
+  .ggai-sibling-indicator {
+    flex-basis: 0;
+    min-width: 0;
+    padding-inline: 1px;
+    font-size: 9px;
+  }
+}
+
+/* 모바일: 조작 패널을 시스템 내비게이션 바(홈버튼 바) 위로 자동으로 띄운다. PC 미적용.
+   반드시 env(safe-area-inset-bottom) 만 쓴다 — 이 값은 기기의 순수 안전영역(홈버튼 바)이라
+   소프트키보드 높이를 절대 포함하지 않는다. 옵시디언이 주입하는 --safe-area-inset-bottom
+   변수는 키보드가 뜨면 키보드 높이까지 커져, 옵시디언 자체 키보드 회피와 겹쳐 조작 패널이
+   키보드만큼 이중으로 떠 버린다(회귀 금지 — var(--safe-area-inset-bottom) 다시 넣지 말 것).
+   여기에 플러그인 설정 여백(--ggai-toolbar-bottom-gap, main.ts 가 body 에 주입)만 더한다.
+   패널 모드/일반 모드 모두 세션 툴바가 화면 맨 아래에 붙으므로 구분 없이 적용한다. */
+body.is-mobile .ggai-session-toolbar {
+  padding-bottom: calc(
+    3px + var(--ggai-toolbar-bottom-gap, 0px) + env(safe-area-inset-bottom, 0px)
+  );
+}
+
+/* ── 우측 디테일 섹션 = 아코디언 박스 ─────────────────────────────
+   항목명(섹션 제목)을 테두리 박스로 감싸고, 펼치면 같은 박스가 본문까지
+   늘어나 헤더+내용이 한 덩어리로 보이게 한다. 열고 닫기를 직관적으로. */
+.ggai-detail .ggai-collapsible,
+.ggai-detail .ggai-prompts-section {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-primary);
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+.ggai-detail .ggai-collapsible > .ggai-section-header.is-clickable,
+.ggai-detail .ggai-prompts-section > .ggai-section-header.is-clickable {
+  margin: 0;
+  padding: 8px 10px;
+  border-bottom: 0;
+  border-radius: 0;
+  background: transparent;
+}
+/* 펼친 본문은 박스 안쪽 여백으로. */
+.ggai-detail
+  .ggai-collapsible
+  > .ggai-section-header.is-clickable
+  + *:not(.is-collapsed),
+.ggai-detail
+  .ggai-prompts-section
+  > .ggai-section-header.is-clickable
+  + *:not(.is-collapsed) {
+  padding: 10px;
+}
+
+/* ── Stella 대시보드 (로비) ────────────────────────────────────────
+   패널의 대문. 색/배경은 전부 테마 변수에 맡기고, 움직임(확대/떠오름)으로만
+   몰입감을 준다. 상단 탭(홈/시나리오/유저/로어북) + 페이지 구조,
+   카드 그리드는 auto-fill 로 패널 폭에 자동 반응 (모바일 포함). */
+.ggai-stella-dashboard {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* 상단 탭 바 — 스크롤해도 상단 고정 */
+.ggai-dash-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--background-primary);
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding: 6px 16px 0;
+}
+.ggai-dash-topbar-inner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 1080px;
+  margin: 0 auto;
+}
+.ggai-dash-tabs {
+  display: flex;
+  gap: 2px;
+  flex: 1 1 auto;
+  overflow-x: auto;
+}
+.ggai-dash-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px 9px;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition: color 120ms ease;
+}
+.ggai-dash-tab:hover {
+  color: var(--text-normal);
+}
+.ggai-dash-tab.is-active {
+  color: var(--text-normal);
+  border-bottom-color: var(--interactive-accent);
+  font-weight: var(--font-semibold, 600);
+}
+.ggai-dash-tab-icon {
+  display: inline-flex;
+}
+.ggai-dash-tab-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.ggai-dash-tab-home {
+  padding-top: 6px;
+  padding-bottom: 7px;
+}
+.ggai-dash-tab-logo {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  overflow: hidden;
+}
+.ggai-dash-tab-logo .comet {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 48px;
+  height: 22px;
+  pointer-events: none;
+  animation: ggai-comet-fall 3.2s ease-in infinite;
+}
+.ggai-dash-tab-logo .comet .star {
+  position: absolute;
+  top: 0;
+  right: 3px;
+  width: 8px;
+  height: 8px;
+  background: linear-gradient(180deg, #fff, #6fe3ff 55%, #2fb6e8);
+  clip-path: polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%);
+  filter: drop-shadow(0 0 4px rgba(111, 227, 255, 0.9));
+}
+.ggai-dash-tab-logo .comet .trail {
+  position: absolute;
+  top: 9px;
+  right: 4px;
+  width: 38px;
+  height: 1.5px;
+  background: linear-gradient(90deg, rgba(111, 227, 255, 0) 0%, rgba(111, 227, 255, 0.95) 100%);
+  border-radius: 3px;
+  filter: blur(0.4px);
+  transform-origin: right center;
+  transform: rotate(34deg);
+}
+.ggai-dash-tab-logo .comet .trail::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 50%;
+  width: 3px;
+  height: 3px;
+  transform: translate(50%, -50%);
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 4px #6fe3ff;
+}
+@keyframes ggai-comet-fall {
+  0% { transform: translate(-6px, -4px); opacity: 0; }
+  14% { opacity: 1; }
+  62% { transform: translate(58px, 12px); opacity: 1; }
+  80% { opacity: 0; transform: translate(64px, 14px); }
+  100% { transform: translate(64px, 14px); opacity: 0; }
+}
+.ggai-dash-tab-holo2 {
+  position: relative;
+  text-align: center;
+  line-height: 1;
+  z-index: 2;
+}
+.ggai-dash-tab-holo2 .a {
+  display: block;
+  font-weight: 800;
+  font-size: 15px;
+  letter-spacing: 0.06em;
+  background: linear-gradient(90deg, #ff8fb1, #ffc451, #6fe3ff, #8b7fff, #ff8fb1);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  filter: drop-shadow(0 0 6px rgba(139, 127, 255, 0.35));
+  animation: ggai-holo2-flow 5s linear infinite, ggai-holo2-hue 6s linear infinite;
+}
+.ggai-dash-tab-holo2 .b {
+  display: block;
+  font-weight: 600;
+  font-size: 7px;
+  letter-spacing: 0.4em;
+  padding-left: 0.4em;
+  margin-top: 2px;
+  background: linear-gradient(90deg, #8b7fff, #6fe3ff, #ff8fb1, #8b7fff);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: ggai-holo2-flow 5s linear infinite reverse;
+  opacity: 0.85;
+}
+@keyframes ggai-holo2-flow {
+  0% { background-position: 0% 0; }
+  100% { background-position: 200% 0; }
+}
+@keyframes ggai-holo2-hue {
+  0% { filter: drop-shadow(0 0 6px rgba(139, 127, 255, 0.35)) hue-rotate(0deg); }
+  100% { filter: drop-shadow(0 0 6px rgba(139, 127, 255, 0.35)) hue-rotate(360deg); }
+}
+
+.ggai-dash-page {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 16px 20px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.ggai-dash-home {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+/* 탭 페이지 툴바 — 검색/정렬/생성/임포트 */
+.ggai-dash-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ggai-dash-search {
+  flex: 1 1 200px;
+  min-width: 140px;
+}
+.ggai-dash-sort {
+  flex: 0 0 auto;
+}
+.ggai-dash-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.ggai-dash-tool-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* 태그 칩 필터 */
+.ggai-dash-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.ggai-dash-chips.is-hidden {
+  display: none;
+}
+.ggai-dash-gallery-chips {
+  margin-bottom: 10px;
+}
+.ggai-dash-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--interactive-normal);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.ggai-dash-chip:hover {
+  background: var(--interactive-hover);
+  color: var(--text-normal);
+}
+.ggai-dash-chip.is-selected {
+  background: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+  color: var(--text-on-accent, #fff);
+}
+.ggai-dash-chip-count {
+  opacity: 0.7;
+  font-size: 0.9em;
+}
+
+.ggai-dash-section {
+  animation: ggai-dash-in 320ms ease both;
+}
+.ggai-dash-section:nth-child(2) { animation-delay: 50ms; }
+.ggai-dash-section:nth-child(3) { animation-delay: 100ms; }
+.ggai-dash-section:nth-child(4) { animation-delay: 150ms; }
+@keyframes ggai-dash-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.ggai-dash-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.ggai-dash-section-title {
+  flex: 1 1 auto;
+  font-size: var(--font-ui-medium);
+  font-weight: var(--font-semibold, 600);
+  color: var(--text-normal);
+}
+.ggai-dash-more-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: var(--radius-s, 4px);
+}
+.ggai-dash-more-btn:hover {
+  color: var(--text-accent);
+  background: var(--interactive-hover);
+}
+.ggai-dash-more-icon {
+  display: inline-flex;
+}
+.ggai-dash-more-icon svg {
+  width: 13px;
+  height: 13px;
+}
+.ggai-dash-empty {
+  font-size: var(--font-ui-small);
+  color: var(--text-faint);
+  padding: 14px 4px;
+}
+
+/* 홈 가로 스트립 (추천/시나리오 미리보기) */
+.ggai-dash-hstrip {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding: 4px 2px 10px;
+  scroll-snap-type: x proximity;
+}
+.ggai-dash-hstrip .ggai-dash-scenario-card.is-compact {
+  flex: 0 0 auto;
+  width: 136px;
+  scroll-snap-align: start;
+}
+
+/* 추천 이유 배지 */
+.ggai-dash-scenario-card {
+  position: relative;
+}
+.ggai-dash-reason-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  max-width: calc(100% - 12px);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent, #fff);
+  font-size: var(--font-ui-smaller);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+/* 추천 카드에선 hover 액션이 배지와 겹치지 않게 숨김 */
+.ggai-dash-hstrip .is-compact .ggai-dash-card-actions {
+  display: none;
+}
+
+/* 공용 카드 상호작용 — 살짝 떠오르며 커지고, 누르면 눌린다. */
+.ggai-dash-hero-card,
+.ggai-dash-scenario-card,
+.ggai-dash-user,
+.ggai-dash-lore-card {
+  cursor: pointer;
+  transition:
+    transform 180ms cubic-bezier(0.2, 0.8, 0.3, 1.1),
+    box-shadow 180ms ease;
+}
+.ggai-dash-hero-card:hover,
+.ggai-dash-hero-card:focus-visible,
+.ggai-dash-scenario-card:hover,
+.ggai-dash-scenario-card:focus-visible,
+.ggai-dash-lore-card:hover,
+.ggai-dash-lore-card:focus-visible {
+  transform: translateY(-3px) scale(1.02);
+  box-shadow: var(--shadow-s, 0 4px 14px rgba(0, 0, 0, 0.25));
+}
+.ggai-dash-hero-card:active,
+.ggai-dash-scenario-card:active,
+.ggai-dash-user:active,
+.ggai-dash-lore-card:active {
+  transform: scale(0.985);
+}
+.ggai-dash-hero-card:focus-visible,
+.ggai-dash-scenario-card:focus-visible,
+.ggai-dash-user:focus-visible,
+.ggai-dash-lore-card:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ggai-dash-section,
+  .ggai-dash-hero-card,
+  .ggai-dash-scenario-card,
+  .ggai-dash-user,
+  .ggai-dash-lore-card {
+    animation: none;
+    transition: none;
+    transform: none !important;
+  }
+  .ggai-dash-tab-logo .comet {
+    display: none;
+  }
+  .ggai-dash-tab-holo2 .a,
+  .ggai-dash-tab-holo2 .b {
+    animation: none;
+  }
+}
+
+/* 썸네일 위 텍스트 가독성용 하단 그라데이션. */
+.ggai-dash-card-shade {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    to top,
+    rgba(0, 0, 0, 0.72) 0%,
+    rgba(0, 0, 0, 0.25) 38%,
+    transparent 62%
+  );
+  pointer-events: none;
+}
+
+/* 홈 상단 한 줄 — 활성 페르소나 + [임포트][새 시나리오] */
+.ggai-dash-home-topline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.ggai-dash-home-persona {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 6px;
+  border-radius: 12px;
+  cursor: pointer;
+}
+.ggai-dash-home-persona:hover {
+  background: var(--background-modifier-hover);
+}
+.ggai-dash-home-avatar {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 2px solid var(--interactive-accent);
+  background: var(--background-secondary);
+}
+.ggai-dash-home-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center top;
+}
+.ggai-dash-home-persona-meta {
+  min-width: 0;
+}
+.ggai-dash-home-persona-label {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+}
+.ggai-dash-home-persona-name {
+  font-weight: var(--font-semibold, 600);
+  color: var(--text-normal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-dash-home-actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+/* 홈 "최근 삽화" 스트립 칸 */
+.ggai-dash-home-illust {
+  flex: 0 0 auto;
+  width: 132px;
+  height: 132px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  cursor: zoom-in;
+  scroll-snap-align: start;
+}
+.ggai-dash-home-illust img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* 홈 "내 서재" 요약 카드 */
+.ggai-dash-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
+}
+.ggai-dash-stat {
+  position: relative;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+.ggai-dash-stat:hover {
+  background: var(--background-modifier-hover);
+  border-color: var(--background-modifier-border-hover, var(--interactive-accent));
+}
+.ggai-dash-stat:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+.ggai-dash-stat-n {
+  font-size: 22px;
+  font-weight: var(--font-semibold, 600);
+  color: var(--text-normal);
+}
+.ggai-dash-stat-l {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.ggai-dash-stat-go {
+  position: absolute;
+  top: 12px;
+  right: 10px;
+  display: inline-flex;
+  color: var(--text-faint);
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+.ggai-dash-stat:hover .ggai-dash-stat-go {
+  opacity: 1;
+}
+.ggai-dash-stat-go svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* 홈 AI 연결 안내 배너 */
+.ggai-dash-ai-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-left: 3px solid var(--interactive-accent);
+  border-radius: 0 12px 12px 0;
+}
+.ggai-dash-ai-icon {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  border-radius: 10px;
+  background: var(--background-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--interactive-accent);
+}
+.ggai-dash-ai-icon svg {
+  width: 20px;
+  height: 20px;
+}
+.ggai-dash-ai-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ggai-dash-ai-title {
+  font-weight: var(--font-semibold, 600);
+  color: var(--text-normal);
+}
+.ggai-dash-ai-desc {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* 홈 첫 설치 시작 가이드 (3단계) */
+.ggai-dash-onboard {
+  display: flex;
+  flex-direction: column;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.ggai-dash-onboard-step {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.ggai-dash-onboard-step:last-child {
+  border-bottom: none;
+}
+.ggai-dash-onboard-n {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  border: 1.5px solid var(--background-modifier-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+.ggai-dash-onboard-n svg {
+  width: 15px;
+  height: 15px;
+}
+.ggai-dash-onboard-step.is-done .ggai-dash-onboard-n {
+  background: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+  color: var(--text-on-accent, #fff);
+}
+.ggai-dash-onboard-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ggai-dash-onboard-title {
+  color: var(--text-normal);
+}
+.ggai-dash-onboard-step.is-done .ggai-dash-onboard-title {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+.ggai-dash-onboard-desc {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+  margin-top: 1px;
+}
+.ggai-dash-onboard-go {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.ggai-dash-onboard-go:hover {
+  color: var(--text-normal);
+  border-color: var(--interactive-accent);
+}
+.ggai-dash-onboard-go svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* 이어서 하기 — 히어로 카드 (최근 세션 2장) */
+.ggai-dash-hero-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 14px;
+}
+.ggai-dash-hero-card {
+  position: relative;
+  min-width: 0;
+  height: 240px;
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+}
+.ggai-dash-hero-card.is-active {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+.ggai-dash-hero-bg {
+  position: absolute;
+  inset: 0;
+}
+.ggai-dash-hero-bg img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center top;
+}
+/* 표지 오버레이 — 페르소나 + (삽화 배경일 때) 시나리오 표지, 좌상단에 작게 나란히. */
+.ggai-dash-hero-covers {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  gap: 8px;
+  z-index: 1;
+}
+.ggai-dash-hero-cover {
+  width: 50px;
+  height: 66px;
+  border-radius: 9px;
+  overflow: hidden;
+  border: 2px solid rgba(255, 255, 255, 0.82);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  background: var(--background-secondary);
+}
+.ggai-dash-hero-cover.is-persona {
+  border-color: var(--interactive-accent);
+}
+.ggai-dash-hero-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center top;
+}
+.ggai-dash-hero-cover .ggai-thumb-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ggai-dash-hero-info {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 12px 14px;
+  z-index: 1;
+}
+.ggai-dash-hero-session {
+  font-size: var(--font-ui-large, 1.05em);
+  font-weight: var(--font-bold, 700);
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-dash-hero-meta {
+  font-size: var(--font-ui-smaller);
+  color: rgba(255, 255, 255, 0.8);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 세션 탭 — 썸네일 있는 가로 카드 목록 */
+.ggai-dash-session-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ggai-dash-session-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+.ggai-dash-session-card:hover {
+  background: var(--background-modifier-hover);
+}
+.ggai-dash-session-card.is-active {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+.ggai-dash-session-card-thumb {
+  flex: 0 0 auto;
+  width: 52px;
+  height: 68px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+}
+.ggai-dash-session-card-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center top;
+}
+.ggai-dash-session-card-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ggai-dash-session-card-scenario {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-dash-session-card-name {
+  font-size: var(--font-ui-medium);
+  font-weight: var(--font-semibold, 600);
+  color: var(--text-normal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-dash-session-card-meta {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+}
+.ggai-dash-session-card-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 2px;
+}
+.ggai-dash-session-card-del:hover {
+  color: var(--text-error);
+}
+.ggai-dash-session-more {
+  margin: 12px auto 0;
+  display: block;
+}
+
+/* 갤러리 탭 */
+.ggai-dash-gallery-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.ggai-dash-gallery-count {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+.ggai-dash-gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+.ggai-dash-gallery-cell {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+}
+.ggai-dash-gallery-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  cursor: pointer;
+  display: block;
+}
+.ggai-dash-gallery-fav {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 7px;
+  border: none;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+.ggai-dash-gallery-cell:hover .ggai-dash-gallery-fav,
+.ggai-dash-gallery-fav.is-favorited {
+  opacity: 1;
+}
+.ggai-dash-gallery-fav.is-favorited {
+  color: var(--text-accent);
+}
+.ggai-dash-gallery-fav.is-favorited svg {
+  fill: currentColor;
+}
+.ggai-dash-gallery-fav svg {
+  width: 15px;
+  height: 15px;
+}
+.ggai-dash-gallery-cell-actions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+.ggai-dash-gallery-cell:hover .ggai-dash-gallery-cell-actions,
+.ggai-dash-gallery-cell:focus-within .ggai-dash-gallery-cell-actions {
+  opacity: 1;
+}
+.ggai-dash-gallery-cell-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 7px;
+  border: none;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  cursor: pointer;
+}
+.ggai-dash-gallery-cell-btn:hover {
+  background: rgba(0, 0, 0, 0.82);
+}
+.ggai-dash-gallery-cell-btn.is-danger:hover {
+  background: var(--text-error, #c0392b);
+}
+.ggai-dash-gallery-cell-label {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 10px 8px 6px;
+  font-size: var(--font-ui-smaller);
+  color: #fff;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.72), transparent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+/* 시나리오 — 포스터 그리드 */
+.ggai-dash-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 14px;
+}
+.ggai-dash-scenario-card {
+  border-radius: 12px;
+}
+.ggai-dash-poster {
+  position: relative;
+  aspect-ratio: 3 / 4;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ggai-dash-poster img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center top;
+}
+.ggai-dash-poster-text {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 8px 10px;
+}
+.ggai-dash-poster-name {
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold, 600);
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-dash-poster-meta {
+  font-size: var(--font-ui-smaller);
+  color: rgba(255, 255, 255, 0.75);
+}
+.ggai-dash-card-actions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+.ggai-dash-scenario-card:hover .ggai-dash-card-actions,
+.ggai-dash-scenario-card:focus-within .ggai-dash-card-actions,
+body.is-mobile .ggai-dash-card-actions {
+  opacity: 1;
+}
+.ggai-dash-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  cursor: pointer;
+  padding: 0;
+}
+.ggai-dash-icon-btn:hover {
+  background: rgba(0, 0, 0, 0.75);
+}
+.ggai-dash-icon-btn svg {
+  width: 14px;
+  height: 14px;
+}
+.ggai-dash-icon-btn.is-favorited {
+  color: var(--text-accent);
+  opacity: 1;
+}
+/* 즐겨찾기된 카드는 hover 없이도 별이 보인다. */
+.ggai-dash-scenario-card .ggai-dash-card-actions:has(.is-favorited) {
+  opacity: 1;
+}
+
+/* 유저 탭 — 카드 그리드 */
+.ggai-dash-user-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 14px;
+}
+/* 폴라로이드형 페르소나 카드 — 큰 사진 + 아래 캡션(이름). 프레임 여백이 폴라로이드 느낌. */
+.ggai-dash-user-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 8px 4px;
+  border-radius: 10px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  cursor: pointer;
+  transition:
+    transform 180ms cubic-bezier(0.2, 0.8, 0.3, 1.1),
+    box-shadow 180ms ease,
+    border-color 140ms ease;
+}
+.ggai-dash-user-card:hover,
+.ggai-dash-user-card:focus-visible {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-s, 0 4px 14px rgba(0, 0, 0, 0.25));
+}
+.ggai-dash-user-card:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+.ggai-dash-user-card.is-active {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+/* 페르소나 탭 카드의 아바타는 원형이 아니라 큰 정사각 사진 (폴라로이드). */
+.ggai-dash-user-card .ggai-dash-avatar {
+  position: relative;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1 / 1;
+  border-radius: 6px;
+  border: none;
+  flex: 0 0 auto;
+}
+.ggai-dash-user-card .ggai-dash-avatar img {
+  object-position: center top;
+}
+.ggai-dash-user-card-text {
+  padding: 8px 2px 4px;
+  min-width: 0;
+}
+.ggai-dash-user-card-name {
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold, 600);
+  color: var(--text-normal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 활성 배지 — 사진 좌상단에 얹어 이름과 겹치지 않아 잘리지 않는다. */
+.ggai-dash-active-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 1;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent, #fff);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-semibold, 600);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+/* 편집 버튼 — 사진 우상단 오버레이. 평소 흐리게, hover 시 또렷하게. */
+.ggai-dash-user-edit {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 1;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  border-radius: 50%;
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+.ggai-dash-user-card:hover .ggai-dash-user-edit,
+.ggai-dash-user-card:focus-within .ggai-dash-user-edit,
+body.is-mobile .ggai-dash-user-edit {
+  opacity: 1;
+}
+.ggai-dash-user-edit:hover {
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+}
+.ggai-dash-user-card-desc {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+}
+/* 카드 위 일반 배경용 아이콘 버튼 (오버레이용 검정 원형과 구분) */
+.ggai-dash-icon-btn.is-plain {
+  background: transparent;
+  color: var(--text-muted);
+}
+.ggai-dash-icon-btn.is-plain:hover {
+  background: var(--interactive-hover);
+  color: var(--text-normal);
+}
+
+/* 페르소나 아바타 (페르소나 탭 카드에서 사용) */
+.ggai-dash-avatar {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 2px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    transform 180ms cubic-bezier(0.2, 0.8, 0.3, 1.1),
+    border-color 140ms ease,
+    box-shadow 180ms ease;
+}
+.ggai-dash-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* 로어북 — 컴팩트 카드 그리드 */
+.ggai-dash-lore-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px;
+}
+.ggai-dash-lore-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+}
+.ggai-dash-lore-thumb {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--background-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ggai-dash-lore-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.ggai-dash-lore-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ggai-dash-lore-name {
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold, 600);
+  color: var(--text-normal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-dash-lore-meta {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+}
+
+/* 시나리오 상세 (세션 관리) 페이지 */
+.ggai-dash-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+/* 대시보드 내부 편집 페이지(페르소나 등) — 상세 페이지처럼 자연 흐름 + 페이지 스크롤. */
+.ggai-dash-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.ggai-dash-editor-host {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ggai-dash-back-btn {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: var(--radius-s, 4px);
+}
+.ggai-dash-back-btn:hover {
+  color: var(--text-normal);
+  background: var(--interactive-hover);
+}
+.ggai-dash-back-icon {
+  display: inline-flex;
+}
+.ggai-dash-back-icon svg {
+  width: 15px;
+  height: 15px;
+}
+.ggai-dash-detail-header {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+.ggai-dash-detail-cover {
+  flex: 0 0 auto;
+  width: 120px;
+  aspect-ratio: 3 / 4;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ggai-dash-detail-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center top;
+}
+.ggai-dash-detail-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ggai-dash-detail-name {
+  font-size: var(--font-ui-large, 1.1em);
+  font-weight: var(--font-semibold, 600);
+  color: var(--text-normal);
+}
+.ggai-dash-detail-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.ggai-dash-detail-desc {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  white-space: pre-wrap;
+}
+.ggai-dash-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+.ggai-dash-detail-sessions-title {
+  font-size: var(--font-ui-medium);
+  font-weight: var(--font-semibold, 600);
+  color: var(--text-normal);
+}
+.ggai-dash-session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ggai-dash-session-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.ggai-dash-session-row:hover {
+  background: var(--interactive-hover);
+}
+.ggai-dash-session-row:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+.ggai-dash-session-row.is-active {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+.ggai-dash-session-fav {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: var(--text-accent);
+  padding: 2px;
+  cursor: pointer;
+  opacity: 0.5;
+}
+.ggai-dash-session-fav.is-favorited {
+  opacity: 1;
+}
+.ggai-dash-session-fav svg {
+  width: 15px;
+  height: 15px;
+}
+.ggai-dash-session-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ggai-dash-session-name {
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold, 600);
+  color: var(--text-normal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-dash-session-row.is-active .ggai-dash-session-name {
+  color: var(--text-accent);
+}
+.ggai-dash-session-meta {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+}
+
+/* ── Stella 편집기 상단 네비게이션 바 (로비 셸) ─────────────────── */
+.ggai-stella-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 2px 10px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.ggai-stella-nav-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--radius-s, 4px);
+}
+.ggai-stella-nav-back:hover {
+  color: var(--text-normal);
+  background: var(--interactive-hover);
+}
+.ggai-stella-nav-back svg {
+  width: 15px;
+  height: 15px;
+}
+.ggai-stella-nav-chips {
+  display: flex;
+  gap: 2px;
+  flex-wrap: wrap;
+}
+.ggai-stella-nav-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+  padding: 4px 9px;
+  border-radius: 999px;
+}
+.ggai-stella-nav-chip:hover {
+  color: var(--text-normal);
+  background: var(--interactive-hover);
+}
+.ggai-stella-nav-chip-icon {
+  display: inline-flex;
+}
+.ggai-stella-nav-chip-icon svg {
+  width: 13px;
+  height: 13px;
+}
+/* ── 인라인 분기 (노드 · 가지치기) — BranchSection 재사용 ───────── */
+.ggai-dash-branch {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  /* 노드 맵이 이중 스크롤 없이 남은 높이를 최대한 차지하도록 대시보드 분기 페이지를
+     화면 높이에 맞춘다(상단 탭바+헤더 대략). 내부에선 맵 뷰포트만 스크롤한다. */
+  height: calc(100vh - 150px);
+  min-height: 360px;
+}
+.ggai-dash-branch-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.ggai-dash-branch-title {
+  font-size: var(--font-ui-medium);
+  font-weight: var(--font-semibold, 600);
+  color: var(--text-normal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-dash-branch-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+.ggai-dash-branch-host > .ggai-branch-pane {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* 세션 일괄 선택 (상세 페이지) */
+.ggai-dash-detail-sessions-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--background-modifier-border);
+  padding-top: 12px;
+}
+.ggai-dash-select-controls {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+.ggai-dash-session-check {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  padding: 2px;
+  cursor: pointer;
+  display: inline-flex;
+}
+.ggai-dash-session-check.is-checked {
+  color: var(--interactive-accent);
+}
+.ggai-dash-session-check svg {
+  width: 17px;
+  height: 17px;
+}
+
+/* 모바일 패널 모드는 시스템 내비 바 위까지 내려가므로 하단 safe-area 보정. */
+body.is-mobile .ggai-dash-page {
+  padding-bottom: calc(
+    40px + max(env(safe-area-inset-bottom, 0px), var(--safe-area-inset-bottom, 0px))
+  );
+}
+
+/* 좁은 패널/모바일 — 카드 축소, 여백 압축. */
+@media (max-width: 600px) {
+  .ggai-dash-page {
+    padding: 12px 12px 40px;
+  }
+  .ggai-dash-home {
+    gap: 22px;
+  }
+  .ggai-dash-topbar {
+    padding: 4px 8px 0;
+  }
+  .ggai-dash-tab {
+    padding: 7px 10px 8px;
+  }
+  .ggai-dash-hero-row {
+    grid-template-columns: 1fr;
+  }
+  .ggai-dash-hero-card {
+    height: 200px;
+  }
+  .ggai-dash-grid {
+    grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
+    gap: 10px;
+  }
+  .ggai-dash-hstrip .ggai-dash-scenario-card.is-compact {
+    width: 116px;
+  }
+  .ggai-dash-lore-grid,
+  .ggai-dash-user-grid {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  }
+}
