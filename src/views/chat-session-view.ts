@@ -1943,10 +1943,7 @@ export class ChatSessionView extends ItemView {
     btn.empty();
     setIcon(btn, this.generation ? "square" : "send");
     btn.toggleClass("is-generating", this.generation != null);
-    btn.setAttr(
-      "aria-label",
-      this.generation ? "생성 중단" : "전송 (빈 입력 = AI가 이어서 말함)"
-    );
+    btn.setAttr("aria-label", this.generation ? "생성 중단" : "전송");
   }
 
   private autosizeInput(): void {
