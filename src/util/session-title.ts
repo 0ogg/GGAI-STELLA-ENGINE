@@ -38,11 +38,22 @@ export async function requestSessionTitle(
     "Create one concise Korean session title based on the provided story excerpt. " +
     "Avoid spoilers beyond the provided text, and output only the title. " +
     "No quotes or decorative punctuation. Keep it under 24 Korean characters if possible.";
-  const paramsOverride = {
-    ...buildParamsOverride(input.params, input.profile.kind),
-    ...(input.profile.kind === "text" ? { max_tokens: 32 } : { maxTokens: 32 }),
-    temperature: 0.4,
-  };
+  // 추론 모델은 사고(thinking) 토큰이 출력 예산을 함께 소모한다. 제목 자체는 짧지만
+  // 예전의 32 토큰 캡은 사고할 여지를 남기지 않아 추론 모델이 제목을 비운 채 돌려주고,
+  // 그러면 기본 날짜 이름으로 되돌아갔다. 사고할 여유를 넉넉히 주고 사고량은 낮게 요청한다.
+  const paramsOverride =
+    input.profile.kind === "text"
+      ? {
+          ...buildParamsOverride(input.params, input.profile.kind),
+          max_tokens: 64,
+          temperature: 0.4,
+        }
+      : {
+          ...buildParamsOverride(input.params, input.profile.kind),
+          maxTokens: 4096,
+          reasoningEffort: "low" as const,
+          temperature: 0.4,
+        };
 
   const raw =
     input.profile.kind === "text"
@@ -51,6 +62,7 @@ export async function requestSessionTitle(
             profileId: input.profile.id,
             prompt: `${instruction}\n\nCharacter: ${input.scenarioName}\n\nStory:\n${input.story}\n\nTitle:`,
             paramsOverride,
+            label: "제목 생성",
           })
         ).text
       : (
@@ -64,6 +76,7 @@ export async function requestSessionTitle(
               },
             ],
             paramsOverride,
+            label: "제목 생성",
           })
         ).text;
 

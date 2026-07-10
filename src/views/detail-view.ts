@@ -4,7 +4,6 @@ import type StellaEnginePlugin from "../main";
 import type { ActiveSettings } from "../types/preset";
 import { BranchSection } from "./detail/branch-section";
 import { ExpandSection, type ExpandSectionUiState } from "./detail/expand-section";
-import { MediaSection, type MediaSectionUiState } from "./detail/media-section";
 import { ModelSection } from "./detail/model-section";
 import { ParamsSection } from "./detail/params-section";
 import { PresetSection } from "./detail/preset-section";
@@ -16,7 +15,7 @@ import {
   ScenarioSection,
   type ScenarioSectionUiState,
 } from "./detail/scenario-section";
-import { SessionView } from "./session-view";
+import { isSessionHostView } from "./session-host";
 
 /**
  * DetailView — 우측 사이드바 편집기.
@@ -36,7 +35,6 @@ interface BasicTabUiState {
   modelCollapsed?: boolean;
   paramsCollapsed?: boolean;
   prompts?: Partial<PromptsSectionUiState>;
-  media?: Partial<MediaSectionUiState>;
 }
 
 export class DetailView extends ItemView {
@@ -56,7 +54,6 @@ export class DetailView extends ItemView {
   private modelSection: ModelSection | null = null;
   private paramsSection: ParamsSection | null = null;
   private promptsSection: PromptsSection | null = null;
-  private mediaSection: MediaSection | null = null;
   private scenarioSection: ScenarioSection | null = null;
   private branchSection: BranchSection | null = null;
   private expandSection: ExpandSection | null = null;
@@ -127,10 +124,10 @@ export class DetailView extends ItemView {
 
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
-        // detail view 자신이나 사이드바 등 SessionView 가 아닌 leaf 가 active 되어도
-        // 마지막 SessionView 를 유지한다. 단, 모든 SessionView leaf 가 닫혔으면 null.
+        // detail view 자신이나 사이드바 등 세션 뷰가 아닌 leaf 가 active 되어도
+        // 마지막 세션 뷰를 유지한다. 단, 모든 세션 뷰 leaf 가 닫혔으면 null.
         let next: string | null = this.activeSessionFile;
-        if (leaf?.view instanceof SessionView) {
+        if (isSessionHostView(leaf?.view)) {
           next = leaf.view.getSessionFile();
         } else {
           next = this.plugin.getActiveOrLastSessionFile();
@@ -212,6 +209,14 @@ export class DetailView extends ItemView {
         }
       })
     );
+    // 세션 목록 변경 (다음화 생성/이름변경 등) → 시나리오 탭 시리즈 화 목록만 부분 갱신.
+    this.registerEvent(
+      this.plugin.store.on("sessions-changed", () => {
+        if (this.activeTab === "scenario") {
+          void this.scenarioSection?.renderSeriesArea();
+        }
+      })
+    );
     // 로어북 목록 변경 → 시나리오 탭의 로어북 영역만 부분 갱신.
     this.registerEvent(
       this.plugin.store.on("lorebooks-changed", () => {
@@ -222,7 +227,6 @@ export class DetailView extends ItemView {
     this.registerEvent(
       this.plugin.ai.on("profiles-changed", () => {
       this.modelSection?.refresh();
-      this.mediaSection?.refresh();
       this.expandSection?.refreshModels();
       void this.refreshActiveSettings();
     })
@@ -293,7 +297,6 @@ export class DetailView extends ItemView {
     this.modelSection = null;
     this.paramsSection = null;
     this.promptsSection = null;
-    this.mediaSection = null;
     this.scenarioSection = null;
     this.branchSection = null;
     this.expandSection = null;
@@ -322,11 +325,6 @@ export class DetailView extends ItemView {
         this.plugin,
         this.activeSessionFile,
         this.basicUiState.prompts
-      );
-      this.mediaSection = new MediaSection(
-        this.tabContentEl,
-        this.plugin,
-        this.basicUiState.media
       );
       this.renderCollapseAllFooter("basic");
       const seq = this.reloadSeq;
@@ -422,7 +420,6 @@ export class DetailView extends ItemView {
       this.modelSection?.setCollapsed(v);
       this.paramsSection?.setCollapsed(v);
       this.promptsSection?.setCollapsed(v);
-      this.mediaSection?.setCollapsed(v);
     } else if (tab === "scenario") {
       this.scenarioSection?.setCollapsed(v);
     } else if (tab === "expand") {
@@ -436,8 +433,7 @@ export class DetailView extends ItemView {
         (this.presetSection?.isCollapsed() ?? true) &&
         (this.modelSection?.isCollapsed() ?? true) &&
         (this.paramsSection?.isCollapsed() ?? true) &&
-        (this.promptsSection?.getUiState().collapsed ?? true) &&
-        (this.mediaSection?.isAllCollapsed() ?? true)
+        (this.promptsSection?.getUiState().collapsed ?? true)
       );
     }
     if (tab === "scenario") {
@@ -446,7 +442,8 @@ export class DetailView extends ItemView {
         !!s &&
         s.sessionFieldsCollapsed &&
         s.sessionLorebookCollapsed &&
-        s.formCollapsed
+        s.formCollapsed &&
+        s.seriesCollapsed
       );
     }
     if (tab === "expand") {
@@ -490,7 +487,21 @@ export class DetailView extends ItemView {
       settings.naiFormat,
       settings.continueAnchor
     );
-    this.mediaSection?.setActive(settings, this.activeSessionFile);
+    void this.updateChatSessionClass();
+  }
+
+  /** 활성 세션이 챗이면 루트 클래스 토글 — 소설 전용 항목(이음새 보정 등)을 CSS 로 숨긴다. */
+  private async updateChatSessionClass(): Promise<void> {
+    let isChat = false;
+    if (this.activeSessionFile) {
+      try {
+        const session = await this.plugin.store.getSession(this.activeSessionFile);
+        isChat = session?.meta.mode === "chat";
+      } catch {
+        isChat = false;
+      }
+    }
+    this.containerEl.toggleClass("ggai-detail-chat-session", isChat);
   }
 
   private async refreshVisibleSectionsFromDisk(): Promise<void> {
@@ -536,9 +547,6 @@ export class DetailView extends ItemView {
       }
       if (this.promptsSection) {
         this.basicUiState.prompts = this.promptsSection.getUiState();
-      }
-      if (this.mediaSection) {
-        this.basicUiState.media = this.mediaSection.getUiState();
       }
     }
     if (this.activeTab === "scenario" && this.scenarioSection) {

@@ -516,7 +516,8 @@ export class StellaStore extends Events {
     scenarioId: string,
     name: string,
     seed: import("../util/new-session").SessionSeed = "",
-    initial?: import("../types/preset").ActiveSettings
+    initial?: import("../types/preset").ActiveSettings,
+    mode: import("../types/session").SessionMode = "novel"
   ): Promise<{ folder: string; sessionFile: string; session: StellaSession }> {
     const result = await diskCreateSession(
       this.vault,
@@ -524,7 +525,8 @@ export class StellaStore extends Events {
       scenarioId,
       name,
       seed,
-      initial
+      initial,
+      mode
     );
     this.markSelfWrite(result.sessionFile);
     this.sessionByFile.set(result.sessionFile, result.session);
@@ -650,6 +652,9 @@ export class StellaStore extends Events {
     cloned.meta.modifiedAt = Date.now();
     cloned.meta.lastPlayedAt = 0;
     cloned.meta.favorite = false;
+    // 복제본은 시리즈에서 분리한다 — 같은 시리즈 id+index 를 그대로 두면 "N화"가
+    // 중복돼 화 목록과 다음화 index 계산이 꼬인다. 실험용 독립 사본으로 만든다.
+    delete cloned.meta.series;
     const newFile = `${folder}/session.json`;
     this.markSelfWrite(newFile);
     await this.vault.create(newFile, JSON.stringify(cloned, null, 2));
@@ -727,6 +732,21 @@ export class StellaStore extends Events {
       this.getSessionIllustrations(sessionFile).catch(() => null),
     ]);
     const title = session.meta.name || "세션";
+    // 챗 세션 대화록용 화자 이름 — AI = 시나리오 이름, 유저 = 세션이 기억하는 페르소나.
+    let chatNames: { char: string; user: string } | undefined;
+    if (session.meta.mode === "chat") {
+      const scenarioJson = `${sessionFile.split("/SESSIONS/")[0]}/scenario.json`;
+      const scenarios = await this.getScenarios().catch(
+        (): ScenarioListItem[] => []
+      );
+      const char = scenarios.find((i) => i.scenarioFile === scenarioJson)
+        ?.scenario.data.name;
+      const user = session.meta.personaFile
+        ? (await this.getUserProfile(session.meta.personaFile).catch(() => null))
+            ?.name
+        : undefined;
+      chatNames = { char: char || "AI", user: user || "User" };
+    }
     const content = buildReadingMarkdown({
       session,
       sessionFolder,
@@ -734,6 +754,7 @@ export class StellaStore extends Events {
       translations,
       mode,
       title,
+      chatNames,
     });
 
     let dir = "";

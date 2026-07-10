@@ -15,7 +15,7 @@ import {
 import { pathToLeaf } from "../util/session-text";
 import { IllustrationCarousel } from "./illustration-carousel";
 import { IllustrationRegenModal } from "./illustration-regen-modal";
-import { SessionView } from "./session-view";
+import { isSessionHostView } from "./session-host";
 
 /**
  * IllustrationOutputView — 삽화 출력 전용 뷰.
@@ -65,13 +65,12 @@ export class IllustrationOutputView extends ItemView {
 
     this.sessionFile = this.plugin.getActiveOrLastSessionFile();
 
-    // 활성 세션 추적 — SessionView leaf 가 active 되면 그 세션, 아니면 마지막 세션 유지.
+    // 활성 세션 추적 — 세션 뷰 leaf 가 active 되면 그 세션, 아니면 마지막 세션 유지.
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
-        const next =
-          leaf?.view instanceof SessionView
-            ? leaf.view.getSessionFile()
-            : this.plugin.getActiveOrLastSessionFile();
+        const next = isSessionHostView(leaf?.view)
+          ? leaf.view.getSessionFile()
+          : this.plugin.getActiveOrLastSessionFile();
         void this.setSession(next);
       })
     );

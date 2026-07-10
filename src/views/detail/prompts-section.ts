@@ -284,7 +284,10 @@ export class PromptsSection {
     });
 
     // 이어쓰기 이음새 보정 (챗 모델) — 마지막 문장 반복 유도 후 응답에서 제거.
-    const anchorRow = this.contentEl.createDiv({ cls: "ggai-prompts-nai-row" });
+    // 챗 세션 활성 시 detail-view 가 루트 클래스로 숨긴다 (소설 전용, 챗은 전송 게이트로 무시됨).
+    const anchorRow = this.contentEl.createDiv({
+      cls: "ggai-prompts-nai-row ggai-prompts-anchor-row",
+    });
     const anchorLabel = anchorRow.createEl("label", {
       cls: "ggai-prompts-nai-label",
       attr: {

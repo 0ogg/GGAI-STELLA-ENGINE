@@ -6,14 +6,16 @@
  *    영향을 주지 않는다 — session-view.ts 가 "\n\n" 중 두 번째 이후 \n 만 별도 span 으로
  *    감싸 이 값을 line-height 로 준다.
  *  - indent: 각 문단 첫 줄 들여쓰기(em). 문단 시작 지점에 빈 span 을 넣고 padding-left 로 적용.
- *  - maxWidth: 본문 최대 폭(px).
+ *  - maxWidth: 본문 최대 폭(px). 소설 세션창 전용.
  *  - fontScale: 옵시디언 기본 노트 폰트 크기(--font-text-size)에 곱하는 배율.
+ *  - chatAvatarSize: 챗 세션창 말풍선 옆 아바타(프로필 아이콘) 크기(px). 0 = 숨김.
  */
 export interface SessionViewStyle {
   paragraphGap: number;
   indent: number;
   maxWidth: number;
   fontScale: number;
+  chatAvatarSize: number;
 }
 
 export const DEFAULT_SESSION_VIEW_STYLE: SessionViewStyle = {
@@ -21,6 +23,7 @@ export const DEFAULT_SESSION_VIEW_STYLE: SessionViewStyle = {
   indent: 0.5,
   maxWidth: 550,
   fontScale: 1,
+  chatAvatarSize: 80,
 };
 
 export const SESSION_VIEW_STYLE_LIMITS: Record<
@@ -31,6 +34,7 @@ export const SESSION_VIEW_STYLE_LIMITS: Record<
   indent: { min: 0, max: 3, step: 0.1 },
   maxWidth: { min: 480, max: 1200, step: 10 },
   fontScale: { min: 0.8, max: 1.6, step: 0.05 },
+  chatAvatarSize: { min: 0, max: 160, step: 4 },
 };
 
 function clampField(key: keyof SessionViewStyle, value: number): number {
@@ -48,5 +52,6 @@ export function clampSessionViewStyle(
     indent: clampField("indent", merged.indent),
     maxWidth: clampField("maxWidth", merged.maxWidth),
     fontScale: clampField("fontScale", merged.fontScale),
+    chatAvatarSize: clampField("chatAvatarSize", merged.chatAvatarSize),
   };
 }

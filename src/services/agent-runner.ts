@@ -25,6 +25,7 @@ export async function runAgent(
     messages: [{ role: "user", content: prompt }],
     paramsOverride: { maxTokens: 500, temperature: 0.3 },
     signal: ctx.signal,
+    label: `에이전트: ${agent.name}`,
   });
 
   return agentResult(agent.id, response);
@@ -56,6 +57,7 @@ export async function runAgentBatch(
     messages: [{ role: "user", content: instruction + taskPrompt }],
     paramsOverride: { maxTokens: 500 * agents.length, temperature: 0.3 },
     signal: ctx.signal,
+    label: `에이전트 ${agents.length}개`,
   });
 
   return agents.map((agent) => {

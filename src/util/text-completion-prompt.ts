@@ -181,6 +181,102 @@ export function buildNaiFormatSegments(messages: ChatMessage[]): PromptSegment[]
   return segs;
 }
 
+// ─────────────────────── 챗 세션 이름 턴 (M6) ───────────────────────
+//
+// 챗 모드 세션을 텍스트 컴플리션 모델로 보낼 때의 SillyTavern 호환 가공.
+// (ST script.js: formatMessageHistoryItem = `이름: 내용`, modifyLastPromptLine =
+//  끝에 `\n{{char}}:` 오프너, getStoppingStrings = `\n{{user}}:` 스탑,
+//  cleanUpMessage = 출력에서 유저 턴 절단 + 캐릭터 라벨 제거)
+
+export interface ChatCompletionNames {
+  /** 유저(페르소나) 이름 — {{user}}. */
+  user: string;
+  /** 캐릭터(시나리오) 이름 — {{char}}. */
+  char: string;
+}
+
+/**
+ * 챗 히스토리 메시지에 `이름: ` 프리픽스를 붙이고, 끝에 `{{char}}:` 오프너
+ * 메시지를 추가한다 — 평문/NAI 형식 평탄화 직전에 적용 (원본 배열 불변).
+ * 히스토리 사이에 낀 주입/메모리/작가노트(비 chat 소스)는 건드리지 않는다.
+ */
+export function applyChatTurnNames(
+  messages: ChatMessage[],
+  names: ChatCompletionNames
+): ChatMessage[] {
+  const named: ChatMessage[] = messages.map((m) => {
+    if (m.contextKind !== "history" || m.source?.type !== "chat") return m;
+    const name = m.role === "user" ? names.user : names.char;
+    return { ...m, content: `${name}: ${m.content}` };
+  });
+  named.push({
+    role: "assistant",
+    content: `${names.char}:`,
+    source: { type: "marker", label: "Chat history opener" },
+    contextKind: "history",
+  });
+  return named;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** 문단 하나가 문장으로 끝나 완결됐는가 — 종결부호 또는 닫는 따옴표/괄호로 끝나면 완결. */
+function isCompleteParagraph(p: string): boolean {
+  const t = p.replace(/\s+$/, "");
+  if (!t) return false;
+  return /[.!?…。！？~"'”’」』）)\]]$/.test(t);
+}
+
+/**
+ * 유저 턴을 만나지 못하고 생성이 끝난 경우(자연 종료/토큰 컷), 잘려버린 마지막
+ * 문단이 미완성이면 그 문단만 제거한다. 단, 앞에 다른 문단이 남아 있을 때만 —
+ * 문단이 하나뿐인 짧은 응답은 미완성이라도 통째로 지우지 않는다(빈 응답 무산 방지).
+ */
+function dropIncompleteTailParagraph(text: string): string {
+  const parts = text.split(/(\n\s*\n)/); // 구분자 보존: [문단, 구분자, 문단, ...]
+  if (parts.length < 3) return text; // 문단 하나뿐 — 건드리지 않는다.
+  const last = parts[parts.length - 1];
+  if (last.trim() && !isCompleteParagraph(last)) {
+    return parts.slice(0, -2).join(""); // 마지막 문단 + 그 앞 구분자 제거.
+  }
+  return text;
+}
+
+/**
+ * 텍스트 컴플리션 출력 후처리 — ST cleanUpMessage 참조.
+ *  1) 끝에 반쯤 잘린 `\n{{user}}:` 스탑 스트링 제거 (max_tokens 컷 대비)
+ *  2) 응답이 통째로 유저 턴이면 폐기 ("" — 빈 응답 경로로 무산)
+ *  3) 첫 `\n{{user}}:` 턴부터 끝까지 절단
+ *  4) 줄 앞 `{{char}}:` 라벨 제거 (오프너 에코 + 반복 라벨)
+ *  5) 유저 턴을 못 만나고 끝났으면(생성 자연 종료/토큰 컷) 미완성 마지막 문단 제거
+ */
+export function trimChatCompletionOutput(
+  text: string,
+  names: ChatCompletionNames
+): string {
+  let out = text;
+  const userStop = `\n${names.user}:`;
+  for (let j = userStop.length; j > 0; j--) {
+    if (out.endsWith(userStop.slice(0, j))) {
+      out = out.slice(0, -j);
+      break;
+    }
+  }
+  if (out.trimStart().startsWith(`${names.user}:`)) return "";
+  const stopIdx = out.indexOf(userStop);
+  // 유저 턴을 만났는가 = 어시스턴트 턴이 완결됐다는 신호. 못 만나면 잘린 것.
+  const hitUserTurn = stopIdx >= 0;
+  if (hitUserTurn) out = out.slice(0, stopIdx);
+  out = out.replace(
+    new RegExp(`(^|\\n)${escapeRegExp(names.char)}:[ \\t]*`, "g"),
+    "$1"
+  );
+  if (!hitUserTurn) out = dropIncompleteTailParagraph(out);
+  return out.trim();
+}
+
 // ─────────────────────────── 문자열 ───────────────────────────
 
 export function segmentsToString(segs: PromptSegment[]): string {

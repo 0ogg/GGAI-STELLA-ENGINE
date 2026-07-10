@@ -19,7 +19,7 @@ interface RowSpec {
   format: (v: number) => string;
 }
 
-const ROWS: RowSpec[] = [
+const COMMON_ROWS: RowSpec[] = [
   {
     key: "fontScale",
     label: "글자 크기",
@@ -38,11 +38,26 @@ const ROWS: RowSpec[] = [
     icon: "indent-increase",
     format: (v) => v.toFixed(1),
   },
+];
+
+const NOVEL_ROWS: RowSpec[] = [
+  ...COMMON_ROWS,
   {
     key: "maxWidth",
     label: "본문 폭",
     icon: "move-horizontal",
     format: (v) => `${Math.round(v)}`,
+  },
+];
+
+// 챗은 본문 폭을 쓰지 않는다 — 대신 말풍선 옆 아바타(아이콘) 크기. 0 = 숨김.
+const CHAT_ROWS: RowSpec[] = [
+  ...COMMON_ROWS,
+  {
+    key: "chatAvatarSize",
+    label: "아이콘 크기",
+    icon: "circle-user",
+    format: (v) => (v <= 0 ? "숨김" : `${Math.round(v)}`),
   },
 ];
 
@@ -58,9 +73,15 @@ export class ViewStylePopover {
     private plugin: StellaEnginePlugin,
     current: SessionViewStyle,
     /** 슬라이더 조작 중 실시간 미리보기 — 세션창이 즉시 반영. */
-    private onChange: (style: SessionViewStyle) => void
+    private onChange: (style: SessionViewStyle) => void,
+    /** 호스트 뷰 종류 — 챗은 본문 폭 대신 아이콘 크기 행을 그린다. */
+    private mode: "novel" | "chat" = "novel"
   ) {
     this.style = { ...current };
+  }
+
+  private rows(): RowSpec[] {
+    return this.mode === "chat" ? CHAT_ROWS : NOVEL_ROWS;
   }
 
   /** anchor 버튼 위에 카드를 띄운다. 이미 열려 있으면 토글로 닫는다. */
@@ -78,7 +99,7 @@ export class ViewStylePopover {
     setIcon(reset, "rotate-ccw");
     reset.addEventListener("click", () => this.reset());
 
-    for (const spec of ROWS) this.renderRow(card, spec);
+    for (const spec of this.rows()) this.renderRow(card, spec);
 
     this.position(anchor, card);
 

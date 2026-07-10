@@ -30,6 +30,28 @@ export interface SummaryAnchor {
 }
 
 /**
+ * 요약 압축(컴팩트) — 누적 사건 요약이 사용자가 정한 토큰 상한을 넘으면, 경로 위
+ * "오래된 상위 절반" 앵커들의 events 를 한 덩어리로 압축해 이 레코드에 담는다.
+ *
+ * 압축은 앵커를 지우지 않고 **덮어쓴다**: {{summary}} 합성 시, 경로에 `throughNodeId`
+ * 가 있으면 그 노드까지의 개별 앵커 events 대신 이 압축본을 앞세우고, 그 이후 앵커만
+ * 개별로 이어붙인다. 분기가 throughNodeId 이전에서 갈라지면 이 압축은 그 경로에
+ * 적용되지 않아(경로에 throughNodeId 가 없음) 개별 앵커가 그대로 쓰인다 — 분기 안전.
+ */
+export interface SummaryCompaction {
+  /** 압축이 커버하는 마지막(가장 최근) 노드 id — 경로에 이 노드가 있으면 적용. anchors 키와 별개, compactions 의 키와 동일. */
+  throughNodeId: string;
+  /** 압축된 사건 요약 (여러 앵커 events + 이전 압축을 한 덩어리로). */
+  events: string;
+  /** throughNodeId 시점의 현재 상황 스냅샷 (그 이후 앵커가 없을 때 쓰는 fallback state). */
+  state: string;
+  /** 압축 시점 근사 토큰 수 (재압축 판정/로그용, 선택). */
+  tokens?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
  * @deprecated 구버전 릴레이 요약의 중간 진행 체크포인트 — 릴레이 방식 폐기로 더 이상
  * 쓰지 않는다 (이제 요청 1번 = 앵커 1개라 앵커 저장 자체가 진행 기록). 옛 파일의
  * pending 필드를 읽고 지우기 위한 호환용으로만 남긴다.
@@ -59,6 +81,8 @@ export interface SessionSummaries {
   schemaVersion: 1;
   /** key = 앵커 노드 id. */
   anchors: Record<string, SummaryAnchor>;
+  /** key = throughNodeId. 오래된 앵커들을 접은 압축본 (누적 요약 토큰 상한 초과 시). */
+  compactions?: Record<string, SummaryCompaction>;
   /** 릴레이 요약이 중간에 끊긴 경우의 이어하기 체크포인트 (완료 시 삭제). */
   pending?: SummaryCheckpoint;
 }
@@ -75,6 +99,9 @@ export function normalizeSessionSummaries(raw: unknown): SessionSummaries {
     schemaVersion: 1,
     anchors: obj.anchors && typeof obj.anchors === "object" ? obj.anchors : {},
   };
+  if (obj.compactions && typeof obj.compactions === "object") {
+    out.compactions = obj.compactions;
+  }
   if (obj.pending && typeof obj.pending === "object") out.pending = obj.pending;
   return out;
 }

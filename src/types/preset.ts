@@ -59,6 +59,11 @@ export interface SummaryActiveSettings {
   promptId?: string;
   /** 요약 주기 — 경로상 마지막 앵커 이후 AI 생성이 이 횟수만큼 쌓이면 요약. 생략 시 5. */
   threshold?: number;
+  /**
+   * 누적 요약 토큰 상한 — 합성된 요약이 이 토큰 수를 넘으면 오래된 상위 절반을
+   * 한 덩어리로 압축한다(컴팩트). 0/미설정이면 압축하지 않는다.
+   */
+  maxTokens?: number;
 }
 
 /**
@@ -122,6 +127,29 @@ export interface ActiveSettings {
   naiFormat?: boolean;
   /** 이어쓰기 이음새 보정 (챗 모델) — 마지막 문장 반복을 유도한 뒤 응답에서 제거. */
   continueAnchor?: boolean;
+}
+
+/**
+ * 프리셋 → 생성 1회용 전송 오버라이드 (프리셋 랜덤 순환 전용).
+ * 활성 설정에는 저장하지 않고 planSessionRequest 의 settingsOverride 로만 쓴다.
+ *  - 생성에 쓰는 값(모델/파라미터/프롬프트 세트/이어쓰기 보정)만 뽑는다 —
+ *    미디어(번역/삽화/요약) 설정은 순환 대상이 아니다.
+ *  - 프리셋이 모델을 바꾸면 naiFormat 은 프리셋 값(없으면 그 모델 종류의 기본값,
+ *    resolveNaiFormat)으로 재유도 — 활성 설정의 스테일 체크 상태를 따라가지 않는다.
+ *  - 프리셋에 없는 필드는 키를 만들지 않아 활성 설정 값이 그대로 유지된다.
+ */
+export function presetToGenerationOverride(preset: StellaPreset): ActiveSettings {
+  const override: ActiveSettings = {};
+  if (preset.modelProfileId) {
+    override.modelProfileId = preset.modelProfileId;
+    override.naiFormat = preset.naiFormat;
+  }
+  if (preset.params) override.params = { ...preset.params };
+  if (preset.promptSetId) override.promptSetId = preset.promptSetId;
+  if (preset.continueAnchor !== undefined) {
+    override.continueAnchor = preset.continueAnchor;
+  }
+  return override;
 }
 
 /** 프리셋 → 활성 설정 으로 추출. */

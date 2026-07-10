@@ -19,10 +19,7 @@ import type {
   StellaExtension,
 } from "../services/extension-registry";
 import { createSummarySettingsPanel } from "../views/detail/panels/summary-panel";
-import {
-  collectAnchorChain,
-  composeSummaryContext,
-} from "../util/summarize-session";
+import { composeSummaryContextForPath } from "../util/summarize-session";
 import { Notice } from "obsidian";
 
 function createSummaryExtension(): StellaExtension {
@@ -37,8 +34,10 @@ function createSummaryExtension(): StellaExtension {
       const summaries = await input.plugin.store.getSessionSummaries(
         input.sessionFile
       );
-      const text = composeSummaryContext(
-        collectAnchorChain(input.session, summaries, input.leafId)
+      const text = composeSummaryContextForPath(
+        input.session,
+        summaries,
+        input.leafId
       );
       return text ? [{ slot: "summary", text }] : [];
     },

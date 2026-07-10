@@ -27,6 +27,27 @@ import type { AgentResult } from "./agent";
 /** 향후 확장을 위한 모드. 지금은 novel 만 사용. */
 export type SessionMode = "novel" | "textgame" | "chat";
 
+/**
+ * 시리즈(다음화) 연결 — 같은 시나리오 안의 세션들을 "화"로 잇는다.
+ * 같은 `id` 를 가진 세션들이 한 시리즈이며, `index`(1-based) 로 순서가 정해진다.
+ * 이전/다음 화는 같은 시나리오의 세션 중 같은 id + 인접 index 로 찾는다(파일 경로를
+ * 저장하지 않아 이름변경/이동에 강건).
+ */
+export interface SessionSeriesLink {
+  /** 시리즈 고유 id (한 시리즈의 모든 화가 공유). */
+  id: string;
+  /** 시리즈 표시 이름 (화 번호와 무관한 시리즈 제목). */
+  name: string;
+  /** 화 번호 (1-based). 같은 index 가 여럿이면 서로 다른 루트의 같은 화. */
+  index: number;
+  /**
+   * 이 화를 만든 이전 화의 session meta.id — 같은 화에서 다음화를 여러 번 만들면
+   * (루트 분기) 어느 루트에서 갈라졌는지 이걸로 식별한다.
+   * 없으면(구버전 데이터) index-1 화가 이전 화라고 가정한다 (선형 시리즈).
+   */
+  prevId?: string;
+}
+
 export type NovelChatRoleMode = "merged" | "split";
 
 /** 연속 텍스트 조각 — 한 저자의 텍스트 한 덩어리. */
@@ -95,6 +116,8 @@ export interface SessionMeta {
    * 바꾸면 마지막 선택으로 덮어쓴다. 세션을 열면 이 페르소나로 활성 전환된다(전용 시나리오보다 우선).
    */
   personaFile?: string;
+  /** 시리즈(다음화) 연결 — 없으면 단독 세션. */
+  series?: SessionSeriesLink;
   mode: SessionMode;
   createdAt: number;
   modifiedAt: number;

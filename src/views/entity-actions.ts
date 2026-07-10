@@ -10,8 +10,29 @@ import { Notice, TFile } from "obsidian";
 import type { ReadingExportMode } from "../util/export-session";
 import type { ImportResult } from "../import";
 import type { NaiStoryProgress } from "../import/parse-nai-story";
+import {
+  isSillyTavernChat,
+  parseSillyTavernChat,
+  type ParsedStChat,
+} from "../import/parse-sillytavern-chat";
+import { buildChatImportSession } from "../util/build-chat-import";
 import type { SessionSeed } from "../util/new-session";
+import {
+  buildChatEpisodeTailNodes,
+  buildEpisodeTailNodes,
+  planChatEpisodeTail,
+} from "../util/new-session";
+import type { SessionMode, StellaSession } from "../types/session";
+import type { ActiveSettings } from "../types/preset";
 import type StellaEnginePlugin from "../main";
+import { createEmptySessionSummaries } from "../types/summary";
+import { buildSpans, pathToLeaf, spansToText } from "../util/session-text";
+import {
+  composeInheritedSummary,
+  extractNewPassage,
+  recordSummaryAnchor,
+} from "../util/summarize-session";
+import { uuidv4 } from "../util/uuid";
 import type { LorebookListItem } from "../util/scan-lorebooks";
 import type { ScenarioListItem } from "../util/scan-scenarios";
 import type { SessionListItem } from "../util/scan-sessions";
@@ -26,6 +47,8 @@ import {
   ConfirmModal,
   PromptModal,
   ScenarioSessionCopyModal,
+  StChatImportModal,
+  type StChatImportChoice,
 } from "./modals";
 
 // ─── 세션 돌입 ────────────────────────────────────────
@@ -45,12 +68,38 @@ export async function openSessionByPath(
   await plugin.openStellaSession(sessionFile, opts);
 }
 
-/** 기본 이름으로 새 세션을 만들어 바로 돌입. opts 는 임포트 진행분(씨드/메모리/작가노트) 오버라이드. */
+/**
+ * 기본 이름으로 새 세션을 만들어 바로 돌입. opts 는 임포트 진행분(씨드/메모리/작가노트) 오버라이드.
+ * mode: 생략 = 소설(기존 동작). "ask" = 소설/채팅 선택 모달 (명시적 "새 세션" UI 전용 —
+ * 임포트 후속 자동 생성 경로는 절대 "ask" 를 쓰지 않는다).
+ */
 export async function createAndOpenSession(
   plugin: StellaEnginePlugin,
   item: ScenarioListItem,
-  opts?: { seed?: SessionSeed; memory?: string; authorNote?: string }
+  opts?: {
+    seed?: SessionSeed;
+    memory?: string;
+    authorNote?: string;
+    mode?: SessionMode | "ask";
+  }
 ): Promise<void> {
+  let mode: SessionMode = opts?.mode === "chat" ? "chat" : "novel";
+  if (opts?.mode === "ask") {
+    const picked = await new Promise<string | null>((resolve) => {
+      new ChoiceModal(
+        plugin.app,
+        "새 세션",
+        "어떤 방식으로 시작할까요?",
+        [
+          { text: "소설", value: "novel", cta: true },
+          { text: "채팅", value: "chat" },
+        ],
+        resolve
+      ).open();
+    });
+    if (picked == null) return;
+    mode = picked === "chat" ? "chat" : "novel";
+  }
   const name = defaultSessionName(item);
   try {
     const scenarioId = await plugin.store.ensureScenarioId(item.scenarioFile);
@@ -63,7 +112,8 @@ export async function createAndOpenSession(
       scenarioId,
       name,
       opts?.seed ?? firstMessageBranches(item),
-      plugin.data.current
+      plugin.data.current,
+      mode
     );
     // 새 세션은 시작 시점의 활성 페르소나를 기억한다(없으면 기본 페르소나로 resolve).
     const activePersona = await plugin.resolveActiveUserProfile();
@@ -77,6 +127,300 @@ export async function createAndOpenSession(
     new Notice(
       `세션 생성 실패: ${err instanceof Error ? err.message : String(err)}`
     );
+  }
+}
+
+/** 세션 이름에서 시리즈 표시명 유도 — 끝의 "N화"를 떼어낸다. 비면 원래 이름. */
+function baseSeriesName(name: string): string {
+  const base = name.replace(/\s*\d+\s*화\s*$/, "").trim();
+  return base || name.trim() || "시리즈";
+}
+
+/**
+ * 시리즈 계획(읽기 전용) — 다음 화의 시리즈명과 화 번호를 정한다.
+ * seriesId 가 null 이면 아직 시리즈가 아니라서 실행 시 이 세션이 1화로 승격된다.
+ *
+ * 화 번호는 항상 **만드는 화 + 1** — 3화는 2화에서 만들어야 3화다. 1화에서 다음화를
+ * 두 번 만들면 3화가 아니라 **다른 루트의 2화**가 된다(alternates 로 알려 경고 표시).
+ * 실행(startNextEpisode)과 미리보기(NextEpisodeModal)가 같은 계산을 쓴다.
+ */
+export function resolveSeriesPlan(
+  prev: StellaSession,
+  siblings: SessionListItem[]
+): {
+  seriesId: string | null;
+  seriesName: string;
+  newIndex: number;
+  /** 새 화와 같은 번호를 이미 가진 화들 — 있으면 이번 생성은 루트 분기다. */
+  alternates: SessionListItem[];
+} {
+  if (prev.meta.series) {
+    const seriesId = prev.meta.series.id;
+    const newIndex = prev.meta.series.index + 1;
+    const alternates = siblings.filter((it) => {
+      const s = it.session.meta.series;
+      return s && s.id === seriesId && s.index === newIndex;
+    });
+    return {
+      seriesId,
+      seriesName: prev.meta.series.name,
+      newIndex,
+      alternates,
+    };
+  }
+  return {
+    seriesId: null,
+    seriesName: baseSeriesName(prev.meta.name),
+    newIndex: 2,
+    alternates: [],
+  };
+}
+
+/** 세션의 최근성 — 루트가 갈릴 때 "가장 최근에 플레이한 쪽"을 고르는 기준. */
+function seriesRecency(it: SessionListItem): number {
+  const m = it.session.meta;
+  return m.lastPlayedAt || m.modifiedAt || m.createdAt || 0;
+}
+
+/**
+ * 시리즈 루트(경로) 계산 — 현재 화에서 prevId 를 따라 과거로, 자식 화(여럿이면
+ * 가장 최근 플레이)를 따라 미래로 걸어, 현재 세션이 속한 한 루트를 화 순서대로
+ * 돌려준다. prevId 없는 구버전 데이터는 인접 index 로 잇는다(선형 시리즈 가정).
+ */
+export function collectSeriesRoute(
+  currentFile: string,
+  episodes: SessionListItem[]
+): SessionListItem[] {
+  const cur = episodes.find((e) => e.sessionFile === currentFile);
+  if (!cur) {
+    return episodes
+      .slice()
+      .sort(
+        (a, b) =>
+          (a.session.meta.series?.index ?? 0) -
+          (b.session.meta.series?.index ?? 0)
+      );
+  }
+  const byId = new Map(episodes.map((e) => [e.session.meta.id, e]));
+  const pickRecent = (cands: SessionListItem[]): SessionListItem | null =>
+    cands.length === 0
+      ? null
+      : cands.reduce((a, b) => (seriesRecency(b) > seriesRecency(a) ? b : a));
+
+  const prevOf = (e: SessionListItem): SessionListItem | null => {
+    const s = e.session.meta.series;
+    if (!s) return null;
+    if (s.prevId) return byId.get(s.prevId) ?? null;
+    return pickRecent(
+      episodes.filter((x) => x.session.meta.series?.index === s.index - 1)
+    );
+  };
+  const nextOf = (e: SessionListItem): SessionListItem | null => {
+    const id = e.session.meta.id;
+    const idx = e.session.meta.series?.index ?? 0;
+    return pickRecent(
+      episodes.filter((x) => {
+        const s = x.session.meta.series;
+        if (!s) return false;
+        if (s.prevId) return s.prevId === id;
+        return s.index === idx + 1;
+      })
+    );
+  };
+
+  const visited = new Set<string>([cur.sessionFile]);
+  const route: SessionListItem[] = [cur];
+  for (let e = prevOf(cur); e && !visited.has(e.sessionFile); e = prevOf(e)) {
+    visited.add(e.sessionFile);
+    route.unshift(e);
+  }
+  for (let e = nextOf(cur); e && !visited.has(e.sessionFile); e = nextOf(e)) {
+    visited.add(e.sessionFile);
+    route.push(e);
+  }
+  return route;
+}
+
+/**
+ * 최근 N 노드 경계와 그 이후 본문(tail) — 다음 화 시작 부분에 그대로 심는 구간.
+ * 경계가 없으면(count ≥ 경로 길이) 전체 본문이 tail. 실행/미리보기 공용.
+ */
+export function planEpisodeTail(
+  prev: StellaSession,
+  count: number
+): { boundaryNodeId: string | null; tail: string } {
+  const path = pathToLeaf(prev, prev.meta.activeLeafId);
+  const boundaryIndex = path.length - 1 - count;
+  const boundaryNodeId = boundaryIndex >= 0 ? path[boundaryIndex].id : null;
+  const fullText = spansToText(buildSpans(prev, prev.meta.activeLeafId));
+  let tail = fullText;
+  if (boundaryNodeId) {
+    const prefix = spansToText(buildSpans(prev, boundaryNodeId));
+    tail = extractNewPassage(prefix, fullText);
+  }
+  return { boundaryNodeId, tail };
+}
+
+// 챗 세션의 다음화 인계 계획(planChatEpisodeTail)은 순수 로직이라
+// src/util/new-session.ts 에 있다 — buildChatEpisodeTailNodes 와 한 쌍.
+
+/**
+ * 다음화 — 지금 세션이 너무 길어졌을 때, **누적 요약 + 최근 노드 N개 + 모든 설정**을
+ * 물려받은 새 세션(다음 화)을 만들어 바로 이어쓰게 한다. 두 세션은 시리즈로 연결된다.
+ * 이름은 묻지 않고 바로 "N화"로 붙인다(우측 디테일 시나리오 탭에서 노드 수만 지정).
+ *
+ * 흐름:
+ *  1. 열린 편집을 커밋(flush)하고, 최근 N 노드 직전까지 요약을 정리(catch-up)한다 —
+ *     그래야 물려주는 요약이 최근 노드 앞까지 빈틈없이 커버된다.
+ *  2. 새 세션 = 빈 root(상속 요약 앵커) + 최근 N 노드 본문(tail) 체인. 설정/메모리/
+ *     작가노트/로어북/페르소나까지 전부 복사. 시리즈 index 를 붙여 연결.
+ */
+export async function startNextEpisode(
+  plugin: StellaEnginePlugin,
+  sessionFile: string,
+  recentCount: number
+): Promise<boolean> {
+  const count = Math.max(1, Math.floor(recentCount) || 3);
+  // 실패 시 어느 단계였는지 알리기 위한 태그 — 사용자 Notice 와 콘솔에 함께 표시.
+  let step = "편집 저장";
+  try {
+    // 열린 세션의 미저장 편집을 먼저 커밋 — 방금 친 문단까지 물려주도록.
+    await plugin.flushSessionEdits(sessionFile);
+    step = "세션 읽기";
+    const prev = await plugin.store.getSession(sessionFile);
+    if (!prev) {
+      new Notice("세션을 불러올 수 없습니다.");
+      return false;
+    }
+
+    step = "본문 경계 계산";
+    // 챗 세션은 메시지 단위(역할 유지)로, 소설은 평문 tail 로 인계한다.
+    const chatPlan =
+      prev.meta.mode === "chat" ? planChatEpisodeTail(prev, count) : null;
+    const { boundaryNodeId, tail } = chatPlan
+      ? { boundaryNodeId: chatPlan.boundaryNodeId, tail: "" }
+      : planEpisodeTail(prev, count);
+
+    // 최근 노드 앞까지 요약 정리 (요약 사용 중일 때만) — 빈틈없이 물려주기 위해.
+    step = "설정 읽기";
+    const settings = await plugin.resolveActiveSettings(sessionFile);
+    if (boundaryNodeId && settings.summarize?.enabled === true) {
+      new Notice("이전 화 요약 정리 중…");
+      try {
+        await plugin.summary.summarize(sessionFile, boundaryNodeId);
+      } catch (err) {
+        console.warn("[GGAI Stella] 다음화 요약 정리 실패:", err);
+      }
+    }
+    step = "요약 상속";
+    const summaries = await plugin.store.getSessionSummaries(sessionFile);
+    const inherited = boundaryNodeId
+      ? composeInheritedSummary(prev, summaries, boundaryNodeId)
+      : { events: "", state: "" };
+
+    // 시리즈 결정 — 화 번호는 만드는 화 + 1. 같은 번호가 이미 있으면 루트 분기.
+    step = "시리즈 계산";
+    const scenarioFolder = sessionFile.split("/SESSIONS/")[0];
+    const siblings = await plugin.store
+      .getSessions(scenarioFolder)
+      .catch((): SessionListItem[] => []);
+    const plan = resolveSeriesPlan(prev, siblings);
+    const seriesName = plan.seriesName;
+    const newIndex = plan.newIndex;
+    let seriesId = plan.seriesId;
+    if (!seriesId) {
+      step = "1화 승격 저장";
+      seriesId = uuidv4();
+      prev.meta.series = { id: seriesId, name: seriesName, index: 1 };
+      await plugin.store.saveSession(sessionFile, prev);
+    }
+
+    // 새 세션 — 활성 설정 상속.
+    const initial: ActiveSettings = {
+      modelProfileId: prev.meta.modelProfileId,
+      params: prev.meta.params ? { ...prev.meta.params } : undefined,
+      promptSetId: prev.meta.promptSetId,
+      translation: prev.meta.translation ? { ...prev.meta.translation } : undefined,
+      illustration: prev.meta.illustration
+        ? { ...prev.meta.illustration }
+        : undefined,
+      summarize: prev.meta.summarize ? { ...prev.meta.summarize } : undefined,
+      naiFormat: prev.meta.naiFormat,
+      continueAnchor: prev.meta.continueAnchor,
+    };
+    // 루트 분기면 제목에 루트 번호를 붙여 목록에서 구분되게 한다.
+    const newName =
+      plan.alternates.length > 0
+        ? `${seriesName} ${newIndex}화 (루트 ${plan.alternates.length + 1})`
+        : `${seriesName} ${newIndex}화`;
+    step = "새 세션 생성";
+    const result = await plugin.store.createSession(
+      scenarioFolder,
+      prev.meta.scenarioId,
+      newName,
+      "",
+      initial,
+      prev.meta.mode
+    );
+    const ns = result.session;
+    step = "본문 인계";
+    const now = Date.now();
+    const rootId = ns.meta.rootId;
+    const tailBuilt = chatPlan
+      ? buildChatEpisodeTailNodes(rootId, chatPlan.messages, now)
+      : buildEpisodeTailNodes(rootId, tail, now);
+    Object.assign(ns.nodes, tailBuilt.nodes);
+    ns.meta.activeLeafId = tailBuilt.leafId;
+
+    // 나머지 물려받기 (전부).
+    ns.meta.memory = prev.meta.memory;
+    ns.meta.authorNote = prev.meta.authorNote;
+    ns.meta.disabledScenarioLorebookIds = prev.meta.disabledScenarioLorebookIds
+      ? [...prev.meta.disabledScenarioLorebookIds]
+      : undefined;
+    ns.meta.extraLorebookIds = prev.meta.extraLorebookIds
+      ? [...prev.meta.extraLorebookIds]
+      : undefined;
+    ns.meta.variables = prev.meta.variables ? { ...prev.meta.variables } : undefined;
+    ns.meta.personaFile = prev.meta.personaFile;
+    ns.meta.novelChatRoleMode = prev.meta.novelChatRoleMode;
+    ns.meta.enabledAgents = prev.meta.enabledAgents
+      ? [...prev.meta.enabledAgents]
+      : undefined;
+    // prevId = 만든 화의 세션 id — 루트 분기 시 어느 루트인지 식별.
+    ns.meta.series = {
+      id: seriesId,
+      name: seriesName,
+      index: newIndex,
+      prevId: prev.meta.id,
+    };
+    // 자동 제목 생성이 "n화" 이름을 덮어쓰지 않게.
+    ns.meta.autoTitleGenerated = true;
+    await plugin.store.saveSession(result.sessionFile, ns);
+
+    // 상속 요약을 새 화 root 앵커로 심는다 (tail 은 root 자식이라 새 화에서 정상 요약됨).
+    if (inherited.events.trim() !== "" || inherited.state.trim() !== "") {
+      step = "요약 앵커 저장";
+      const sum = createEmptySessionSummaries();
+      recordSummaryAnchor(sum, {
+        nodeId: rootId,
+        events: inherited.events,
+        state: inherited.state,
+        now,
+      });
+      await plugin.store.saveSessionSummaries(result.sessionFile, sum);
+    }
+
+    step = "새 화 열기";
+    await openSessionByPath(plugin, result.sessionFile);
+    new Notice(`다음화 생성: ${newName}`);
+    return true;
+  } catch (err) {
+    console.error(`[GGAI Stella] 다음화 생성 실패 (${step}):`, err);
+    new Notice(
+      `다음화 생성 실패 (${step}): ${err instanceof Error ? err.message : String(err)}`
+    );
+    return false;
   }
 }
 
@@ -290,8 +634,8 @@ export function promptRenameSession(
 ): void {
   new PromptModal(
     plugin.app,
-    "세션 이름 변경",
-    "세션 이름",
+    "세션 제목 변경",
+    "세션 제목",
     s.session.meta.name || s.folderName,
     (value) => {
       const name = value?.trim();
@@ -301,10 +645,10 @@ export function promptRenameSession(
         try {
           const result = await plugin.store.renameSession(s.sessionFile, name);
           await onRenamed?.(result.oldSessionFile, result.newSessionFile);
-          new Notice(`세션 이름 변경: ${name}`);
+          new Notice(`세션 제목 변경: ${name}`);
         } catch (err) {
           new Notice(
-            `세션 이름 변경 실패: ${err instanceof Error ? err.message : String(err)}`
+            `세션 제목 변경 실패: ${err instanceof Error ? err.message : String(err)}`
           );
         }
       })();
@@ -420,7 +764,7 @@ export function confirmDeleteLorebook(
 export function runImportPicker(plugin: StellaEnginePlugin): void {
   const input = document.createElement("input");
   input.type = "file";
-  input.accept = ".json,.lorebook,.scenario,.story,.png,.apng,.charx";
+  input.accept = ".json,.jsonl,.lorebook,.scenario,.story,.png,.apng,.charx";
   input.style.display = "none";
 
   input.addEventListener("change", async () => {
@@ -429,6 +773,16 @@ export function runImportPicker(plugin: StellaEnginePlugin): void {
     if (!file) return;
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
+      // 실리태번 채팅(.jsonl) — 시나리오/세션 임포트와 경로가 다르다(세션만 생성, 카드 없음).
+      if (file.name.toLowerCase().endsWith(".jsonl")) {
+        const text = new TextDecoder("utf-8").decode(bytes);
+        if (!isSillyTavernChat(text)) {
+          new Notice("실리태번 채팅(.jsonl) 형식이 아닙니다.");
+          return;
+        }
+        await openStChatImport(plugin, text);
+        return;
+      }
       const result = await plugin.store.importFile(bytes, file.name);
       reportImportResult(plugin, file.name, result);
       // 시나리오 임포트는 후속 열기까지 처리 (진행분이 있으면 세션으로 바로 돌입).
@@ -484,6 +838,87 @@ async function openImportedScenario(
   }
 
   await plugin.openStellaEditor("scenario", scenarioFile);
+}
+
+// ─── 실리태번 채팅(.jsonl) 임포트 ───────────────────────
+
+/** 채팅을 파싱하고 등록 창(모드/시나리오 선택)을 띄운다. */
+async function openStChatImport(
+  plugin: StellaEnginePlugin,
+  text: string
+): Promise<void> {
+  const parsed = parseSillyTavernChat(text);
+  if (parsed.messages.length === 0) {
+    new Notice("가져올 메시지가 없습니다.");
+    return;
+  }
+  const scenarios = await plugin.store.getScenarios();
+  new StChatImportModal(plugin.app, parsed, scenarios, (choice) => {
+    if (!choice) return;
+    void performStChatImport(plugin, parsed, choice);
+  }).open();
+}
+
+/** 선택된 모드/시나리오로 세션(+번역)을 만들어 연다. */
+async function performStChatImport(
+  plugin: StellaEnginePlugin,
+  parsed: ParsedStChat,
+  choice: StChatImportChoice
+): Promise<void> {
+  try {
+    // 1) 붙일 시나리오 결정 (없으면 캐릭터명으로 새로 만든다).
+    let scenarioFile = choice.scenarioFile;
+    let scenarioFolder: string;
+    if (!scenarioFile) {
+      const created = await plugin.store.createScenario(
+        parsed.characterName || "가져온 채팅"
+      );
+      scenarioFile = created.scenarioFile;
+      scenarioFolder = created.folder;
+    } else {
+      scenarioFolder = scenarioFile.replace(/\/scenario\.json$/, "");
+    }
+
+    const scenarioId = await plugin.store.ensureScenarioId(scenarioFile);
+    if (!scenarioId) {
+      new Notice("시나리오 ID 를 결정할 수 없습니다.");
+      return;
+    }
+
+    // 2) 노드 트리 빌드 후 빈 세션에 심는다.
+    const now = Date.now();
+    const built = buildChatImportSession(parsed, choice.mode, now);
+    const scenarios = await plugin.store.getScenarios();
+    const item = scenarios.find((s) => s.scenarioFile === scenarioFile);
+    const name = item ? defaultSessionName(item) : parsed.characterName || "채팅";
+
+    const result = await plugin.store.createSession(
+      scenarioFolder,
+      scenarioId,
+      name,
+      "",
+      plugin.data.current,
+      choice.mode
+    );
+    result.session.nodes = built.nodes;
+    result.session.meta.rootId = built.rootId;
+    result.session.meta.activeLeafId = built.activeLeafId;
+    const persona = await plugin.resolveActiveUserProfile();
+    result.session.meta.personaFile = persona.userFile;
+    await plugin.store.saveSession(result.sessionFile, result.session);
+
+    await openSessionByPath(plugin, result.sessionFile);
+    new Notice(
+      `채팅 가져오기 완료: 메시지 ${parsed.messages.length}개 (${
+        choice.mode === "chat" ? "채팅" : "소설"
+      })`
+    );
+  } catch (err) {
+    new Notice(
+      `채팅 가져오기 실패: ${err instanceof Error ? err.message : String(err)}`
+    );
+    console.error("[GGAI Stella] st chat import failed:", err);
+  }
 }
 
 function reportImportResult(

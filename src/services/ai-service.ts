@@ -60,6 +60,11 @@ export interface ChatRequest {
   messages: ChatMessage[];
   paramsOverride?: Record<string, unknown>;
   signal?: AbortSignal;
+  /**
+   * 이 요청을 유발한 기능의 표시 이름(예: "번역", "이어쓰기").
+   * Core 의 "생성 중" 토스트에 `라벨 (모델명)` 형태로 표시된다. 그대로 Core 로 전달.
+   */
+  label?: string;
 }
 
 export interface ChatResponse {
@@ -77,6 +82,8 @@ export interface ImageGenRequest {
   n?: number;
   paramsOverride?: Record<string, unknown>;
   signal?: AbortSignal;
+  /** "생성 중" 토스트에 표시할 기능 이름. @see ChatRequest.label */
+  label?: string;
 }
 
 export interface ImageGenResult {
@@ -111,6 +118,8 @@ export class AIService extends Events {
   private profileCache: GenerationProfileLite[] | null = null;
   private imageProfileCache: ImageProfileLite[] | null = null;
   private unsubscribeProfilesChanged: (() => void) | null = null;
+  /** 현재 구독이 붙어 있는 Core api 인스턴스. Core 리로드 시 인스턴스가 교체되므로 재구독 판단에 쓴다. */
+  private boundApi: any | null = null;
   private lastApiAvailable: boolean | null = null;
   private availabilityPollHandle: number | null = null;
 
@@ -121,12 +130,15 @@ export class AIService extends Events {
   /** 플러그인 onload 에서 호출. Core 의 이벤트 구독 + 가용성 폴링 시작. */
   start(): void {
     this.bindToCore();
-    // Core 가 stella 보다 늦게 로드될 가능성도 있어 가벼운 폴링으로 재시도.
+    this.lastApiAvailable = this.getApi() != null;
+    // Core 가 stella 보다 늦게 로드될 가능성 + Core 리로드로 api 인스턴스가 교체될 가능성
+    // 둘 다 가벼운 폴링으로 흡수한다. bindToCore 는 멱등이라 매 틱 불러도 안전.
     this.availabilityPollHandle = window.setInterval(() => {
+      // api 가 새로 생겼거나(늦은 로드) 인스턴스가 교체됐으면(리로드) 여기서 재구독.
+      this.bindToCore();
       const nowAvailable = this.getApi() != null;
       if (this.lastApiAvailable !== nowAvailable) {
         this.lastApiAvailable = nowAvailable;
-        if (nowAvailable) this.bindToCore();
         this.profileCache = null;
         this.imageProfileCache = null;
         this.trigger("core-availability-changed", nowAvailable);
@@ -139,6 +151,7 @@ export class AIService extends Events {
   stop(): void {
     this.unsubscribeProfilesChanged?.();
     this.unsubscribeProfilesChanged = null;
+    this.boundApi = null;
     if (this.availabilityPollHandle != null) {
       window.clearInterval(this.availabilityPollHandle);
       this.availabilityPollHandle = null;
@@ -269,6 +282,8 @@ export class AIService extends Events {
     prompt: string;
     paramsOverride?: Record<string, unknown>;
     signal?: AbortSignal;
+    /** "생성 중" 토스트에 표시할 기능 이름. @see ChatRequest.label */
+    label?: string;
   }): Promise<ChatResponse> {
     const api = this.requireApi();
     const r = await api.generate(req);
@@ -382,9 +397,29 @@ export class AIService extends Events {
     return api;
   }
 
+  /**
+   * Core 의 "profiles-changed" 에 구독한다. 멱등:
+   *  - 이미 현재 api 인스턴스에 붙어 있으면 아무것도 안 함.
+   *  - api 가 사라졌거나(리로드 중) 다른 인스턴스로 교체됐으면 옛 구독을 끊고 새로 붙는다.
+   * (예전엔 한 번 구독하면 재구독을 막아, Core 리로드 후 죽은 인스턴스에 남는 버그가 있었다.)
+   */
   private bindToCore(): void {
-    if (this.unsubscribeProfilesChanged) return;
     const api = this.getApi();
+    // 같은 인스턴스에 이미 붙어 있음 → 그대로.
+    if (api && this.boundApi === api && this.unsubscribeProfilesChanged) return;
+    // api 가 없어졌거나 교체됨 → 기존 구독 정리.
+    if (this.unsubscribeProfilesChanged) {
+      try {
+        this.unsubscribeProfilesChanged();
+      } catch {
+        // 옛 인스턴스가 이미 파괴됐을 수 있음 — 무시.
+      }
+      this.unsubscribeProfilesChanged = null;
+      this.boundApi = null;
+      // 구독이 끊긴 동안 프로필이 바뀌었을 수 있으니 캐시를 비운다.
+      this.profileCache = null;
+      this.imageProfileCache = null;
+    }
     if (!api?.on) return;
     try {
       this.unsubscribeProfilesChanged = api.on("profiles-changed", () => {
@@ -392,6 +427,7 @@ export class AIService extends Events {
         this.imageProfileCache = null;
         this.trigger("profiles-changed");
       });
+      this.boundApi = api;
       this.lastApiAvailable = true;
     } catch (err) {
       console.warn("[GGAI Stella] Core profiles-changed 구독 실패:", err);

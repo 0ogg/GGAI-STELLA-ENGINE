@@ -1,5 +1,4 @@
-import { Notice, setIcon } from "obsidian";
-import { VIEW_TYPE_SESSION } from "../../constants";
+import { Menu, Notice, setIcon } from "obsidian";
 import type StellaEnginePlugin from "../../main";
 import type {
   StellaScenario,
@@ -10,9 +9,12 @@ import { buildSessionContextDryRun } from "../../util/build-session-context";
 import type { LorebookListItem } from "../../util/scan-lorebooks";
 import { uuidv4 } from "../../util/uuid";
 import { ContextPreviewModal } from "../context-preview-modal";
+import { collectSeriesRoute, openSessionByPath } from "../entity-actions";
+import { NextEpisodeModal } from "../next-episode-modal";
+import type { SessionListItem } from "../../util/scan-sessions";
 import { EditGuard } from "../edit-guard";
 import { LorebookSelectModal } from "../lorebook-select-modal";
-import { SessionView } from "../session-view";
+import { getSessionHostLeaves, isSessionHostView } from "../session-host";
 
 const DEBOUNCE_MS = 400;
 
@@ -20,6 +22,7 @@ export interface ScenarioSectionUiState {
   sessionFieldsCollapsed: boolean;
   sessionLorebookCollapsed: boolean;
   formCollapsed: boolean;
+  seriesCollapsed: boolean;
 }
 
 /**
@@ -48,6 +51,10 @@ export class ScenarioSection {
   private formHeaderEl: HTMLElement | null = null;
   private sessionLorebookCollapsed = true;
   private sessionLorebookBodyEl: HTMLElement | null = null;
+  private seriesCollapsed = false;
+  private seriesBodyEl: HTMLElement | null = null;
+  /** 시리즈 화 목록 영역 — 부분 갱신용. */
+  private seriesAreaEl: HTMLElement | null = null;
 
   /** 시나리오 폼 안의 로어북 영역 — 부분 갱신용. */
   private lorebookAreaEl: HTMLElement | null = null;
@@ -80,6 +87,9 @@ export class ScenarioSection {
     if (uiState?.formCollapsed !== undefined) {
       this.formCollapsed = uiState.formCollapsed;
     }
+    if (uiState?.seriesCollapsed !== undefined) {
+      this.seriesCollapsed = uiState.seriesCollapsed;
+    }
   }
 
   getUiState(): ScenarioSectionUiState {
@@ -87,18 +97,21 @@ export class ScenarioSection {
       sessionFieldsCollapsed: this.sessionFieldsCollapsed,
       sessionLorebookCollapsed: this.sessionLorebookCollapsed,
       formCollapsed: this.formCollapsed,
+      seriesCollapsed: this.seriesCollapsed,
     };
   }
 
-  /** 전체 접기/펼치기 — 세션/로어북/시나리오 세 접이식 섹션을 함께 접거나 편다. */
+  /** 전체 접기/펼치기 — 세션/로어북/시리즈/시나리오 접이식 섹션을 함께 접거나 편다. */
   setCollapsed(v: boolean): void {
     this.sessionFieldsCollapsed = v;
     this.sessionLorebookCollapsed = v;
     this.formCollapsed = v;
+    this.seriesCollapsed = v;
     for (const body of [
       this.sessionFieldsBodyEl,
       this.sessionLorebookBodyEl,
       this.formBodyEl,
+      this.seriesBodyEl,
     ]) {
       if (!body) continue;
       body.toggleClass("is-collapsed", v);
@@ -147,6 +160,7 @@ export class ScenarioSection {
       this.sessionPending.authorNote
     );
     this.renderSessionLorebookArea();
+    void this.renderSeriesArea();
   }
 
   /** 미적용 debounce 즉시 저장. */
@@ -217,6 +231,8 @@ export class ScenarioSection {
     this.sessionLorebookAreaEl = null;
     this.sessionLorebookBodyEl = null;
     this.lorebookAreaEl = null;
+    this.seriesBodyEl = null;
+    this.seriesAreaEl = null;
 
     if (!this.activeSessionFile) {
       this.root.createDiv({
@@ -228,6 +244,129 @@ export class ScenarioSection {
 
     this.renderSessionFields();
     this.renderSessionLorebookSection();
+    this.renderSeriesSection();
+  }
+
+  /**
+   * 시리즈 섹션 — 시나리오 탭 맨 아래 접이식 섹션 (다른 섹션과 같은 형식).
+   * 이 세션이 속한 시리즈의 화 목록(1화·2화·…)을 순서대로 보여주고 클릭으로 이동,
+   * [다음화 만들기]는 세부 설정·인계 안내가 있는 NextEpisodeModal 을 연다.
+   */
+  private renderSeriesSection(): void {
+    if (!this.session || !this.activeSessionFile) return;
+    const sessionFile = this.activeSessionFile;
+    const section = this.root.createDiv({
+      cls: "ggai-series-section ggai-collapsible",
+    });
+    const header = section.createDiv({ cls: "ggai-section-header is-clickable" });
+    header.createSpan({ cls: "ggai-section-title", text: "시리즈" });
+    header.setAttr("role", "button");
+    header.setAttr("tabindex", "0");
+    header.setAttr("aria-expanded", String(!this.seriesCollapsed));
+    const toggle = () => {
+      this.seriesCollapsed = !this.seriesCollapsed;
+      this.seriesBodyEl?.toggleClass("is-collapsed", this.seriesCollapsed);
+      header.setAttr("aria-expanded", String(!this.seriesCollapsed));
+    };
+    header.addEventListener("click", toggle);
+    header.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      toggle();
+    });
+    const body = section.createDiv({ cls: "ggai-series-body" });
+    body.toggleClass("is-collapsed", this.seriesCollapsed);
+    this.seriesBodyEl = body;
+
+    this.seriesAreaEl = body.createDiv({ cls: "ggai-series-area" });
+    void this.renderSeriesArea();
+
+    const actions = body.createDiv({ cls: "ggai-series-actions" });
+    const btn = actions.createEl("button", { cls: "ggai-btn" });
+    setIcon(btn.createSpan(), "book-plus");
+    btn.createSpan({ text: "다음화 만들기" });
+    btn.addEventListener("click", () => {
+      new NextEpisodeModal(this.plugin.app, this.plugin, sessionFile).open();
+    });
+    body.createDiv({
+      cls: "ggai-series-hint",
+      text: "세션이 길어져 무거워지면, 누적 요약과 최근 본문을 물려받은 다음 화로 가볍게 이어가세요.",
+    });
+  }
+
+  /** 화 목록만 부분 갱신 — 새 화 생성/이름변경 등 sessions-changed 반영용. */
+  async renderSeriesArea(): Promise<void> {
+    const el = this.seriesAreaEl;
+    if (!el || !this.session || !this.activeSessionFile) return;
+    el.empty();
+    const series = this.session.meta.series;
+    if (!series) {
+      el.createDiv({
+        cls: "ggai-series-empty",
+        text: "아직 단독 세션입니다. 다음화를 만들면 이 세션이 1화가 됩니다.",
+      });
+      return;
+    }
+    const scenarioFolder = this.activeSessionFile.split("/SESSIONS/")[0];
+    const siblings = await this.plugin.store
+      .getSessions(scenarioFolder)
+      .catch((): SessionListItem[] => []);
+    const episodes = siblings.filter(
+      (it) => it.session.meta.series?.id === series.id
+    );
+    // 현재 세션이 속한 루트만 화 순서대로 — 같은 화 번호가 여럿(루트 분기)이면
+    // 칩에 개수를 표시하고, 클릭 시 루트 선택 메뉴를 연다.
+    const route = collectSeriesRoute(this.activeSessionFile, episodes);
+    const byIndex = new Map<number, SessionListItem[]>();
+    for (const ep of episodes) {
+      const idx = ep.session.meta.series?.index ?? 0;
+      const list = byIndex.get(idx) ?? [];
+      list.push(ep);
+      byIndex.set(idx, list);
+    }
+    el.createDiv({ cls: "ggai-series-name", text: series.name });
+    const chips = el.createDiv({ cls: "ggai-series-chips" });
+    for (const ep of route) {
+      const idx = ep.session.meta.series?.index ?? 0;
+      const alts = byIndex.get(idx) ?? [ep];
+      const isCurrent = ep.sessionFile === this.activeSessionFile;
+      const chip = chips.createEl("button", { cls: "ggai-series-chip" });
+      chip.createSpan({ text: `${idx}화` });
+      if (isCurrent) chip.addClass("is-current");
+      if (alts.length > 1) {
+        chip.createSpan({
+          cls: "ggai-series-chip-count",
+          text: String(alts.length),
+        });
+        chip.title = `${ep.session.meta.name || ep.folderName} — 루트 ${alts.length}개, 클릭해서 선택`;
+        chip.addEventListener("click", (e) => {
+          const menu = new Menu();
+          for (const alt of alts) {
+            const onRoute = alt.sessionFile === ep.sessionFile;
+            menu.addItem((mi) => {
+              mi.setTitle(alt.session.meta.name || alt.folderName).setChecked(
+                onRoute
+              );
+              if (alt.sessionFile !== this.activeSessionFile) {
+                mi.onClick(() =>
+                  void openSessionByPath(this.plugin, alt.sessionFile)
+                );
+              }
+            });
+          }
+          menu.showAtMouseEvent(e);
+        });
+      } else {
+        chip.title = ep.session.meta.name || ep.folderName;
+        if (isCurrent) {
+          chip.disabled = true;
+        } else {
+          chip.addEventListener("click", () =>
+            void openSessionByPath(this.plugin, ep.sessionFile)
+          );
+        }
+      }
+    }
   }
 
   private renderSessionFields(): void {
@@ -431,6 +570,79 @@ export class ScenarioSection {
         if (ids) void this.handleSetSessionExtraLorebooks(ids);
       });
     });
+
+    this.renderMediaLorebookGroups(wrap);
+  }
+
+  /**
+   * 번역/삽화 확장용 로어북 — **시나리오에 저장되어 이 시나리오의 모든 세션이 공유**한다.
+   * 각 기능 사용이 켜져 있을 때만 노출. 실행 시 확장 설정 패널의 로어북 선택
+   * (활성 설정)과 합쳐(중복 제거) 적용된다.
+   */
+  private renderMediaLorebookGroups(wrap: HTMLElement): void {
+    const session = this.session;
+    const scenario = this.scenario;
+    if (!session || !scenario) return;
+    const stella = scenario.data?.extensions?.stella;
+
+    const groups: Array<{
+      key: "translationLorebookIds" | "illustrationLorebookIds";
+      label: string;
+      enabled: boolean;
+      ids: string[];
+    }> = [
+      {
+        key: "translationLorebookIds",
+        label: "번역 로어북",
+        enabled: session.meta.translation?.enabled === true,
+        ids: stella?.translationLorebookIds ?? [],
+      },
+      {
+        key: "illustrationLorebookIds",
+        label: "삽화 로어북",
+        enabled: session.meta.illustration?.enabled === true,
+        ids: stella?.illustrationLorebookIds ?? [],
+      },
+    ];
+
+    for (const g of groups) {
+      if (!g.enabled) continue;
+      const groupEl = wrap.createDiv({ cls: "ggai-session-lorebook-group" });
+      groupEl.createDiv({
+        cls: "ggai-text-field-label",
+        text: `${g.label} (시나리오 공유)`,
+      });
+      const btn = groupEl.createEl("button", {
+        cls: "ggai-preset-btn ggai-media-lorebook-btn",
+        text: g.ids.length > 0 ? `로어북 ${g.ids.length}개 선택됨` : "로어북 선택",
+      });
+      if (g.ids.length > 0) btn.addClass("is-active");
+      btn.addEventListener("click", () => {
+        void LorebookSelectModal.open(this.plugin, [...g.ids], {
+          title: `${g.label} 선택 (이 시나리오의 모든 세션 공유)`,
+        }).then((ids) => {
+          if (ids) void this.handleSetScenarioMediaLorebooks(g.key, ids);
+        });
+      });
+    }
+  }
+
+  private async handleSetScenarioMediaLorebooks(
+    key: "translationLorebookIds" | "illustrationLorebookIds",
+    ids: string[]
+  ): Promise<void> {
+    const file = this.scenarioFile;
+    const scenario = this.scenario;
+    if (!file || !scenario) return;
+    const ext = ensureStellaExt(scenario);
+    ext[key] = ids.length > 0 ? ids : undefined;
+    try {
+      await this.plugin.store.saveScenario(file, scenario);
+      this.renderSessionLorebookArea(); // 버튼 카운트 갱신
+    } catch (err) {
+      console.warn("[GGAI Stella] 미디어 로어북 저장 실패:", err);
+      new Notice(`저장 실패: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   private async handleToggleScenarioLorebook(
@@ -665,11 +877,13 @@ export class ScenarioSection {
       new Notice("세션이 없습니다.");
       return;
     }
-    // 펜딩 저장 먼저 — 미저장 메모리/작가노트가 컨텍스트에 반영되도록.
-    this.flush();
-    // 세션창의 미저장 본문 편집도 커밋 — 미리보기 = 실제 전송본 불변식.
-    await this.plugin.flushSessionEdits(file);
+    // 전 과정을 try 로 감싼다 — flush 단계에서 터져도 조용히 죽지 않고
+    // Notice 로 드러나게 (버튼이 "아무 반응 없음"이 되는 경로 차단).
     try {
+      // 펜딩 저장 먼저 — 미저장 메모리/작가노트가 컨텍스트에 반영되도록.
+      this.flush();
+      // 세션창의 미저장 본문 편집도 커밋 — 미리보기 = 실제 전송본 불변식.
+      await this.plugin.flushSessionEdits(file);
       const result = await buildSessionContextDryRun(this.plugin, file);
       if ("error" in result) {
         new Notice(result.error);
@@ -678,8 +892,8 @@ export class ScenarioSection {
       new ContextPreviewModal(this.plugin.app, result).open();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn("[GGAI Stella] 컨텍스트 dry-run 실패:", err);
-      new Notice(`컨텍스트 빌드 실패: ${msg}`);
+      console.error("[GGAI Stella] 컨텍스트 미리보기 실패:", err);
+      new Notice(`컨텍스트 미리보기 실패: ${msg}`);
     }
   }
 
@@ -782,14 +996,13 @@ export class ScenarioSection {
     }
   }
 
-  /** 같은 sessionFile 을 들고 있는 SessionView leaf 들의 state 를 새 경로로 setState. */
+  /** 같은 sessionFile 을 들고 있는 세션 호스트 leaf 들의 state 를 새 경로로 setState. */
   private retargetSessionViews(oldFile: string, newFile: string): void {
-    const leaves = this.plugin.app.workspace.getLeavesOfType(VIEW_TYPE_SESSION);
-    for (const leaf of leaves) {
+    for (const leaf of getSessionHostLeaves(this.plugin.app.workspace)) {
       const view = leaf.view;
-      if (view instanceof SessionView && view.getSessionFile() === oldFile) {
+      if (isSessionHostView(view) && view.getSessionFile() === oldFile) {
         void leaf.setViewState({
-          type: VIEW_TYPE_SESSION,
+          type: leaf.view.getViewType(),
           state: { sessionFile: newFile },
         });
       }

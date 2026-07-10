@@ -140,18 +140,25 @@ export class StellaExtensionRegistry {
       .join("\n\n");
   }
 
-  /** 생성 완료 훅을 모두 실행한다. 각 확장 에러는 격리(생성 저장을 막지 않음). */
+  /**
+   * 생성 완료 훅을 모두 실행한다. 각 확장 에러는 격리(생성 저장을 막지 않음).
+   * 훅들은 서로 독립(번역/삽화/요약 등)이므로 **병렬** 실행한다 — 각각 AI 호출이라
+   * 순차로 돌리면 생성 후 대기가 배로 길어진다.
+   */
   async runGenerationComplete(
     input: Omit<GenerationCompleteInput, "plugin">
   ): Promise<void> {
-    for (const ext of this.extensions.values()) {
-      if (!ext.onGenerationComplete) continue;
-      try {
-        await ext.onGenerationComplete({ plugin: this.plugin, ...input });
-      } catch (err) {
-        console.warn(`[GGAI Stella] 확장 생성-완료 훅 실패 (${ext.id}):`, err);
-      }
-    }
+    await Promise.all(
+      [...this.extensions.values()]
+        .filter((ext) => ext.onGenerationComplete)
+        .map(async (ext) => {
+          try {
+            await ext.onGenerationComplete!({ plugin: this.plugin, ...input });
+          } catch (err) {
+            console.warn(`[GGAI Stella] 확장 생성-완료 훅 실패 (${ext.id}):`, err);
+          }
+        })
+    );
   }
 
   /** 로어북 선택 대체를 등록한 확장이 있으면 그 선택 함수, 없으면 null(기본 매칭). */

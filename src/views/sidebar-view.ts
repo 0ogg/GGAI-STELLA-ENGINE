@@ -7,7 +7,8 @@ import {
   debounce,
   setIcon,
 } from "obsidian";
-import { VIEW_TYPE_SESSION, VIEW_TYPE_SIDEBAR } from "../constants";
+import { VIEW_TYPE_SIDEBAR } from "../constants";
+import { getSessionHostLeaves } from "./session-host";
 import type StellaEnginePlugin from "../main";
 import { StellaStore } from "../state/store";
 import type { LorebookListItem } from "../util/scan-lorebooks";
@@ -27,7 +28,6 @@ import {
 import {
   confirmDeleteLorebook,
   confirmDeleteScenario,
-  confirmDeleteSession,
   confirmDeleteUser,
   createAndOpenSession,
   openSessionByPath,
@@ -37,6 +37,7 @@ import {
   promptRenameSession,
   runImportPicker,
 } from "./entity-actions";
+import { buildSessionMenu } from "./session-menu";
 
 type SidebarTab = "scenario" | "user" | "lorebook";
 type SidebarCardLayout = "compact" | "cover";
@@ -140,6 +141,13 @@ export class SidebarView extends ItemView {
             return;
           }
         }
+      })
+    );
+    this.registerEvent(
+      this.store.on("session-unread-changed", (file: string) => {
+        // 안 읽음 뱃지 갱신 — 그 세션이 속한 시나리오가 펼쳐져 있을 때만.
+        const folder = file.split("/SESSIONS/")[0];
+        if (this.expanded.has(folder)) void this.reloadSessions(folder);
       })
     );
     // 로어북 변경 (L3a) — 활성 탭이 lorebook 일 때만 그 안만 갱신.
@@ -789,12 +797,28 @@ export class SidebarView extends ItemView {
         cls: "ggai-session-name",
         text: s.session.meta.name || s.folderName,
       });
+      const unread = this.plugin.getSessionUnread(s.sessionFile);
+      if (unread) {
+        row.createEl("span", {
+          cls: "ggai-unread-badge",
+          text: String(unread.count),
+        });
+      }
       const timeLabel = formatRelativeTime(
         s.session.meta.lastPlayedAt || s.session.meta.modifiedAt || s.session.meta.createdAt
       );
       if (timeLabel) {
         row.createEl("span", { cls: "ggai-session-time", text: timeLabel });
       }
+
+      // ⋮ 메뉴 — 우클릭/롱프레스와 같은 메뉴를 항상 보이는 버튼으로.
+      const moreBtn = row.createEl("button", { cls: "ggai-session-more" });
+      setIcon(moreBtn, "more-vertical");
+      moreBtn.setAttr("aria-label", "세션 메뉴");
+      moreBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.sessionMenu(s).showAtMouseEvent(e);
+      });
 
       row.addEventListener("click", (e) => {
         if (this.consumeSuppressedClick(e)) return;
@@ -871,27 +895,16 @@ export class SidebarView extends ItemView {
     }
   }
 
+  /** 세션 공용 메뉴 — 항목 구성은 session-menu.ts 한 곳에서만 관리한다. */
+  private sessionMenu(s: SessionListItem): Menu {
+    return buildSessionMenu(this.plugin, s, {
+      onRename: () => this.renameSession(s),
+      onCopy: () => void this.copySession(s),
+    });
+  }
+
   private showSessionMenu(e: MouseEvent, s: SessionListItem): void {
-    new Menu()
-      .addItem((menuItem) =>
-        menuItem.setTitle("복제").onClick(() => void this.copySession(s))
-      )
-      .addItem((menuItem) =>
-        menuItem.setTitle("열기").onClick(() => void this.openSession(s))
-      )
-      .addItem((menuItem) =>
-        menuItem.setTitle("이름 변경").onClick(() => this.renameSession(s))
-      )
-      .addItem((menuItem) =>
-        menuItem
-          .setTitle(s.session.meta.favorite ? "즐겨찾기 해제" : "즐겨찾기")
-          .onClick(() => void this.toggleSessionFavorite(s))
-      )
-      .addSeparator()
-      .addItem((menuItem) =>
-        menuItem.setTitle("삭제").onClick(() => this.confirmDeleteSession(s))
-      )
-      .showAtMouseEvent(e);
+    this.sessionMenu(s).showAtMouseEvent(e);
   }
 
   private renameSession(s: SessionListItem): void {
@@ -906,26 +919,7 @@ export class SidebarView extends ItemView {
   }
 
   private showSessionMenuAt(x: number, y: number, s: SessionListItem): void {
-    new Menu()
-      .addItem((menuItem) =>
-        menuItem.setTitle("복제").onClick(() => void this.copySession(s))
-      )
-      .addItem((menuItem) =>
-        menuItem.setTitle("열기").onClick(() => void this.openSession(s))
-      )
-      .addItem((menuItem) =>
-        menuItem.setTitle("이름 변경").onClick(() => this.renameSession(s))
-      )
-      .addItem((menuItem) =>
-        menuItem
-          .setTitle(s.session.meta.favorite ? "즐겨찾기 해제" : "즐겨찾기")
-          .onClick(() => void this.toggleSessionFavorite(s))
-      )
-      .addSeparator()
-      .addItem((menuItem) =>
-        menuItem.setTitle("삭제").onClick(() => this.confirmDeleteSession(s))
-      )
-      .showAtPosition({ x, y });
+    this.sessionMenu(s).showAtPosition({ x, y });
   }
 
   private showLorebookMenu(e: MouseEvent, item: LorebookListItem): void {
@@ -1028,7 +1022,7 @@ export class SidebarView extends ItemView {
     if (this.plugin.data.lastActiveSessionFile === oldFile) {
       void this.plugin.savePluginData({ lastActiveSessionFile: newFile });
     }
-    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_SESSION)) {
+    for (const leaf of getSessionHostLeaves(this.app.workspace)) {
       const view = leaf.view as unknown as {
         getSessionFile?: () => string | null;
       };
@@ -1038,7 +1032,7 @@ export class SidebarView extends ItemView {
           ? (leaf.view.getState() as Record<string, unknown>)
           : {};
       void leaf.setViewState({
-        type: VIEW_TYPE_SESSION,
+        type: leaf.view.getViewType(),
         state: { ...state, sessionFile: newFile },
       });
     }
@@ -1106,7 +1100,7 @@ export class SidebarView extends ItemView {
   }
 
   private triggerAddSession(item: ScenarioListItem): void {
-    void createAndOpenSession(this.plugin, item);
+    void createAndOpenSession(this.plugin, item, { mode: "ask" });
   }
 
   private async openSession(s: SessionListItem): Promise<void> {
@@ -1115,10 +1109,6 @@ export class SidebarView extends ItemView {
 
   private async openSessionByPath(sessionFile: string): Promise<void> {
     await openSessionByPath(this.plugin, sessionFile);
-  }
-
-  private confirmDeleteSession(s: SessionListItem): void {
-    confirmDeleteSession(this.plugin, s);
   }
 
   // --- sort/filter ---

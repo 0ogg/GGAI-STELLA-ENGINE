@@ -8,6 +8,9 @@ export const VIEW_TYPE_SIDEBAR = "ggai-stella-sidebar";
 /** 세션 편집 뷰 (워크스페이스 메인). B1 부터 등록만, B2 에서 편집기 구현. */
 export const VIEW_TYPE_SESSION = "ggai-stella-session";
 
+/** 챗 모드 세션 뷰 (M6/C0) — 소설 세션뷰와 완전 별도. meta.mode === "chat" 세션 전용. */
+export const VIEW_TYPE_CHAT_SESSION = "ggai-stella-chat-session";
+
 export const VIEW_TYPE_DASHBOARD = "ggai-stella-dashboard";
 
 /** 우측 사이드바 detail 뷰. R3 에서 뼈대 + 탭, R4/R5 에서 내용. */

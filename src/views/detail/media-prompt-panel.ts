@@ -1,7 +1,7 @@
 import { Menu, Modal, Notice, Setting, setIcon } from "obsidian";
 import type StellaEnginePlugin from "../../main";
 import type { GenerationProfileLite, ImageProfileLite } from "../../services/ai-service";
-import type { ActiveSettings, MediaPromptItem, MediaPromptLibrary } from "../../types/preset";
+import type { MediaPromptItem, MediaPromptLibrary } from "../../types/preset";
 import { attachLongPress } from "../../util/long-press";
 import { getDefaultPrompts, isBuiltinMediaPrompt } from "../../util/default-media-prompts";
 import { TRANSLATION_IO_INSTRUCTIONS } from "../../util/translate-paragraphs";
@@ -10,10 +10,7 @@ import { PARAGRAPH_REGEN_IO_INSTRUCTIONS } from "../../util/paragraph-regen";
 import { LorebookSelectModal } from "../lorebook-select-modal";
 import { createModalShell } from "../modal-shell";
 import { uuidv4 } from "../../util/uuid";
-import {
-  renderEnableToggle,
-  renderModelPicker,
-} from "./setting-controls";
+import { renderModelPicker } from "./setting-controls";
 
 export type PromptBucket = keyof MediaPromptLibrary;
 export type MediaModelProfile = GenerationProfileLite | ImageProfileLite;
@@ -175,7 +172,7 @@ export interface MediaPromptPickerOptions {
 /**
  * 번역/삽화/요약/외부 확장 패널 공용 — 저장 프롬프트 선택 그리드.
  * 버튼 그리드 + ＋추가 + 꾹누르기/우클릭 메뉴(편집·삭제·기본값 되돌리기) + 내장/수정됨 표시.
- * (MediaSection = 번역/삽화, ExpandSection 의 요약 패널이 공용으로 쓴다.)
+ * (확장 탭의 번역/삽화/요약 패널이 공용으로 쓴다.)
  */
 export function renderMediaPromptPicker(opts: MediaPromptPickerOptions): void {
   const block = opts.parent.createDiv({ cls: "ggai-media-block" });
@@ -314,110 +311,7 @@ async function deleteMediaPrompt(
   opts.onDeleted?.(prompt.id);
 }
 
-/**
- * 번역/삽화 설정 패널 공용 베이스 — 모델/프롬프트 선택기, 로어북 선택기,
- * 마스터 스위치 토글을 공용 함수(위 `renderMedia*`) 위에 얇게 감싼다.
- * (MediaSection = 번역/삽화. 요약 패널은 확장 패널 레지스트리로 이전됨 — `panels/summary-panel.ts`.)
- */
-export abstract class MediaPromptSectionBase {
-  protected settings: ActiveSettings = {};
-  protected activeSessionFile: string | null = null;
-
-  constructor(protected plugin: StellaEnginePlugin) {}
-
-  protected abstract render(): void;
-  protected abstract clearDeletedPromptSelection(
-    bucket: PromptBucket,
-    promptId: string
-  ): Partial<ActiveSettings> | null;
-
-  /** 번역/삽화 마스터 스위치 — 박스 안에 라벨 + 체크박스. */
-  protected renderEnableToggle(
-    parent: HTMLElement,
-    label: string,
-    checked: boolean,
-    onChange: (checked: boolean) => Promise<void>
-  ): void {
-    renderEnableToggle({
-      parent,
-      label,
-      checked,
-      onChange: (c) => void onChange(c),
-    });
-  }
-
-  /** 번역/삽화용 로어북 선택 — 클릭하면 모달에서 로딩·체크. meta.id 로 저장. */
-  protected renderLorebookPicker(
-    parent: HTMLElement,
-    opts: {
-      label: string;
-      selectedIds: string[];
-      onToggle: (ids: string[]) => Promise<void>;
-    }
-  ): void {
-    renderMediaLorebookPicker({ plugin: this.plugin, parent, ...opts });
-  }
-
-  protected renderModelPicker(
-    parent: HTMLElement,
-    label: string,
-    profiles: MediaModelProfile[],
-    activeId: string | undefined,
-    onSelect: (profileId: string) => Promise<void>,
-    emptyText: string
-  ): void {
-    renderMediaModelPicker({
-      plugin: this.plugin,
-      parent,
-      label,
-      profiles,
-      activeId,
-      onSelect,
-      emptyText,
-    });
-  }
-
-  protected renderPromptPicker(
-    parent: HTMLElement,
-    opts: {
-      label: string;
-      bucket: PromptBucket;
-      activeId: string | undefined;
-      onSelect: (promptId: string) => Promise<void>;
-    }
-  ): void {
-    renderMediaPromptPicker({
-      plugin: this.plugin,
-      parent,
-      label: opts.label,
-      bucket: opts.bucket,
-      activeId: opts.activeId,
-      onSelect: opts.onSelect,
-      onChanged: () => this.render(),
-      onDeleted: (promptId) => {
-        const patch = this.clearDeletedPromptSelection(opts.bucket, promptId);
-        if (patch) {
-          void this.plugin
-            .patchActiveSettings(patch, this.activeSessionFile)
-            .then(async () => {
-              this.settings = await this.plugin.resolveActiveSettings(
-                this.activeSessionFile
-              );
-              this.render();
-            });
-        } else {
-          this.render();
-        }
-      },
-    });
-  }
-
-  protected openCoreSettings(): void {
-    openCoreSettings(this.plugin);
-  }
-}
-
-/** 미디어 프롬프트 추가/편집 모달 — 우측 미디어 설정과 문단 재생성 패널이 공용. */
+/** 미디어 프롬프트 추가/편집 모달 — 확장 설정 패널과 문단 재생성 패널이 공용. */
 export class PromptEditModal extends Modal {
   private titleValue: string;
   private promptValue: string;

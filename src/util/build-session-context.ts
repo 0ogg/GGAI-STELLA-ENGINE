@@ -1,5 +1,6 @@
 import type StellaEnginePlugin from "../main";
 import type { GenerationProfileLite } from "../services/ai-service";
+import type { ActiveSettings } from "../types/preset";
 import type { StellaSession } from "../types/session";
 import {
   buildContext,
@@ -8,6 +9,20 @@ import {
   type ContextBuilderInputV2,
   type ContextBuilderOutputV2,
 } from "./context-builder";
+import { buildChatLog } from "./chat-messages";
+
+/** 챗 세션 로그 — excludeTail 이면 끝의 assistant 메시지 1개 제외 (챗 재생성 전용). */
+function buildChatSessionLog(
+  session: StellaSession,
+  leafId: string,
+  excludeTail: boolean
+): { role: "user" | "assistant"; content: string }[] {
+  const log = buildChatLog(session, leafId);
+  if (excludeTail && log.length > 0 && log[log.length - 1].role === "assistant") {
+    log.pop();
+  }
+  return log;
+}
 import {
   buildAnchorInstruction,
   currentParagraphLength,
@@ -21,9 +36,11 @@ import { scanPrompts } from "./scan-prompts";
 import { buildSessionLog } from "./session-view-logic";
 import { buildSpans, spansToText } from "./session-text";
 import {
+  applyChatTurnNames,
   buildNaiFormatSegments,
   buildTextCompletionSegments,
   segmentsToString,
+  type ChatCompletionNames,
   type PromptSegment,
 } from "./text-completion-prompt";
 
@@ -49,6 +66,12 @@ export interface SessionRequestPayloadText {
   /** 위 문자열의 파트별 세그먼트 — 이어붙이면 prompt 와 byte 단위로 같다. */
   segments: PromptSegment[];
   naiFormat: boolean;
+  /**
+   * 챗 세션 전용 — 히스토리가 `이름: ` 턴으로 평탄화됐고 끝에 `{{char}}:` 오프너가
+   * 붙어 있다는 표시. 생성 결과는 trimChatCompletionOutput 으로 유저 턴을 잘라야
+   * 한다 (ST 스탑 스트링 대응 — NAI 는 문자열 스탑을 못 받아 후처리로 절단).
+   */
+  chatNames?: ChatCompletionNames;
 }
 
 export interface SessionRequestPayloadChat {
@@ -92,6 +115,18 @@ export interface SessionRequestPlan {
 export interface PlanSessionRequestOptions {
   /** 컨텍스트를 만들 leaf. 기본은 활성 leaf(=이어쓰기가 보낼 지점). */
   leafId?: string;
+  /**
+   * 챗 재생성 전용 — 대화 로그 끝의 assistant 메시지 1개를 컨텍스트에서 제외한다.
+   * (마지막 AI 메시지 뒤에 편집 노드가 붙어 있어 leaf 를 부모로 옮길 수 없을 때,
+   * "갈아끼울 메시지"가 모델에게 자기 이전 답으로 보이지 않게 한다.)
+   */
+  excludeTailAssistant?: boolean;
+  /**
+   * 이 생성 1회에만 쓰는 활성 설정 오버라이드 (프리셋 랜덤 순환 등).
+   * 세션 meta/PluginData 에는 아무것도 쓰지 않는다 — 전송본 조립에서만 덮는다.
+   * 키가 존재하는 필드만 덮으므로(spread), 없는 필드는 활성 설정 그대로다.
+   */
+  settingsOverride?: ActiveSettings;
 }
 
 /**
@@ -112,7 +147,10 @@ export async function planSessionRequest(
   const session = await plugin.store.getSession(sessionFile);
   if (!session) return { error: "세션을 불러올 수 없습니다." };
 
-  const settings = await plugin.resolveActiveSettings(sessionFile);
+  const settings = {
+    ...(await plugin.resolveActiveSettings(sessionFile)),
+    ...(opts.settingsOverride ?? {}),
+  };
   const allProfiles = plugin.ai.listGenerationProfiles();
   const profile = settings.modelProfileId
     ? allProfiles.find((p) => p.id === settings.modelProfileId) ?? null
@@ -199,9 +237,14 @@ export async function planSessionRequest(
     lorebooks,
     mode: session.meta.mode,
     novelChatRoleMode,
-    sessionLog: buildSessionLog(parentSpans, session.meta.mode, {
-      novelChatRoleMode,
-    }),
+    // 챗 세션 로그는 span author 추측이 아니라 노드에서 직접 만든다 —
+    // 연속 같은 역할 메시지가 구분 없이 붙는 문제 방지 (챗 모드 스펙.md).
+    sessionLog:
+      session.meta.mode === "chat"
+        ? buildChatSessionLog(session, leafId, opts.excludeTailAssistant === true)
+        : buildSessionLog(parentSpans, session.meta.mode, {
+            novelChatRoleMode,
+          }),
     memory: session.meta.memory,
     authorNote: session.meta.authorNote,
     summary: summaryContext || undefined,
@@ -227,21 +270,35 @@ export async function planSessionRequest(
   if (profile.kind === "text") {
     // 텍스트 모델은 NAI 형식 기본 ON(명시적으로 끈 경우만 평문).
     const naiFormat = resolveNaiFormat(profile.kind, settings.naiFormat);
+    // 챗 세션 → 텍스트 모델: ST 호환 이름 턴 — 히스토리를 `이름: ` 프리픽스로
+    // 평탄화하고 끝에 `{{char}}:` 오프너를 연다. 미리보기도 이 payload 그대로.
+    const chatNames: ChatCompletionNames | undefined =
+      session.meta.mode === "chat"
+        ? {
+            user: user.name?.trim() || "User",
+            char: (scenarioData.name ?? "").trim() || "Character",
+          }
+        : undefined;
+    const flatMessages = chatNames
+      ? applyChatTurnNames(output.messages, chatNames)
+      : output.messages;
     const segments = naiFormat
-      ? buildNaiFormatSegments(output.messages)
-      : buildTextCompletionSegments(output.messages);
+      ? buildNaiFormatSegments(flatMessages)
+      : buildTextCompletionSegments(flatMessages);
     payload = {
       kind: "text",
       prompt: segmentsToString(segments),
       segments,
       naiFormat,
+      chatNames,
     };
   } else {
     const messages = normalizeMessagesForChat(output.messages);
     // 이어쓰기 이음새 보정 — 마지막 문장 반복 지시문을 전송본 끝에 붙인다.
     // 미리보기도 이 payload 를 그대로 그리므로 지시문이 그대로 보인다.
     let anchor: string | undefined;
-    if (settings.continueAnchor) {
+    // 이어쓰기 이음새 보정은 소설 전용 — 챗 세션에는 절대 붙이지 않는다.
+    if (settings.continueAnchor && session.meta.mode !== "chat") {
       const bodyText = spansToText(parentSpans);
       anchor = extractAnchorSentence(bodyText) ?? undefined;
       if (anchor) {

@@ -21,7 +21,7 @@ export function createSummarySettingsPanel(): SettingsPanel {
   return {
     id: "stella:summary",
     title: "요약 설정",
-    order: 0,
+    order: 2, // 번역(0)/삽화(1) 다음 — 구 미디어 영역과 같은 순서.
     render(body, ctx) {
       const { plugin, settings } = ctx;
 
@@ -69,6 +69,19 @@ export function createSummarySettingsPanel(): SettingsPanel {
         step: 1,
         integer: true,
         onChange: (threshold) => void patchSummarize(ctx, { threshold }),
+      });
+
+      // 요약 최대 토큰 — 누적 요약이 이 토큰을 넘으면 오래된 상위 절반을 압축.
+      // 0 = 압축 안 함.
+      renderNumberRow({
+        parent: body,
+        label: "요약 최대 토큰(넘으면 압축, 0=안 함)",
+        value: settings.summarize?.maxTokens ?? 0,
+        fallback: 0,
+        min: 0,
+        step: 100,
+        integer: true,
+        onChange: (maxTokens) => void patchSummarize(ctx, { maxTokens }),
       });
 
       // 수동 요약 / 요약 관리 — 즉시 요약하거나, 사건 조각을 확인·수정·재생성하는

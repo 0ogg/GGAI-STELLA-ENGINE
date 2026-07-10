@@ -67,6 +67,20 @@ export interface StellaScenarioExtension {
    * AI 생성 시 default + extra 가 모두 활성. 세션이 일부를 끄거나 더 추가할 수 있다.
    */
   extraLorebookIds?: string[];
+
+  /**
+   * 번역 확장용 로어북 (UUID 배열) — **이 시나리오의 모든 세션이 공유**한다.
+   * 번역 실행 시 활성 설정(세션/전역)의 번역 로어북과 합쳐(중복 제거) 적용된다.
+   * 디테일뷰 시나리오 탭에서 선택 (번역 사용 중일 때만 노출).
+   */
+  translationLorebookIds?: string[];
+
+  /**
+   * 삽화 확장용 로어북 (UUID 배열) — **이 시나리오의 모든 세션이 공유**한다.
+   * 삽화 프롬프트 생성 시 활성 설정의 삽화 로어북과 합쳐(중복 제거) 적용된다.
+   * 디테일뷰 시나리오 탭에서 선택 (삽화 사용 중일 때만 노출).
+   */
+  illustrationLorebookIds?: string[];
 }
 
 export interface StellaScenario {

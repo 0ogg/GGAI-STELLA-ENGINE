@@ -11,7 +11,11 @@
  */
 
 import type { Span, StellaSession } from "../types/session";
-import type { SessionSummaries, SummaryAnchor } from "../types/summary";
+import type {
+  SessionSummaries,
+  SummaryAnchor,
+  SummaryCompaction,
+} from "../types/summary";
 import { isAINode } from "./session-tree";
 import { applyPatch, pathToLeaf, spansLength } from "./session-text";
 
@@ -47,6 +51,109 @@ export function collectAnchorChain(
 export function composeSummaryContext(anchors: SummaryAnchor[]): string {
   const events = anchors.map((a) => a.events.trim()).filter((e) => e !== "");
   const state = anchors.length > 0 ? anchors[anchors.length - 1].state.trim() : "";
+  if (events.length === 0 && !state) return "";
+  return JSON.stringify({ pastEvents: events, currentState: state }, null, 2);
+}
+
+// ─────────────────────────── 압축(컴팩트) 반영 합성 ───────────────────────────
+
+/**
+ * 경로에 적용되는 "유효 요약" — 오래된 앵커들을 접은 압축본(있으면)과 그 이후 개별
+ * 앵커를 분리해 돌려준다.
+ *
+ *  - compaction: 경로 위 throughNodeId 를 가진 압축 중 **경로상 가장 뒤**의 것.
+ *    없으면 null.
+ *  - anchors: 압축이 커버하는 노드(throughNodeId 포함) **이후**의 개별 앵커만.
+ *    압축이 없으면 경로 위 모든 앵커.
+ *
+ * 분기 안전: 압축의 throughNodeId 가 현재 경로에 없으면 그 압축은 무시된다(다른 분기의
+ * 압축이 이 경로에 새지 않는다).
+ */
+export function collectEffectiveSummary(
+  session: StellaSession,
+  summaries: SessionSummaries,
+  leafId: string = session.meta.activeLeafId
+): { compaction: SummaryCompaction | null; anchors: SummaryAnchor[] } {
+  const path = pathToLeaf(session, leafId);
+  const indexOf = new Map<string, number>();
+  path.forEach((n, i) => indexOf.set(n.id, i));
+
+  // 경로 위 앵커 (경로 순서대로).
+  const anchors: SummaryAnchor[] = [];
+  for (const node of path) {
+    const anchor = summaries.anchors[node.id];
+    if (anchor) anchors.push(anchor);
+  }
+
+  // 경로 위에서 가장 뒤에 있는 압축을 고른다.
+  let best: SummaryCompaction | null = null;
+  let bestIdx = -1;
+  const compactions = summaries.compactions ?? {};
+  for (const key of Object.keys(compactions)) {
+    const c = compactions[key];
+    const idx = indexOf.get(c.throughNodeId);
+    if (idx === undefined) continue;
+    if (idx > bestIdx) {
+      bestIdx = idx;
+      best = c;
+    }
+  }
+
+  if (!best) return { compaction: null, anchors };
+  // 압축이 커버하는 노드(throughNodeId 포함) 이후의 앵커만 개별로 남긴다.
+  const kept = anchors.filter((a) => (indexOf.get(a.nodeId) ?? -1) > bestIdx);
+  return { compaction: best, anchors: kept };
+}
+
+/**
+ * 상속 요약 — 다음화로 물려줄 "지금까지의 누적 요약"을 events 한 덩어리 + state 로 합성한다.
+ * 압축본이 있으면 앞세우고 이후 앵커 events 를 이어붙인다. leafId 시점까지만 반영한다
+ * (다음화가 물려주는 경계 노드까지의 요약). 새 화 root 에 앵커 하나로 심는 데 쓴다.
+ */
+export function composeInheritedSummary(
+  session: StellaSession,
+  summaries: SessionSummaries,
+  leafId: string = session.meta.activeLeafId
+): { events: string; state: string } {
+  const { compaction, anchors } = collectEffectiveSummary(session, summaries, leafId);
+  const parts: string[] = [];
+  if (compaction && compaction.events.trim() !== "") parts.push(compaction.events.trim());
+  for (const a of anchors) {
+    const e = a.events.trim();
+    if (e !== "") parts.push(e);
+  }
+  const state =
+    anchors.length > 0
+      ? anchors[anchors.length - 1].state.trim()
+      : compaction
+      ? compaction.state.trim()
+      : "";
+  return { events: parts.join("\n\n"), state };
+}
+
+/**
+ * {{summary}} 주입 텍스트 — 압축 반영 버전. 경로 위 압축본을 앞세우고, 그 이후 앵커의
+ * 사건 요약을 이어붙인 뒤, 마지막 상황 스냅샷을 붙인다. composeSummaryContext 와 같은
+ * JSON shape 를 낸다 (미리보기=전송본 대전제).
+ */
+export function composeSummaryContextForPath(
+  session: StellaSession,
+  summaries: SessionSummaries,
+  leafId: string = session.meta.activeLeafId
+): string {
+  const { compaction, anchors } = collectEffectiveSummary(session, summaries, leafId);
+  const events: string[] = [];
+  if (compaction && compaction.events.trim() !== "") events.push(compaction.events.trim());
+  for (const a of anchors) {
+    const e = a.events.trim();
+    if (e !== "") events.push(e);
+  }
+  const state =
+    anchors.length > 0
+      ? anchors[anchors.length - 1].state.trim()
+      : compaction
+      ? compaction.state.trim()
+      : "";
   if (events.length === 0 && !state) return "";
   return JSON.stringify({ pastEvents: events, currentState: state }, null, 2);
 }
@@ -177,6 +284,73 @@ export function buildSummaryRequestBody(payload: SummaryRequestPayload): string 
   return JSON.stringify(payload);
 }
 
+// ─────────────────────────── 압축 입출력 규약 ───────────────────────────
+
+/** 압축 결과. state 는 압축하지 않고 경계 앵커의 스냅샷을 그대로 쓴다. */
+export interface CompactionResult {
+  events: string;
+}
+
+export const COMPACTION_IO_INSTRUCTIONS = [
+  "You are compressing older story-summary fragments into a single shorter digest.",
+  'Input is a JSON object: { "events": string[] } — older event digests in chronological order.',
+  "Merge them into ONE concise digest that preserves key plot points, character developments,",
+  "and unresolved threads, dropping redundancy and minor detail. Keep chronological order.",
+  "Write in the same language as the input.",
+  "Respond with a JSON object only — no markdown fences, no commentary:",
+  '{ "events": string }',
+].join("\n");
+
+export function buildCompactionRequestBody(events: string[]): string {
+  return JSON.stringify({ events });
+}
+
+/** 압축 응답 파싱 — events 는 문자열 또는 문자열 배열 허용 (summary 와 동일 관용). */
+export function parseCompactionResponse(text: string): CompactionResult | null {
+  const raw = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "");
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  try {
+    const obj = JSON.parse(raw.slice(start, end + 1)) as Record<string, unknown>;
+    const events = coerceSummaryField(obj.events);
+    if (events === null || events.trim() === "") return null;
+    return { events };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 압축 계획 — 유효 요약(압축본 + 이후 앵커)을 시간순 블록으로 놓고 오래된 상위 절반을
+ * 고른다. 블록이 2개 미만이면(접을 게 없으면) null. 항상 최소 1개 블록은 최근분으로 남긴다.
+ */
+export function planCompaction(effective: {
+  compaction: SummaryCompaction | null;
+  anchors: SummaryAnchor[];
+}): { throughNodeId: string; state: string; oldEvents: string[] } | null {
+  const blocks: { events: string; nodeId: string; state: string }[] = [];
+  if (effective.compaction) {
+    blocks.push({
+      events: effective.compaction.events,
+      nodeId: effective.compaction.throughNodeId,
+      state: effective.compaction.state,
+    });
+  }
+  for (const a of effective.anchors) {
+    blocks.push({ events: a.events, nodeId: a.nodeId, state: a.state });
+  }
+  if (blocks.length < 2) return null;
+
+  let olderCount = Math.ceil(blocks.length / 2);
+  if (olderCount >= blocks.length) olderCount = blocks.length - 1;
+  const older = blocks.slice(0, olderCount);
+  const boundary = older[older.length - 1];
+  const oldEvents = older.map((b) => b.events.trim()).filter((e) => e !== "");
+  if (oldEvents.length === 0) return null;
+  return { throughNodeId: boundary.nodeId, state: boundary.state, oldEvents };
+}
+
 /**
  * events/state 필드 정규화 — 문자열이면 그대로, 문자열 배열이면 줄바꿈으로 이어붙인다.
  * 모델이 "events"(복수)를 리스트로 내놓는 경우가 흔해 배열도 받아 문자열로 만든다.
@@ -241,6 +415,44 @@ export function recordSummaryAnchor(
   };
   summaries.anchors[input.nodeId] = anchor;
   return anchor;
+}
+
+/**
+ * 압축본 기록 — throughNodeId 를 키로 저장(in-place). 오래된 앵커 자체는 지우지 않고
+ * 덮어쓰기(합성 시 override)만 한다. 이전 압축을 오래된 절반에 흡수했다면 그 이전
+ * throughNodeId 의 압축본은 이제 무의미하므로 제거한다.
+ */
+export function recordCompaction(
+  summaries: SessionSummaries,
+  input: {
+    throughNodeId: string;
+    events: string;
+    state: string;
+    tokens?: number;
+    now?: number;
+    /** 이번 압축에 흡수된 이전 압축의 throughNodeId (있으면 제거). */
+    absorbedThroughNodeId?: string;
+  }
+): SummaryCompaction {
+  if (!summaries.compactions) summaries.compactions = {};
+  const now = input.now ?? Date.now();
+  const existing = summaries.compactions[input.throughNodeId];
+  if (
+    input.absorbedThroughNodeId &&
+    input.absorbedThroughNodeId !== input.throughNodeId
+  ) {
+    delete summaries.compactions[input.absorbedThroughNodeId];
+  }
+  const compaction: SummaryCompaction = {
+    throughNodeId: input.throughNodeId,
+    events: input.events,
+    state: input.state,
+    tokens: input.tokens,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  };
+  summaries.compactions[input.throughNodeId] = compaction;
+  return compaction;
 }
 
 /**

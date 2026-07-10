@@ -11,6 +11,7 @@ import {
   WorkspaceLeaf,
 } from "obsidian";
 import {
+  VIEW_TYPE_CHAT_SESSION,
   VIEW_TYPE_DASHBOARD,
   VIEW_TYPE_DETAIL,
   VIEW_TYPE_ILLUSTRATION_OUTPUT,
@@ -29,6 +30,18 @@ import {
 } from "./services/settings-panel-registry";
 import { StellaExtensionRegistry } from "./services/extension-registry";
 import { registerSummaryExtension } from "./extensions/summary-extension";
+import { registerTranslationExtension } from "./extensions/translation-extension";
+import { registerIllustrationExtension } from "./extensions/illustration-extension";
+import {
+  canVibrate,
+  getOsNotificationStatus,
+  playNotifySound,
+  playNotifyVibration,
+  registerNotificationExtension,
+  requestAndTestOsNotification,
+  sendTestWebhookPush,
+  type OsNotificationStatus,
+} from "./extensions/notification-extension";
 import { StellaStore } from "./state/store";
 import type { ActiveSettings, MediaPromptLibrary, StellaPreset } from "./types/preset";
 import type { StellaUserProfile } from "./types/user";
@@ -52,7 +65,13 @@ import {
 import { DetailView } from "./views/detail-view";
 import { installGlobalImeTracker } from "./views/edit-guard";
 import { IllustrationOutputView } from "./views/illustration-output-view";
-import { SessionView } from "./views/session-view";
+import { ChatSessionView } from "./views/chat-session-view";
+import {
+  getSessionHostLeaves,
+  isSessionHostView,
+  SESSION_HOST_VIEW_TYPES,
+} from "./views/session-host";
+import { SessionView, type SessionViewCommand } from "./views/session-view";
 import { SidebarView } from "./views/sidebar-view";
 
 /**
@@ -90,6 +109,8 @@ export interface StellaPluginData {
   branchShowTranslation?: boolean;
   /** 세션별 마지막 읽던 위치 — 보던 노드 기준 앵커. key = sessionFile. 재실행 복원용. */
   sessionAnchor?: Record<string, SessionScrollAnchor>;
+  /** 세션별 안 읽은 AI 응답 — 보고 있지 않을 때 생성이 끝나면 쌓이고, 세션을 보면 지워진다. key = sessionFile. */
+  sessionUnread?: Record<string, SessionUnread>;
   /** 우측 디테일 뷰 UI 상태(섹션 접힘 등) 영속. */
   detailUi?: {
     basic?: Record<string, unknown>;
@@ -112,12 +133,34 @@ export interface StellaPluginData {
   installOnboardingShown?: boolean;
 }
 
+/**
+ * 세션 하나의 안 읽음 상태 (N0). 알림 확장(notification-extension)이 기록하고,
+ * 사용자가 그 세션을 보면(`rememberActiveSessionFile`/창 포커스 복귀) 지워진다.
+ */
+export interface SessionUnread {
+  /** 안 읽은 AI 응답 수. */
+  count: number;
+  /** 마지막 도착 시각 (epoch ms). */
+  lastAt: number;
+  /** 마지막 도착분 앞부분 — 홈 히어로 카드 미리보기용. */
+  preview?: string;
+}
+
 export interface StellaPluginSettings {
   autoGenerateSessionTitle?: boolean;
   /** 모바일에서 세션 조작 패널을 시스템 내비게이션 바 위로 띄우는 추가 여백(px). PC 미적용. */
   toolbarBottomGap?: number;
   /** 읽기 모드 내보내기(.md) 저장 폴더. 비면 vault 루트에 만든다. */
   exportFolder?: string;
+  /**
+   * 응답 도착 푸시 웹훅 URL (선택). 설정하면 안 보고 있는 세션의 생성 완료를
+   * 이 주소로 POST 한다 — ntfy(https://ntfy.sh/<주제>)를 넣으면 휴대폰 실제 푸시.
+   */
+  notifyWebhookUrl?: string;
+  /** 응답 도착 알림음 (기본 켜짐). OS 알림 권한과 무관하게 앱이 직접 재생. */
+  notifySound?: boolean;
+  /** 응답 도착 진동 (기본 켜짐). 모바일(안드로이드)에서만 동작. */
+  notifyVibrate?: boolean;
 }
 
 /**
@@ -138,6 +181,20 @@ export interface StellaPluginSettings {
  *  - 모든 AI 호출은 `this.ai` 를 통한다. Core API 직접 접근 금지.
  *  - View 는 `store.on(...)` / `ai.on(...)` 로 변경을 구독해 자체 갱신.
  */
+/**
+ * 예전 버전이 등록했다가 제거된 스텔라 뷰 타입들. 편집기 4종은 대시보드 내부
+ * 라우트로 편입되며 별도 워크스페이스 뷰가 폐기됐다. 이 타입으로 저장돼 있던
+ * 탭은 지금 플러그인이 등록하지 않으므로 옵시디언이 "유령 탭"(No view of type …)
+ * 으로 복원하고, 어떤 코드도 정리하지 못해 재시작해도 영원히 남는다. 로드 시
+ * 저장된 상태 타입으로 찾아 닫는다.
+ */
+const DEPRECATED_STELLA_VIEW_TYPES = [
+  "ggai-stella-scenario-editor",
+  "ggai-stella-lorebook-editor",
+  "ggai-stella-user-editor",
+  "ggai-stella-prompts-editor",
+] as const;
+
 export default class StellaEnginePlugin extends Plugin {
   /** 데이터 단일 진실 소스. View 등록 전에 반드시 초기화. */
   store!: StellaStore;
@@ -200,8 +257,11 @@ export default class StellaEnginePlugin extends Plugin {
       this.store.trigger("settings-panels-changed")
     );
     this.extensions = new StellaExtensionRegistry(this);
-    // 내장 확장 등록 — 요약(확장 + 설정 패널). 외부 플러그인도 같은 API 로 꽂는다.
+    // 내장 확장 등록 — 번역/삽화/요약(확장 + 설정 패널). 외부 플러그인도 같은 API 로 꽂는다.
+    registerTranslationExtension(this);
+    registerIllustrationExtension(this);
     registerSummaryExtension(this);
+    registerNotificationExtension(this);
     this.addSettingTab(new StellaSettingTab(this.app, this));
 
     // 4. View 등록 (plugin 인스턴스 주입 — view 가 store/ai 접근)
@@ -212,6 +272,10 @@ export default class StellaEnginePlugin extends Plugin {
     this.registerView(
       VIEW_TYPE_SESSION,
       (leaf: WorkspaceLeaf) => new SessionView(leaf, this)
+    );
+    this.registerView(
+      VIEW_TYPE_CHAT_SESSION,
+      (leaf: WorkspaceLeaf) => new ChatSessionView(leaf, this)
     );
     this.registerView(
       VIEW_TYPE_DASHBOARD,
@@ -226,38 +290,65 @@ export default class StellaEnginePlugin extends Plugin {
       (leaf: WorkspaceLeaf) => new IllustrationOutputView(leaf, this)
     );
 
-    // 5. 명령 — 우측 detail 패널 열기
-    this.addCommand({
-      id: "open-stella-detail-pane",
-      name: "GGAI Stella 우측 패널 열기",
-      callback: () => void this.revealDetail(),
-    });
-
-    // 6. 리본 아이콘
+    // 5. 명령 — 전역(어디서나) 열기 커맨드
     this.addCommand({
       id: "open-stella-dashboard",
-      name: "GGAI Stella dashboard",
+      name: "대시보드(로비) 열기",
       callback: () => void this.openStellaPanel(),
     });
+    this.addCommand({
+      id: "open-stella-sidebar",
+      name: "시나리오 목록(사이드바) 열기",
+      callback: () => void this.revealSidebar(),
+    });
+    this.addCommand({
+      id: "open-stella-detail-pane",
+      name: "우측 상세 패널 열기",
+      callback: () => void this.revealDetail(),
+    });
+    this.addCommand({
+      id: "open-stella-illustration-output",
+      name: "삽화 출력 창 열기",
+      callback: () => void this.revealIllustrationOutput(),
+    });
+    // 최근에 하던 세션으로 바로 복귀 (로비를 거치지 않는 단축키).
+    this.addCommand({
+      id: "resume-last-session",
+      name: "최근 세션 이어하기",
+      checkCallback: (checking: boolean) => {
+        const sessionFile = this.getActiveOrLastSessionFile();
+        if (!sessionFile) return false;
+        if (!checking) void this.openStellaSession(sessionFile);
+        return true;
+      },
+    });
 
+    // 세션 진행 중 자주 쓰는 액션 — 하단 툴바/뷰어 바 버튼과 같은 동작을
+    // 커맨드/단축키로도 노출. (활성 세션창이 있을 때만 동작.)
+    this.registerSessionCommands();
+
+    // 업데이트 뒤 옵시디언 도크에 남은 스텔라 유령/중복 탭을 즉시 정리.
+    this.addCommand({
+      id: "cleanup-stella-ghost-tabs",
+      name: "유령 탭 정리",
+      callback: () => this.reconcileStellaLeaves(),
+    });
+
+    // 6. 리본 아이콘 — 실행용 아이콘 하나만 둔다(나머지 진입은 전부 커맨드).
+    // 업데이트/핫리로드로 이전 버전 리본이 쌓이지 않게 먼저 전부 제거하고 다시 단다.
+    this.removeStaleRibbonIcons();
     this.addRibbonIcon("sparkles", "GGAI Stella", () => {
       void this.revealSidebar();
     });
 
-    // 삽화 출력 전용 뷰 열기 (우측 사이드바 자체 아이콘)
-    this.addCommand({
-      id: "open-stella-illustration-output",
-      name: "GGAI Stella 삽화 출력 열기",
-      callback: () => void this.revealIllustrationOutput(),
-    });
-    this.addRibbonIcon("image", "GGAI Stella 삽화 출력", () => {
-      void this.revealIllustrationOutput();
-    });
-
     // 7. 최초 레이아웃 준비 시 좌우 뷰 + Default 프롬프트 세트 보장
     this.app.workspace.onLayoutReady(() => {
-      void this.ensureSidebarLeaf();
-      void this.ensureDetailLeaf();
+      // 탐색기/디테일 싱글턴 정리 + 삽화 출력·옛 편집기 유령 탭 정리.
+      this.reconcileStellaLeaves();
+      // 지연 로드된 유령 탭은 레이아웃 준비 직후엔 아직 안 나타날 수 있어 한 번 더.
+      this.registerInterval(
+        window.setTimeout(() => this.reconcileStellaLeaves(), 1200)
+      );
       void this.ensureDefaultPromptPreset();
       this.updateStellaPanelActiveClass(this.app.workspace.activeLeaf);
       if (isFreshInstall) {
@@ -270,7 +361,7 @@ export default class StellaEnginePlugin extends Plugin {
 
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
-        if (leaf?.view instanceof SessionView) {
+        if (isSessionHostView(leaf?.view)) {
           this.rememberActiveSessionFile(leaf.view.getSessionFile());
         }
         // 여러 Stella 패널(로비)이 열려 있을 때, 지금 보고 있는 그 패널을
@@ -297,19 +388,43 @@ export default class StellaEnginePlugin extends Plugin {
           delete map[file];
           patch.sessionAnchor = map;
         }
+        if (this.data.sessionUnread?.[file] !== undefined) {
+          const map = { ...this.data.sessionUnread };
+          delete map[file];
+          patch.sessionUnread = map;
+        }
         if (Object.keys(patch).length > 0) void this.savePluginData(patch);
       })
     );
     this.registerEvent(
       this.store.on("session-renamed", (oldFile: string, newFile: string) => {
-        const prev = this.data.sessionAnchor?.[oldFile];
-        if (prev === undefined) return;
-        const map = { ...this.data.sessionAnchor };
-        delete map[oldFile];
-        map[newFile] = prev;
-        void this.savePluginData({ sessionAnchor: map });
+        const patch: Partial<StellaPluginData> = {};
+        const prevAnchor = this.data.sessionAnchor?.[oldFile];
+        if (prevAnchor !== undefined) {
+          const map = { ...this.data.sessionAnchor };
+          delete map[oldFile];
+          map[newFile] = prevAnchor;
+          patch.sessionAnchor = map;
+        }
+        const prevUnread = this.data.sessionUnread?.[oldFile];
+        if (prevUnread !== undefined) {
+          const map = { ...this.data.sessionUnread };
+          delete map[oldFile];
+          map[newFile] = prevUnread;
+          patch.sessionUnread = map;
+        }
+        if (Object.keys(patch).length > 0) void this.savePluginData(patch);
       })
     );
+    // 안 읽음은 "그 세션을 보는 순간" 지워진다. 같은 세션 탭을 켜둔 채 창만 벗어났다
+    // 돌아오는 경우 active-leaf-change 가 안 터지므로 창 포커스 복귀에서도 확인한다.
+    this.registerDomEvent(window, "focus", () => {
+      const view = this.app.workspace.activeLeaf?.view;
+      if (isSessionHostView(view)) {
+        const f = view.getSessionFile();
+        if (f) void this.clearSessionUnread(f);
+      }
+    });
   }
 
   /**
@@ -459,6 +574,33 @@ export default class StellaEnginePlugin extends Plugin {
     await this.savePluginData({ sessionAnchor: map });
   }
 
+  /** 세션별 안 읽음 상태 조회 (없으면 null). */
+  getSessionUnread(sessionFile: string): SessionUnread | null {
+    return this.data.sessionUnread?.[sessionFile] ?? null;
+  }
+
+  /** 안 읽은 AI 응답 1건 누적 + 영속화. 뱃지 갱신용 store 이벤트 발행. */
+  async markSessionUnread(sessionFile: string, preview?: string): Promise<void> {
+    const map = { ...(this.data.sessionUnread ?? {}) };
+    const prev = map[sessionFile];
+    map[sessionFile] = {
+      count: (prev?.count ?? 0) + 1,
+      lastAt: Date.now(),
+      preview: preview || prev?.preview,
+    };
+    await this.savePluginData({ sessionUnread: map });
+    this.store.trigger("session-unread-changed", sessionFile);
+  }
+
+  /** 세션 안 읽음 해제 (읽은 것으로 처리). 상태가 없으면 아무것도 안 함. */
+  async clearSessionUnread(sessionFile: string): Promise<void> {
+    if (this.data.sessionUnread?.[sessionFile] === undefined) return;
+    const map = { ...this.data.sessionUnread };
+    delete map[sessionFile];
+    await this.savePluginData({ sessionUnread: map });
+    this.store.trigger("session-unread-changed", sessionFile);
+  }
+
   /** 세션창 본문 보기 스타일 조회 (기본값 병합 + 범위 clamp). */
   getViewStyle(): SessionViewStyle {
     return clampSessionViewStyle(this.data.viewStyle);
@@ -543,26 +685,37 @@ export default class StellaEnginePlugin extends Plugin {
       const profile = this.ai.getProfileById(preset.modelProfileId);
       if (profile) await this.setNaiFormatForModel(profile.kind, sessionFile);
     }
+    // 사용자가 직접 고른 설정 — 랜덤 순환이 켜져 있어도 다음 1회 생성은 이대로.
+    this.notePresetRotationManualChoice();
     if (!opts?.silent) {
       await this.savePluginData({ lastActivePresetId: preset.id });
     }
   }
 
+  /** 사용자가 프리셋/모델을 직접 고른 직후 — 다음 1회 생성은 순환을 건너뛴다. */
+  private presetRotationSkipOnce = false;
+
+  notePresetRotationManualChoice(): void {
+    this.presetRotationSkipOnce = true;
+  }
+
   /**
    * 프리셋 자동 순환 — 켜져 있으면 즐겨찾기한 프리셋 중 하나를 무작위로 골라(주사위
-   * 굴리기) 활성 설정에 적용한다(이어쓰기 직전 호출). 즐겨찾기가 없으면 아무 것도
-   * 안 한다. `silent` 적용이라 프리셋 그리드의 "선택됨" 표시는 바뀌지 않는다 —
-   * 사용자가 마지막으로 직접 고른 프리셋 그대로 보인다.
-   * 적용된 프리셋 id 를 돌려준다(없으면 null).
+   * 굴리기) **그 프리셋 객체만 돌려준다**. 활성 설정/세션/PluginData/UI 에는 아무것도
+   * 쓰지 않는다 — 호출자(세션창 생성)가 전송 1회용 오버라이드로만 쓴다
+   * (presetToGenerationOverride → planSessionRequest.settingsOverride).
+   * 사용자가 프리셋/모델을 직접 고른 직후 1회는 건너뛰어 그 선택 그대로 생성한다.
    */
-  async maybeRotatePreset(sessionFile: string | null): Promise<string | null> {
+  async pickRotationPreset(): Promise<StellaPreset | null> {
     if (!this.data.presetRotationEnabled) return null;
+    if (this.presetRotationSkipOnce) {
+      this.presetRotationSkipOnce = false;
+      return null;
+    }
     const items = await this.store.getPresets();
     const favs = items.filter((i) => i.preset.favorite);
     if (favs.length === 0) return null;
-    const pick = favs[Math.floor(Math.random() * favs.length)];
-    await this.applyPreset(pick.preset, sessionFile, { silent: true });
-    return pick.preset.id;
+    return favs[Math.floor(Math.random() * favs.length)].preset;
   }
 
   // ─── R4e 이전 호환 (UI 가 R4e2 에서 새 헬퍼로 옮겨가면 제거) ────────
@@ -679,12 +832,12 @@ export default class StellaEnginePlugin extends Plugin {
   /** 지금 워크스페이스에 열려 있는 세션 뷰의 파일 — "세션 중"인지 판별용(없으면 null). */
   private getOpenSessionFile(): string | null {
     const active = this.app.workspace.activeLeaf;
-    if (active?.view instanceof SessionView) {
+    if (isSessionHostView(active?.view)) {
       const f = active.view.getSessionFile();
       if (f) return f;
     }
-    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_SESSION)) {
-      if (leaf.view instanceof SessionView) {
+    for (const leaf of getSessionHostLeaves(this.app.workspace)) {
+      if (isSessionHostView(leaf.view)) {
         const f = leaf.view.getSessionFile();
         if (f) return f;
       }
@@ -693,7 +846,10 @@ export default class StellaEnginePlugin extends Plugin {
   }
 
   rememberActiveSessionFile(sessionFile: string | null): void {
-    if (!sessionFile || this.data.lastActiveSessionFile === sessionFile) return;
+    if (!sessionFile) return;
+    // 세션이 활성화됐다 = 사용자가 보기 시작했다 → 안 읽음 해제.
+    void this.clearSessionUnread(sessionFile);
+    if (this.data.lastActiveSessionFile === sessionFile) return;
     void this.savePluginData({ lastActiveSessionFile: sessionFile });
     // 같은 세션 뷰 leaf 안에서 세션을 바꾸면 active-leaf-change 가 안 터진다.
     // 활성 세션 변경의 단일 지점에서 이벤트를 발행해 DetailView 등이 실시간 반영하게 한다.
@@ -706,9 +862,9 @@ export default class StellaEnginePlugin extends Plugin {
    * 문단까지 컨텍스트에 포함되도록 한다 (미리보기 = 전송본 불변식).
    */
   async flushSessionEdits(sessionFile: string): Promise<void> {
-    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_SESSION)) {
+    for (const leaf of getSessionHostLeaves(this.app.workspace)) {
       const view = leaf.view;
-      if (view instanceof SessionView && view.getSessionFile() === sessionFile) {
+      if (isSessionHostView(view) && view.getSessionFile() === sessionFile) {
         await view.flushPendingEdits();
       }
     }
@@ -719,9 +875,9 @@ export default class StellaEnginePlugin extends Plugin {
    * 세션이 열려 있지 않거나 그 노드가 활성 경로에 없으면 false.
    */
   scrollOpenSessionToNode(sessionFile: string, nodeId: string): boolean {
-    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_SESSION)) {
+    for (const leaf of getSessionHostLeaves(this.app.workspace)) {
       const view = leaf.view;
-      if (view instanceof SessionView && view.getSessionFile() === sessionFile) {
+      if (isSessionHostView(view) && view.getSessionFile() === sessionFile) {
         return view.scrollToNode(nodeId);
       }
     }
@@ -730,20 +886,74 @@ export default class StellaEnginePlugin extends Plugin {
 
   getActiveOrLastSessionFile(): string | null {
     const active = this.app.workspace.activeLeaf;
-    if (active?.view instanceof SessionView) {
+    if (isSessionHostView(active?.view)) {
       const activeSession = active.view.getSessionFile();
       if (activeSession) return activeSession;
     }
 
     if (this.data.lastActiveSessionFile) return this.data.lastActiveSessionFile;
 
-    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_SESSION)) {
-      if (leaf.view instanceof SessionView) {
+    for (const leaf of getSessionHostLeaves(this.app.workspace)) {
+      if (isSessionHostView(leaf.view)) {
         const sessionFile = leaf.view.getSessionFile();
         if (sessionFile) return sessionFile;
       }
     }
     return null;
+  }
+
+  /** 지금 활성 탭이 소설 세션창이면 그 뷰 (세션 커맨드 checkCallback 대상). */
+  private getActiveNovelSessionView(): SessionView | null {
+    return this.app.workspace.getActiveViewOfType(SessionView);
+  }
+
+  /**
+   * 세션 진행 액션을 옵시디언 커맨드로 등록한다. 각 커맨드는 활성 소설 세션창이
+   * 있고 그 액션이 지금 가능할 때만 동작한다(checkCallback → 단축키 게이트).
+   * 실제 동작은 SessionView.runSessionCommand — 하단 툴바/뷰어 바 버튼과 단일 소스.
+   */
+  private registerSessionCommands(): void {
+    const cmds: Array<{ id: string; name: string; action: SessionViewCommand }> =
+      [
+        { id: "session-continue", name: "세션: 이어쓰기 / 생성 중단", action: "continue" },
+        { id: "session-regenerate", name: "세션: 재생성", action: "regenerate" },
+        {
+          id: "session-toggle-translation",
+          name: "세션: 원문 ↔ 번역 전환",
+          action: "toggle-translation",
+        },
+        { id: "session-prev-branch", name: "세션: 이전 분기", action: "prev-branch" },
+        { id: "session-next-branch", name: "세션: 다음 분기", action: "next-branch" },
+        {
+          id: "session-quicksave",
+          name: "세션: 이 지점 저장(즐겨찾기)",
+          action: "quicksave",
+        },
+        {
+          id: "session-batch-translate",
+          name: "세션: 번역 안 된 문단 모두 번역",
+          action: "batch-translate",
+        },
+        {
+          id: "session-illustrate",
+          name: "세션: 현재 지점 삽화 생성",
+          action: "illustrate",
+        },
+        { id: "session-open-gallery", name: "세션: 삽화 갤러리 열기", action: "gallery" },
+        { id: "session-go-lobby", name: "세션: 나가기(로비로)", action: "lobby" },
+      ];
+    for (const { id, name, action } of cmds) {
+      this.addCommand({
+        id,
+        name,
+        checkCallback: (checking: boolean) => {
+          const view = this.getActiveNovelSessionView();
+          if (!view || !view.sessionCommandAvailable(action)) return false;
+          if (!checking) void view.runSessionCommand(action);
+          return true;
+        },
+      });
+    }
   }
 
   /**
@@ -775,11 +985,12 @@ export default class StellaEnginePlugin extends Plugin {
     opts?: { focusIllustrationNode?: string }
   ): Promise<void> {
     this.rememberActiveSessionFile(sessionFile);
+    const viewType = await this.resolveSessionViewType(sessionFile);
     const panel = this.getStellaPanelLeaf();
     const leaf = panel ?? this.findReusableSessionLeaf() ?? this.app.workspace.getLeaf("tab");
     if (panel) this.stellaPanelLeaf = panel;
     await leaf.setViewState({
-      type: VIEW_TYPE_SESSION,
+      type: viewType,
       active: true,
       state: {
         sessionFile,
@@ -788,6 +999,21 @@ export default class StellaEnginePlugin extends Plugin {
       },
     });
     this.app.workspace.revealLeaf(leaf);
+  }
+
+  /**
+   * 세션의 mode 로 열릴 뷰를 결정하는 단일 라우팅 지점 (M6/C0).
+   * `"chat"` 이 명시된 세션만 챗 뷰 — mode 누락/불명/읽기 실패는 전부 소설 뷰.
+   * (기존 세션이 챗 뷰로 잘못 열리는 일을 원천 차단.)
+   */
+  private async resolveSessionViewType(sessionFile: string): Promise<string> {
+    try {
+      const session = await this.store.getSession(sessionFile);
+      if (session?.meta.mode === "chat") return VIEW_TYPE_CHAT_SESSION;
+    } catch {
+      // 읽기 실패 → 소설 뷰가 기존 에러 처리를 담당
+    }
+    return VIEW_TYPE_SESSION;
   }
 
   /**
@@ -800,7 +1026,7 @@ export default class StellaEnginePlugin extends Plugin {
     if (
       panel &&
       panel.view instanceof DashboardView &&
-      panel.view.getViewType() !== VIEW_TYPE_SESSION
+      !isSessionHostView(panel.view)
     ) {
       this.stellaPanelLeaf = panel;
       panel.view.navigateToEditor(kind, file);
@@ -850,8 +1076,7 @@ export default class StellaEnginePlugin extends Plugin {
   async openStellaFile(file: TFile): Promise<void> {
     const panel = this.getStellaPanelLeaf();
     // 세션이 열린 패널은 재사용하지 않는다 — 세션 탭 덮어쓰기 방지.
-    const reusable =
-      panel && panel.view.getViewType() !== VIEW_TYPE_SESSION ? panel : null;
+    const reusable = panel && !isSessionHostView(panel.view) ? panel : null;
     const leaf = reusable ?? this.app.workspace.getLeaf(true);
     if (reusable) this.stellaPanelLeaf = reusable;
     await leaf.openFile(file);
@@ -903,7 +1128,7 @@ export default class StellaEnginePlugin extends Plugin {
   }
 
   private isStellaViewType(type: string): boolean {
-    return type === VIEW_TYPE_DASHBOARD || type === VIEW_TYPE_SESSION;
+    return type === VIEW_TYPE_DASHBOARD || SESSION_HOST_VIEW_TYPES.includes(type);
   }
 
   private isLeafAttached(target: WorkspaceLeaf): boolean {
@@ -918,12 +1143,26 @@ export default class StellaEnginePlugin extends Plugin {
     const active = this.app.workspace.activeLeaf;
     if (this.isReusableSessionTarget(active)) return active;
 
-    const emptySessionLeaf = this.app.workspace
-      .getLeavesOfType(VIEW_TYPE_SESSION)
-      .find((leaf) => this.isReusableSessionTarget(leaf));
+    const emptySessionLeaf = getSessionHostLeaves(this.app.workspace).find(
+      (leaf) => this.isReusableSessionTarget(leaf)
+    );
     if (emptySessionLeaf) return emptySessionLeaf;
 
     return this.app.workspace.getLeavesOfType("empty")[0] ?? null;
+  }
+
+  /**
+   * 스텔라가 좌측 리본에 단 아이콘을 전부 제거한다. 옵시디언이 업데이트/핫리로드
+   * 시 이전 인스턴스의 리본 아이콘을 정리하지 못해 쌓이는 문제(폐기된 기능의
+   * 유령 아이콘 포함)를 막는다 — 아이콘을 새로 달기 직전에 1회 호출한다.
+   * 스텔라 아이콘은 모두 aria-label 이 "GGAI Stella" 로 시작하므로 그것으로 판별한다.
+   */
+  private removeStaleRibbonIcons(): void {
+    const actions = document.querySelectorAll(".side-dock-ribbon-action");
+    actions.forEach((el) => {
+      const label = el.getAttribute("aria-label") ?? "";
+      if (label.startsWith("GGAI Stella")) el.remove();
+    });
   }
 
   private isReusableSessionTarget(leaf: WorkspaceLeaf | null): leaf is WorkspaceLeaf {
@@ -932,17 +1171,53 @@ export default class StellaEnginePlugin extends Plugin {
     if (viewType === "empty") return true;
     // User-requested policy: selecting a different session should replace the
     // currently open Stella session tab.
-    return leaf.view instanceof SessionView;
+    return isSessionHostView(leaf.view);
+  }
+
+  /**
+   * 저장된 상태 타입(getViewState().type)이 주어진 타입인 리프를 전부 모은다.
+   *
+   * **핵심**: 옵시디언 최신 버전은 보이지 않는 사이드바 탭을 지연 로드(deferred
+   * view)로 둔다. 이때 `getLeavesOfType()` 와 live `view.getViewType()` 는 그 탭을
+   * 놓치므로, 리로드마다 "기존 탭 없음"으로 오판해 새 탭이 하나씩 쌓였다. 저장된
+   * 상태 타입은 지연/유령(등록 해제된 옛 타입) 탭까지 항상 정확히 식별한다.
+   */
+  private findLeavesByStateType(...types: string[]): WorkspaceLeaf[] {
+    const out: WorkspaceLeaf[] = [];
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      const stateType = leaf.getViewState()?.type ?? leaf.view?.getViewType();
+      if (stateType && types.includes(stateType)) out.push(leaf);
+    });
+    return out;
+  }
+
+  /** 제거된 옛 편집기 뷰 타입으로 저장된 유령 탭을 전부 닫는다. */
+  private removeDeprecatedGhostLeaves(): void {
+    for (const leaf of this.findLeavesByStateType(...DEPRECATED_STELLA_VIEW_TYPES))
+      leaf.detach();
+  }
+
+  /**
+   * 스텔라가 옵시디언 도크에 배치하는 단일(싱글턴) 탭들을 정리한다 — 탐색기/디테일은
+   * 정확히 하나씩만 남기고, 삽화 출력·옛 편집기 유령 탭은 정리한다. 지연 로드된
+   * 유령이 늦게 나타나는 경우를 대비해 로드 직후 + 잠깐 뒤 두 번 호출된다.
+   */
+  private reconcileStellaLeaves(): void {
+    void this.ensureSidebarLeaf();
+    void this.ensureDetailLeaf();
+    // 삽화 출력 뷰는 요청 시에만 열리므로 중복/유령만 정리(재생성 안 함).
+    for (const leaf of this.findLeavesByStateType(
+      VIEW_TYPE_ILLUSTRATION_OUTPUT
+    ).slice(1))
+      leaf.detach();
+    this.removeDeprecatedGhostLeaves();
   }
 
   private async ensureSidebarLeaf(): Promise<void> {
-    const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_SIDEBAR);
-    // User-requested policy: hot reload must not accumulate Stella explorer
-    // tabs. Keep exactly one left sidebar explorer leaf and close duplicates.
+    // 업데이트/리로드로 남은 탐색기 탭(지연·유령 포함)은 첫 하나만 남기고 닫는다.
+    const existing = this.findLeavesByStateType(VIEW_TYPE_SIDEBAR);
     if (existing.length > 0) {
-      for (const leaf of existing.slice(1)) {
-        leaf.detach();
-      }
+      for (const leaf of existing.slice(1)) leaf.detach();
       return;
     }
 
@@ -954,17 +1229,15 @@ export default class StellaEnginePlugin extends Plugin {
 
   private async revealSidebar(): Promise<void> {
     await this.ensureSidebarLeaf();
-    const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_SIDEBAR);
+    const leaves = this.findLeavesByStateType(VIEW_TYPE_SIDEBAR);
     if (leaves[0]) this.app.workspace.revealLeaf(leaves[0]);
   }
 
   /** 우측 사이드바에 detail view 를 항상 배치 — 리본이 없는 모바일에서도 세션/디테일에 바로 접근하도록. */
   private async ensureDetailLeaf(): Promise<void> {
-    const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_DETAIL);
+    const existing = this.findLeavesByStateType(VIEW_TYPE_DETAIL);
     if (existing.length > 0) {
-      for (const leaf of existing.slice(1)) {
-        leaf.detach();
-      }
+      for (const leaf of existing.slice(1)) leaf.detach();
       return;
     }
 
@@ -989,10 +1262,9 @@ export default class StellaEnginePlugin extends Plugin {
 
   /** 우측 사이드바에 삽화 출력 뷰가 없으면 만들고, 있으면 reveal. */
   async revealIllustrationOutput(): Promise<void> {
-    const existing = this.app.workspace.getLeavesOfType(
-      VIEW_TYPE_ILLUSTRATION_OUTPUT
-    );
+    const existing = this.findLeavesByStateType(VIEW_TYPE_ILLUSTRATION_OUTPUT);
     if (existing[0]) {
+      for (const leaf of existing.slice(1)) leaf.detach();
       this.app.workspace.revealLeaf(existing[0]);
       return;
     }
@@ -1086,6 +1358,127 @@ class StellaSettingTab extends PluginSettingTab {
           });
         new FolderSuggest(this.app, text.inputEl);
       });
+
+    new Setting(containerEl)
+      .setName("응답 도착 알림음")
+      .setDesc(
+        "안 보고 있는 세션의 AI 응답이 도착하면 짧은 알림음을 냅니다. " +
+          "OS 알림 권한과 무관하며, PC는 창이 백그라운드여도 소리가 나고 모바일은 앱 실행 중에 동작합니다. 켜는 순간 미리 들려줍니다."
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.data.settings?.notifySound !== false)
+          .onChange(async (value) => {
+            await this.plugin.savePluginData({
+              settings: {
+                ...(this.plugin.data.settings ?? {}),
+                notifySound: value,
+              },
+            });
+            if (value) playNotifySound();
+          })
+      );
+
+    // 진동 — 지원 환경(모바일 안드로이드 등)에서만 항목 노출.
+    if (canVibrate()) {
+      new Setting(containerEl)
+        .setName("응답 도착 진동")
+        .setDesc(
+          "안 보고 있는 세션의 AI 응답이 도착하면 짧게 진동합니다. 무음 모드에서도 도착을 알 수 있습니다. 켜는 순간 미리 진동합니다."
+        )
+        .addToggle((toggle) =>
+          toggle
+            .setValue(this.plugin.data.settings?.notifyVibrate !== false)
+            .onChange(async (value) => {
+              await this.plugin.savePluginData({
+                settings: {
+                  ...(this.plugin.data.settings ?? {}),
+                  notifyVibrate: value,
+                },
+              });
+              if (value) playNotifyVibration();
+            })
+        );
+    }
+
+    // 데스크톱 OS 알림 — 권한을 미리 확보하고 테스트 토스트로 표시 여부까지 확인.
+    if (Platform.isDesktopApp) {
+      const osLabel = (status: OsNotificationStatus): string => {
+        switch (status) {
+          case "granted":
+            return "권한 상태: 허용됨 — [테스트 알림]으로 실제 표시되는지 확인하세요.";
+          case "denied":
+            return "권한 상태: 거부됨 — OS 설정(Windows: 설정 > 시스템 > 알림)에서 Obsidian을 허용해야 합니다.";
+          case "default":
+            return "권한 상태: 미정 — [권한 요청 + 테스트]를 누르면 권한을 받고 테스트 알림을 띄웁니다.";
+          default:
+            return "이 환경에서는 OS 알림을 지원하지 않습니다.";
+        }
+      };
+      const osSetting = new Setting(containerEl)
+        .setName("데스크톱 알림 (자리 비움 시)")
+        .setDesc(osLabel(getOsNotificationStatus()));
+      osSetting.addButton((btn) =>
+        btn
+          .setButtonText(
+            getOsNotificationStatus() === "granted"
+              ? "테스트 알림"
+              : "권한 요청 + 테스트"
+          )
+          .onClick(async () => {
+            const status = await requestAndTestOsNotification();
+            osSetting.setDesc(osLabel(status));
+            btn.setButtonText(
+              status === "granted" ? "테스트 알림" : "권한 요청 + 테스트"
+            );
+            if (status === "granted") {
+              new Notice(
+                "테스트 알림을 보냈습니다. 화면 구석(알림 센터)에 뜨는지 확인하세요. 안 보이면 OS의 집중 지원/알림 설정을 확인해 주세요."
+              );
+            } else if (status === "denied") {
+              new Notice(
+                "알림 권한이 거부되어 있습니다. OS 설정에서 Obsidian 알림을 허용해 주세요."
+              );
+            }
+          })
+      );
+    }
+
+    new Setting(containerEl)
+      .setName("응답 도착 푸시 알림 웹훅 URL")
+      .setDesc(
+        "안 보고 있는 세션의 AI 응답이 도착하면 이 주소로 알림을 보냅니다. " +
+          "휴대폰으로 받으려면: ntfy 앱 설치 → 앱에서 아무 주제(예: my-stella-abc123)를 구독 → " +
+          "여기에 https://ntfy.sh/그주제 를 입력하고 [테스트 전송]으로 확인. 비워두면 사용 안 함."
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("https://ntfy.sh/…")
+          .setValue(this.plugin.data.settings?.notifyWebhookUrl ?? "")
+          .onChange(async (value) => {
+            await this.plugin.savePluginData({
+              settings: {
+                ...(this.plugin.data.settings ?? {}),
+                notifyWebhookUrl: value.trim(),
+              },
+            });
+          })
+      )
+      .addButton((btn) =>
+        btn.setButtonText("테스트 전송").onClick(async () => {
+          btn.setDisabled(true);
+          try {
+            const fail = await sendTestWebhookPush(this.plugin);
+            new Notice(
+              fail
+                ? `웹훅 테스트 실패: ${fail}`
+                : "웹훅 테스트를 보냈습니다. 휴대폰(ntfy 앱)에 도착했는지 확인하세요."
+            );
+          } finally {
+            btn.setDisabled(false);
+          }
+        })
+      );
 
     new Setting(containerEl)
       .setName("조작 패널 하단 여백 (모바일)")

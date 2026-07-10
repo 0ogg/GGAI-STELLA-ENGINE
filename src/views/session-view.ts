@@ -1,5 +1,9 @@
 import { ItemView, Notice, Platform, TFile, WorkspaceLeaf, setIcon } from "obsidian";
-import { VIEW_TYPE_DASHBOARD, VIEW_TYPE_SESSION } from "../constants";
+import {
+  VIEW_TYPE_CHAT_SESSION,
+  VIEW_TYPE_DASHBOARD,
+  VIEW_TYPE_SESSION,
+} from "../constants";
 import type StellaEnginePlugin from "../main";
 import { AIService, type GenerationProfileLite } from "../services/ai-service";
 import { StellaStore } from "../state/store";
@@ -33,6 +37,7 @@ import type {
   IllustrationVariant,
 } from "../types/media";
 import type { TranslationOutputMode } from "../types/preset";
+import { presetToGenerationOverride } from "../types/preset";
 import {
   getActiveIllustration,
   listIllustrationVariants,
@@ -41,11 +46,7 @@ import {
   setActiveIllustrationVariant,
   toggleIllustrationFavorite,
 } from "../util/illustrations";
-import {
-  completedParagraphsAfter,
-  computeIllustrationAnchors,
-  DEFAULT_ILLUSTRATION_AUTO_MIN_PARAGRAPHS,
-} from "../util/illustration-anchors";
+import { computeIllustrationAnchors } from "../util/illustration-anchors";
 import type { IllustrationAnchor } from "../util/illustration-anchors";
 import { computeLatestAiMarkerOffset } from "../util/ai-start-marker";
 import { isImeComposing, runWhenImeIdle } from "./edit-guard";
@@ -68,13 +69,9 @@ import {
   type SessionScrollAnchor,
 } from "../util/session-anchor";
 import { attachLongPress } from "../util/long-press";
-import {
-  collectAnchorChain,
-  composeSummaryContext,
-} from "../util/summarize-session";
+import { composeSummaryContextForPath } from "../util/summarize-session";
 import {
   collectUntranslatedParagraphs,
-  collectUntranslatedParagraphsFrom,
   getActiveTranslation,
   hasTranslation,
   recordTranslationVariant,
@@ -144,6 +141,22 @@ type BodyHighlightRange = {
   to: number;
   className: string;
 };
+
+/**
+ * 옵시디언 커맨드 → 세션 액션 (main.ts addCommand 라우팅).
+ * 하단 툴바 / 뷰어 바 버튼과 1:1 대응 — 같은 핸들러를 단축키로도 실행한다.
+ */
+export type SessionViewCommand =
+  | "continue"
+  | "regenerate"
+  | "toggle-translation"
+  | "prev-branch"
+  | "next-branch"
+  | "quicksave"
+  | "batch-translate"
+  | "illustrate"
+  | "gallery"
+  | "lobby";
 
 export class SessionView extends ItemView {
   private sessionFile: string | null = null;
@@ -414,6 +427,64 @@ export class SessionView extends ItemView {
     await this.commitPending();
   }
 
+  /**
+   * 옵시디언 커맨드/단축키 → 세션 액션 실행. 하단 툴바·뷰어 바 버튼과 같은
+   * 핸들러를 그대로 호출한다 (동작 단일 소스 — 버튼과 커맨드가 안 갈라진다).
+   */
+  async runSessionCommand(action: SessionViewCommand): Promise<void> {
+    switch (action) {
+      case "continue":
+        await this.handleContinueOrStop();
+        break;
+      case "regenerate":
+        await this.handleRegen();
+        break;
+      case "toggle-translation":
+        await this.handleViewToggle();
+        break;
+      case "prev-branch":
+        await this.handleSiblingNav(-1);
+        break;
+      case "next-branch":
+        await this.handleSiblingNav(1);
+        break;
+      case "quicksave":
+        await this.handleNodeFavorite();
+        break;
+      case "batch-translate":
+        await this.handleBatchTranslateClick();
+        break;
+      case "illustrate":
+        await this.handleIllustrateTap();
+        break;
+      case "gallery":
+        this.openGallery();
+        break;
+      case "lobby":
+        await this.goToLobby();
+        break;
+    }
+  }
+
+  /**
+   * 커맨드가 지금 실행 가능한지 (main.ts checkCallback 게이트).
+   * 안 되는 액션은 명령 팔레트/단축키에서 비활성 → 오작동·헛클릭 방지.
+   */
+  sessionCommandAvailable(action: SessionViewCommand): boolean {
+    if (!this.session) return false;
+    switch (action) {
+      case "regenerate": {
+        const cur = this.session.nodes[this.session.meta.activeLeafId];
+        return !!cur && isAINode(cur) && cur.parent != null;
+      }
+      case "toggle-translation":
+      case "batch-translate":
+        return this.session.meta.translation?.enabled === true;
+      default:
+        return true;
+    }
+  }
+
   private refreshNativeTitle(): void {
     const title = this.getDisplayText();
     const leaf = this.leaf as WorkspaceLeaf & { updateHeader?: () => void };
@@ -589,6 +660,21 @@ export class SessionView extends ItemView {
     this.followTail = false;
     this.chainScroll = this.plugin.data.translationScrollChain !== false;
     this.session = await this.store.getSession(this.sessionFile);
+    // 뷰 혼입 방지 (M6/C2) — 챗 세션은 챗 뷰로 넘긴다. 소설 뷰가 챗 세션을
+    // 편집하면 "노드 1개 = 메시지 1개" 대전제가 깨진다 (챗 모드 스펙.md).
+    if (this.session?.meta.mode === "chat") {
+      const file = this.sessionFile;
+      const panel = this.stellaPanel;
+      this.session = null;
+      window.setTimeout(() => {
+        void this.leaf.setViewState({
+          type: VIEW_TYPE_CHAT_SESSION,
+          active: true,
+          state: { sessionFile: file, stellaPanel: panel },
+        });
+      }, 0);
+      return;
+    }
     this.translations = await this.store.getSessionTranslations(this.sessionFile);
     this.illustrations = await this.store.getSessionIllustrations(this.sessionFile);
     this.translationViewActive = this.translations.displayMode === "translation";
@@ -623,9 +709,7 @@ export class SessionView extends ItemView {
     if (this.session && this.sessionFile) {
       try {
         const summaries = await this.store.getSessionSummaries(this.sessionFile);
-        summaryContext = composeSummaryContext(
-          collectAnchorChain(this.session, summaries)
-        );
+        summaryContext = composeSummaryContextForPath(this.session, summaries);
       } catch {
         // 요약 없이 진행
       }
@@ -1608,11 +1692,22 @@ export class SessionView extends ItemView {
    * (삽화 위젯 등)를 삽입해 높이가 늘어도 보던 지점이 화면에서 움직이지 않는다.
    * 삽화 이미지는 로드 전 높이가 0이라, 각 이미지가 로드되며 커지는 순간에도 다시
    * 맞춘다. 로드 대기 중 사용자가 직접 스크롤하면(예상값과 어긋나면) 개입을 멈춘다.
-   * 생성(스트리밍) 중엔 꼬리 따라가기가 우선이므로 관여하지 않는다.
+   * 생성 중 꼬리 따라가기(followTail) 상태에서만 관여하지 않는다 — 생성 중이라도
+   * 사용자가 위로 스크롤해 읽고 있으면(followTail=false) 보던 지점을 지킨다.
+   * rawOverride: 재렌더 전에 미리 잡아 둔 raw offset 이 있으면 그걸 쓴다(재렌더가
+   * baseline 을 함께 갈아치우는 경로에서 "새 매핑으로 옛 화면을 읽는" 오차 방지).
    */
-  private preserveReadingPosition(fn: () => void): void {
+  private preserveReadingPosition(
+    fn: () => void,
+    rawOverride?: number | null
+  ): void {
     const scroller = this.activeScroller();
-    const raw = this.generation ? null : this.currentViewRawOffset();
+    const raw =
+      rawOverride !== undefined
+        ? rawOverride
+        : this.generation && this.followTail
+          ? null
+          : this.currentViewRawOffset();
     fn();
     if (raw == null || !scroller) return;
     let expectedTop = -1;
@@ -2086,12 +2181,14 @@ export class SessionView extends ItemView {
 
   private async afterLeafChange(): Promise<void> {
     if (!this.session || !this.sessionFile) return;
+    // 재렌더 전 보던 지점 캡처 — undo/redo/형제 이동 후에도 스크롤이 위로 튀지 않게.
+    const keepRaw = this.currentViewRawOffset();
     this.baselineSpans = buildSpans(this.session);
     this.baselineText = spansToText(this.baselineSpans);
     this.refreshDisplayBaseline();
     await this.persistSession("activeLeaf ??????쎈솭", true);
     this.suppressEvents = true;
-    this.renderBodySpans();
+    this.preserveReadingPosition(() => this.renderBodySpans(), keepRaw);
     // undo/redo/?브쑨由?筌욊낱??caret ?? 癰귣챶揆 ??밸퓠 ?癒?뮉 野?揶쎛????????얜뼄.
     this.setCaretOffset(this.displayText.length);
     this.suppressEvents = false;
@@ -2128,7 +2225,8 @@ export class SessionView extends ItemView {
       className: "ggai-span-undo-preview",
     }));
     this.suppressEvents = true;
-    this.renderBodySpans(ranges);
+    // 강조 표시용 전체 재렌더 — 보던 지점을 지킨다 (hover 마다 스크롤이 튀면 안 됨).
+    this.preserveReadingPosition(() => this.renderBodySpans(ranges));
     this.suppressEvents = false;
     this.undoPreviewVisible = true;
   }
@@ -2140,7 +2238,7 @@ export class SessionView extends ItemView {
     if (!this.bodyEl || this.pendingDiff) return;
 
     this.suppressEvents = true;
-    this.renderBodySpans();
+    this.preserveReadingPosition(() => this.renderBodySpans());
     this.suppressEvents = false;
   }
 
@@ -2212,30 +2310,7 @@ export class SessionView extends ItemView {
       this.redoStack = [];
       await this.persistSession("유저 입력 노드 병합");
     }
-    await this.applyPresetRotationIfEnabled();
     await this.runGeneration(this.session.meta.activeLeafId, "ai-continue");
-  }
-
-  /**
-   * 프리셋 자동 순환(켜져 있을 때) — 생성 직전 즐겨찾기 프리셋 중 하나를 무작위
-   * (주사위)로 골라 silent 적용한다. UI 의 "선택된 프리셋" 표시는 그대로 둔다.
-   * 이어쓰기/재생성 둘 다에서 호출 — 문단 재생성(별도 실행기)은 대상이 아니다.
-   * applyPreset 이 세션 메타를 store 에 쓰므로, in-memory 사본을 새로 읽어 stale 방지.
-   * 그동안의 session-changed 는 억제하고(중복 리로드/재렌더 방지) 직접 갱신한다.
-   */
-  private async applyPresetRotationIfEnabled(): Promise<void> {
-    if (!this.plugin.data.presetRotationEnabled || !this.sessionFile) return;
-    const file = this.sessionFile;
-    this.suppressOwnSessionEvent = true;
-    try {
-      const applied = await this.plugin.maybeRotatePreset(file);
-      if (applied) {
-        const fresh = await this.store.getSession(file);
-        if (fresh) this.session = fresh;
-      }
-    } finally {
-      this.suppressOwnSessionEvent = false;
-    }
   }
 
   /**
@@ -2251,7 +2326,6 @@ export class SessionView extends ItemView {
       new Notice("Regenerate is available only on AI generation nodes.");
       return;
     }
-    await this.applyPresetRotationIfEnabled();
     await this.runGeneration(cur.parent, "ai-regen");
   }
 
@@ -2290,10 +2364,17 @@ export class SessionView extends ItemView {
       scenarios.find((i) => i.scenarioFile === scenarioFile)?.scenario.data?.name ??
       "(unknown)";
 
+    // 프리셋 랜덤 순환 — 즐겨찾기 프리셋에서 값만 뽑아 이 생성 1회의 전송에만
+    // 얹는다. 활성 설정/세션/우측 디테일 UI 는 절대 건드리지 않는다.
+    const rotationPreset = await this.plugin.pickRotationPreset();
+
     // 전송본은 미리보기(현재 컨텍스트 확인)와 동일한 단일 빌더로만 만든다.
     // parentId(=이어쓰기가 보낼 지점) 기준으로 컨텍스트를 진다.
     const plan = await planSessionRequest(this.plugin, this.sessionFile, {
       leafId: parentId,
+      settingsOverride: rotationPreset
+        ? presetToGenerationOverride(rotationPreset)
+        : undefined,
     });
     if ("error" in plan) {
       new Notice(plan.error);
@@ -2359,6 +2440,7 @@ export class SessionView extends ItemView {
           prompt: promptStr,
           paramsOverride,
           signal: abort.signal,
+          label: "이어쓰기",
         });
         const gen = this.generation;
         if (gen) {
@@ -2396,6 +2478,7 @@ export class SessionView extends ItemView {
           messages: safeMessages,
           paramsOverride,
           signal: abort.signal,
+          label: "이어쓰기",
         };
         for await (const event of this.ai.chatStream(chatReq)) {
           if (event.type === "text-delta") {
@@ -2533,21 +2616,15 @@ export class SessionView extends ItemView {
           scenarioName,
           params: settings.params,
         });
-        // 번역·삽화(본체)와 확장 생성-완료 훅(요약 등)은 서로 독립 — 동시에 실행.
-        await Promise.all([
-          // 생성 시작 지점이 속한 문단부터 자동 번역 (직전 문단 경계로 한 칸 양보).
-          this.maybeAutoTranslate(Math.max(0, parentText.length - 1)),
-          // 새 원문 노드의 자동 삽화.
-          this.maybeAutoIllustrate(nodeId),
-          // 확장 생성-완료 훅 — 요약 확장이 주기 도달 시 자동 요약한다.
-          this.plugin.extensions.runGenerationComplete({
-            sessionFile: this.sessionFile,
-            nodeId,
-            generatedText,
-            parentText,
-            profile,
-          }),
-        ]);
+        // 확장 생성-완료 훅 — 번역/삽화/요약 확장이 각자 자동 실행을 판정한다
+        // (서로 독립, 레지스트리가 병렬 실행). 결과는 store 이벤트로 이 뷰에 반영.
+        await this.plugin.extensions.runGenerationComplete({
+          sessionFile: this.sessionFile,
+          nodeId,
+          generatedText,
+          parentText,
+          profile,
+        });
       }
       this.updateToolbar();
     }
@@ -2623,11 +2700,17 @@ export class SessionView extends ItemView {
 
   private rebuildBaselineAndRender(): void {
     if (!this.session) return;
+    // 보던 위치는 재구성 **전** 화면/매핑 기준으로 잡는다. 전체 재렌더는 인라인 삽화
+    // 이미지 재로드로 높이가 출렁여 스크롤이 위로 튄다(생성 오류/중단 후 "맨 위로
+    // 올라가는" 회귀의 원인) — 렌더 후 같은 지점을 화면 중앙으로 되돌린다.
+    // 생성 중 꼬리 따라가기일 때만 예외 (직후 scrollTailIfFollowing 이 끝을 잡는다).
+    const keepRaw =
+      this.generation && this.followTail ? null : this.currentViewRawOffset();
     this.baselineSpans = buildSpans(this.session);
     this.baselineText = spansToText(this.baselineSpans);
     this.refreshDisplayBaseline();
     this.suppressEvents = true;
-    this.renderBodySpans();
+    this.preserveReadingPosition(() => this.renderBodySpans(), keepRaw);
     this.suppressEvents = false;
   }
 
@@ -3514,26 +3597,8 @@ export class SessionView extends ItemView {
     }
   }
 
-  /**
-   * 새 본문 생성 직후 자동 번역 (번역 사용 + 자동 번역 둘 다 on 일 때).
-   * **이번 생성으로 새로 생긴/바뀐 구간의 문단만** 대상 — 과거의 번역 안 된
-   * 본문 전체를 자동으로 보내지 않는다. 번역할 문단이 없으면 조용히 skip.
-   */
-  private async maybeAutoTranslate(generationStartOffset: number): Promise<void> {
-    if (!this.session || !this.sessionFile) return;
-    const t = this.session.meta.translation;
-    if (t?.enabled !== true || t?.auto !== true) return;
-    const translations =
-      this.translations ??
-      (await this.store.getSessionTranslations(this.sessionFile));
-    const targets = collectUntranslatedParagraphsFrom(
-      this.baselineText,
-      translations,
-      generationStartOffset
-    );
-    if (targets.length === 0) return;
-    await this.runTranslate({ hashes: targets.map((p) => p.hash) });
-  }
+  // 자동 번역(생성 직후)은 번역 확장(`extensions/translation-extension.ts`)이
+  // onGenerationComplete 훅으로 실행한다 — 이 뷰는 이벤트로 결과만 반영.
 
   // --- 삽화 (illustrations.json — 노드 기준, 인라인 표시) ---
 
@@ -3565,29 +3630,10 @@ export class SessionView extends ItemView {
     }
   }
 
-  /** 새 원문 노드 생성 직후 자동 삽화 (삽화 사용 + 자동 둘 다 on 일 때). */
-  private async maybeAutoIllustrate(nodeId: string): Promise<void> {
-    if (!this.session || !this.sessionFile) return;
-    const i = this.session.meta.illustration;
-    if (i?.enabled !== true || i?.auto !== true) return;
-    // 자동 생성 주기 — 마지막 삽화 앵커 이후 완성 문단이 설정한 개수 이상 쌓였을
-    // 때만 생성(출력 위치와 무관). 카운터를 저장하지 않고 매번 현재 브랜치 기준으로
-    // 계산하므로 분기 이동/편집으로 어긋나지 않는다. 수동(툴바 탭)은 이 게이트를 타지
-    // 않는다. 0 = 매 이어쓰기 완료마다 생성(게이트 없음).
-    const threshold = i.autoMinParagraphs ?? DEFAULT_ILLUSTRATION_AUTO_MIN_PARAGRAPHS;
-    if (threshold > 0) {
-      const illustrations =
-        this.illustrations ??
-        (await this.store.getSessionIllustrations(this.sessionFile));
-      const anchors = computeIllustrationAnchors(this.session, illustrations);
-      const last = anchors.length > 0 ? anchors[anchors.length - 1].offset : 0;
-      const fresh = completedParagraphsAfter(this.baselineText, last);
-      if (fresh < threshold) return;
-    }
-    await this.runIllustrate(nodeId);
-  }
+  // 자동 삽화(생성 직후, 밀도 게이트)는 삽화 확장(`extensions/illustration-extension.ts`)이
+  // onGenerationComplete 훅으로 실행한다 — 이 뷰는 이벤트로 결과만 반영.
 
-  /** 삽화 생성 (툴바 탭 / 자동) — 프롬프트 생성부터. 대상 노드 생략 시 활성 노드. */
+  /** 삽화 생성 (툴바 탭) — 프롬프트 생성부터. 대상 노드 생략 시 활성 노드. */
   private async runIllustrate(nodeId?: string): Promise<void> {
     await this.runIllustrationJob(() =>
       this.plugin.illustration.generateForNode(this.sessionFile!, nodeId)
@@ -4286,7 +4332,9 @@ export class SessionView extends ItemView {
     await this.persistSession("문단 재생성 적용 실패");
     this.refreshDisplayBaseline();
     this.suppressEvents = true;
-    this.renderBodySpans();
+    // 적용한 문단(교체 구간 시작)을 화면 중앙에 되돌린다 — 전체 재렌더가 스크롤을
+    // 맨 위로 떨어뜨리는 회귀 방지. 사용자는 방금 그 문단을 보고 있었다.
+    this.preserveReadingPosition(() => this.renderBodySpans(), from);
     this.suppressEvents = false;
     // 번역 보기/split 중이면 바뀐 문단(새 해시)이 원문으로 보이게 블록 재구성.
     if (this.translationViewActive || this.outputMode === "split-h") {

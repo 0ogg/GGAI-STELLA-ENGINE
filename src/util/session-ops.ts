@@ -1,6 +1,6 @@
 import { TFile, TFolder, Vault, normalizePath } from "obsidian";
 import type { ActiveSettings } from "../types/preset";
-import type { StellaSession } from "../types/session";
+import type { SessionMode, StellaSession } from "../types/session";
 import { createBlankSession, type SessionSeed } from "./new-session";
 
 /**
@@ -16,7 +16,8 @@ export async function createNewSession(
   scenarioId: string,
   name: string,
   seedText: SessionSeed = "",
-  initial?: ActiveSettings
+  initial?: ActiveSettings,
+  mode: SessionMode = "novel"
 ): Promise<{ folder: string; sessionFile: string; session: StellaSession }> {
   const safe = sanitizeName(name) || "세션";
   const sessionsRoot = normalizePath(`${scenarioFolder}/SESSIONS`);
@@ -25,7 +26,7 @@ export async function createNewSession(
   const folder = await uniquePath(vault, `${sessionsRoot}/${safe}`);
   await vault.createFolder(folder);
 
-  const session = createBlankSession(name, scenarioId, seedText, initial);
+  const session = createBlankSession(name, scenarioId, seedText, initial, mode);
   const sessionFile = `${folder}/session.json`;
   await vault.create(sessionFile, JSON.stringify(session, null, 2));
   return { folder, sessionFile, session };
@@ -68,10 +69,14 @@ function sanitizeName(name: string): string {
 }
 
 async function uniquePath(vault: Vault, basePath: string): Promise<string> {
-  if (!(await vault.adapter.exists(basePath))) return basePath;
+  // 실제 파일시스템(adapter)과 vault 인덱스를 둘 다 확인한다 — 외부 동기화 등으로
+  // 둘이 어긋나 있으면 createFolder 가 "Folder already exists" 로 실패할 수 있다.
+  const taken = async (p: string) =>
+    (await vault.adapter.exists(p)) || vault.getAbstractFileByPath(p) != null;
+  if (!(await taken(basePath))) return basePath;
   for (let i = 2; i < 1000; i++) {
     const p = `${basePath}-${i}`;
-    if (!(await vault.adapter.exists(p))) return p;
+    if (!(await taken(p))) return p;
   }
   throw new Error("폴더 경로 충돌 해결 실패");
 }

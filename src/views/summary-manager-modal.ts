@@ -16,8 +16,9 @@ import type StellaEnginePlugin from "../main";
 import type { SummaryAnchor } from "../types/summary";
 import {
   collectAnchorChain,
-  composeSummaryContext,
+  composeSummaryContextForPath,
 } from "../util/summarize-session";
+import { pathToLeaf } from "../util/session-text";
 import { ConfirmModal } from "./modals";
 import { createModalShell } from "./modal-shell";
 
@@ -100,12 +101,14 @@ export class SummaryManagerModal extends Modal {
       return;
     }
     const anchors = collectAnchorChain(session, summaries);
+    // 압축(컴팩트) 반영 합성 — 전송본과 같은 로직. 카드 목록은 개별 앵커 그대로 보여준다.
+    const composed = composeSummaryContextForPath(session, summaries);
 
     // 아코디언 두 패널 — 한 번에 하나만 펼쳐 스크롤이 한 곳으로만 생기게 한다.
     this.renderPanel(
       "현재 요약",
       "context",
-      (panelBody) => this.renderContextBody(panelBody, anchors)
+      (panelBody) => this.renderContextBody(panelBody, anchors, composed)
     );
     this.renderPanel(
       "요약 관리",
@@ -141,7 +144,11 @@ export class SummaryManagerModal extends Modal {
 
   // ─────────────────────────── 현재 요약 컨텍스트 ───────────────────────────
 
-  private renderContextBody(parent: HTMLElement, anchors: SummaryAnchor[]): void {
+  private renderContextBody(
+    parent: HTMLElement,
+    anchors: SummaryAnchor[],
+    composed: string
+  ): void {
     const toolRow = parent.createDiv({ cls: "ggai-summary-mgr-context-tools" });
     const toggle = toolRow.createEl("button", {
       cls: "ggai-preset-btn",
@@ -151,7 +158,6 @@ export class SummaryManagerModal extends Modal {
     toggle.disabled = this.translating || anchors.length === 0;
     toggle.addEventListener("click", () => void this.toggleTranslateView());
 
-    const composed = composeSummaryContext(anchors);
     const box = parent.createDiv({ cls: "ggai-media-summary-context" });
     if (anchors.length === 0) {
       box.setText("아직 누적된 요약이 없습니다.");
@@ -182,7 +188,7 @@ export class SummaryManagerModal extends Modal {
     const session = await this.plugin.store.getSession(this.sessionFile);
     const summaries = await this.plugin.store.getSessionSummaries(this.sessionFile);
     if (!session) return;
-    const composed = composeSummaryContext(collectAnchorChain(session, summaries));
+    const composed = composeSummaryContextForPath(session, summaries);
     if (composed.trim() === "") return;
 
     this.translateView = true;
@@ -558,13 +564,22 @@ export class SummaryManagerModal extends Modal {
     await this.renderBody();
   }
 
-  /** 활성 경로 위 앵커 + 이어하기 체크포인트를 지우고 저장한다. 지운 개수 반환. */
+  /** 활성 경로 위 앵커 + 압축본 + 이어하기 체크포인트를 지우고 저장한다. 지운 앵커 개수 반환. */
   private async clearPathAnchors(): Promise<number> {
     const session = await this.plugin.store.getSession(this.sessionFile);
     const summaries = await this.plugin.store.getSessionSummaries(this.sessionFile);
     if (!session) return 0;
     const chain = collectAnchorChain(session, summaries);
     for (const anchor of chain) delete summaries.anchors[anchor.nodeId];
+    // 경로 위 압축본도 함께 제거 — 안 그러면 스테일 압축이 계속 요약을 덮어쓴다.
+    if (summaries.compactions) {
+      const onPath = new Set(pathToLeaf(session, session.meta.activeLeafId).map((n) => n.id));
+      for (const key of Object.keys(summaries.compactions)) {
+        if (onPath.has(summaries.compactions[key].throughNodeId)) {
+          delete summaries.compactions[key];
+        }
+      }
+    }
     delete summaries.pending;
     await this.plugin.store.saveSessionSummaries(this.sessionFile, summaries);
     this.translatedContext = null;

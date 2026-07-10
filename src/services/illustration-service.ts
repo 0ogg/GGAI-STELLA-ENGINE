@@ -15,7 +15,12 @@
 import type StellaEnginePlugin from "../main";
 import { resolveMediaPrompt } from "../util/default-media-prompts";
 import { composeMediaPrompt } from "../util/media-prompt-body";
-import { buildLorebookText, loadMediaLorebooks } from "../util/media-lorebook";
+import {
+  buildLorebookText,
+  getScenarioMediaLorebookIds,
+  loadMediaLorebooks,
+  mergeLorebookIds,
+} from "../util/media-lorebook";
 import { recordIllustrationVariant } from "../util/illustrations";
 import { buildSpans, spansToText } from "../util/session-text";
 
@@ -73,8 +78,17 @@ export class IllustrationService {
       contextChars > 0 ? fullText.slice(-contextChars) : fullText;
     if (!context.trim()) return fail("삽화를 만들 본문이 없습니다.");
 
-    // 본문(발췌)에 매칭되는 삽화용 로어북.
-    const books = await loadMediaLorebooks(this.plugin.store, ill.lorebookIds);
+    // 본문(발췌)에 매칭되는 삽화용 로어북 —
+    // 활성 설정 로어북 + 시나리오 공유 삽화 로어북(시나리오 탭에서 선택, 전 세션 공유).
+    const scenarioIds = await getScenarioMediaLorebookIds(
+      this.plugin.store,
+      sessionFile,
+      "illustration"
+    );
+    const books = await loadMediaLorebooks(
+      this.plugin.store,
+      mergeLorebookIds(ill.lorebookIds, scenarioIds)
+    );
     const lorebookText = buildLorebookText(books, context);
 
     // 1) 이미지 프롬프트 생성 (LLM)
@@ -157,6 +171,7 @@ export class IllustrationService {
         prompt: input.prompt,
         negativePrompt: input.negativePrompt,
         signal: input.signal,
+        label: "삽화",
       });
     } catch (err) {
       return fail("이미지 생성 실패: " + msgOf(err));
@@ -204,6 +219,7 @@ export class IllustrationService {
         profileId: profile.id,
         prompt: combined,
         signal,
+        label: "삽화 프롬프트",
       });
       return r.text;
     }
@@ -211,6 +227,7 @@ export class IllustrationService {
       profileId: profile.id,
       messages: [{ role: "user", content: combined }],
       signal,
+      label: "삽화 프롬프트",
     });
     return r.text;
   }

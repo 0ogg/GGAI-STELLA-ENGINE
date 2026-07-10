@@ -77,6 +77,7 @@ export class ParagraphRegenService {
         const r = await this.plugin.ai.generate({
           profileId: profile.id,
           prompt: `${PARAGRAPH_REGEN_IO_INSTRUCTIONS}\n\n${body}`,
+          label: "문단 재생성",
         });
         text = r.text;
       } else {
@@ -86,6 +87,7 @@ export class ParagraphRegenService {
             { role: "system", content: PARAGRAPH_REGEN_IO_INSTRUCTIONS },
             { role: "user", content: body },
           ],
+          label: "문단 재생성",
         });
         text = r.text;
       }

@@ -153,8 +153,22 @@ function resolveMacro(match: string, key: string, ctx: MacroContext): string {
 
   if (k.startsWith("//")) return "";
 
+  // ── 시간·날짜 매크로 (ST 호환) ──
+  // {{date}}/{{time}} = 로케일 표기, {{weekday}} = 요일 전체 이름,
+  // {{isodate}}/{{isotime}} = ISO 형식(로컬 시간대) YYYY-MM-DD / HH:mm:ss.
   if (k === "date") return new Date().toLocaleDateString();
   if (k === "time") return new Date().toLocaleTimeString();
+  if (k === "weekday") {
+    return new Date().toLocaleDateString(undefined, { weekday: "long" });
+  }
+  if (k === "isodate") {
+    const d = new Date();
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  }
+  if (k === "isotime") {
+    const d = new Date();
+    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+  }
   const macroKey = MACRO_ALIASES.get(k.toLowerCase());
   if (macroKey && SUPPORTED_SET.has(macroKey)) {
     const val = ctx[macroKey];
@@ -227,6 +241,10 @@ export function renderMacrosWithMap(text: string, ctx: MacroContext): MacroRende
     macroRanges: [],
   };
   return replaceSingleMapped(replaceSingleMapped(initial, ctx), ctx);
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
 }
 
 function rollDice(count: number, sides: number): string {

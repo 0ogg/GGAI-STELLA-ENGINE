@@ -9,6 +9,41 @@
 import type { StellaLorebook } from "../types/lorebook";
 import type { StellaStore } from "../state/store";
 import { matchLorebookEntries } from "./lorebook-match";
+import { scenarioFileOfSessionFile } from "./build-session-context";
+
+/**
+ * 세션이 속한 시나리오의 미디어(번역/삽화) 공유 로어북 id 목록.
+ * 시나리오 탭에서 선택하며, **그 시나리오의 모든 세션이 공유**한다.
+ * 시나리오를 못 찾으면 빈 배열.
+ */
+export async function getScenarioMediaLorebookIds(
+  store: StellaStore,
+  sessionFile: string,
+  kind: "translation" | "illustration"
+): Promise<string[]> {
+  const scenarioFile = scenarioFileOfSessionFile(sessionFile);
+  if (!scenarioFile) return [];
+  const scenarios = await store.getScenarios();
+  const stella = scenarios.find((i) => i.scenarioFile === scenarioFile)?.scenario
+    .data?.extensions?.stella;
+  return (
+    (kind === "translation"
+      ? stella?.translationLorebookIds
+      : stella?.illustrationLorebookIds) ?? []
+  );
+}
+
+/** 활성 설정 로어북 ∪ 시나리오 공유 로어북 — 순서 보존 + 중복 제거. */
+export function mergeLorebookIds(
+  settingsIds: string[] | undefined,
+  scenarioIds: string[]
+): string[] {
+  const out: string[] = [];
+  for (const id of [...(settingsIds ?? []), ...scenarioIds]) {
+    if (!out.includes(id)) out.push(id);
+  }
+  return out;
+}
 
 /** id 목록으로 로어북 객체를 로드한다. 사라진 id 는 조용히 스킵. */
 export async function loadMediaLorebooks(

@@ -1,5 +1,8 @@
 import { App, Modal, Setting } from "obsidian";
 import type { SessionListItem } from "../util/scan-sessions";
+import type { ScenarioListItem } from "../util/scan-scenarios";
+import type { ParsedStChat } from "../import/parse-sillytavern-chat";
+import type { SessionMode } from "../types/session";
 import { createModalShell } from "./modal-shell";
 
 /**
@@ -229,4 +232,101 @@ export class ScenarioSessionCopyModal extends Modal {
   onClose(): void {
     this.contentEl.empty();
   }
+}
+
+/** 실리태번 채팅 임포트 등록 창의 결과. */
+export interface StChatImportChoice {
+  mode: SessionMode;
+  /** 붙일 시나리오 파일. null = 캐릭터명으로 새 시나리오 생성. */
+  scenarioFile: string | null;
+}
+
+/**
+ * 실리태번 채팅(.jsonl) 임포트 등록 창.
+ * 캐릭터/유저/메시지 요약을 보여주고 모드(채팅/소설)와 붙일 시나리오를 고른다.
+ * 캐릭터명과 같은 이름의 시나리오가 있으면 자동 선택, 없으면 "새로 만들기".
+ */
+export class StChatImportModal extends Modal {
+  private mode: SessionMode = "chat";
+  private scenarioFile: string | null;
+  private settled = false;
+
+  constructor(
+    app: App,
+    private readonly parsed: ParsedStChat,
+    private readonly scenarios: ScenarioListItem[],
+    private readonly onSubmit: (choice: StChatImportChoice | null) => void
+  ) {
+    super(app);
+    // 캐릭터명과 같은 이름 시나리오 자동 매칭.
+    const target = parsed.characterName.trim().toLowerCase();
+    const match = scenarios.find(
+      (s) => scenarioName(s).trim().toLowerCase() === target
+    );
+    this.scenarioFile = match ? match.scenarioFile : null;
+  }
+
+  onOpen(): void {
+    this.titleEl.setText("실리태번 채팅 가져오기");
+    const { body, footerMain } = createModalShell(this, "m");
+
+    const swipeTotal = this.parsed.messages.reduce(
+      (n, m) => n + m.swipes.length,
+      0
+    );
+    body.createEl("p", {
+      cls: "ggai-st-chat-summary",
+      text: `캐릭터 "${this.parsed.characterName}" · 유저 "${this.parsed.userName}" · 메시지 ${this.parsed.messages.length}개 (스와이프 포함 ${swipeTotal}개)`,
+    });
+
+    new Setting(body).setName("모드").addDropdown((d) => {
+      d.addOption("chat", "채팅");
+      d.addOption("novel", "소설");
+      d.setValue(this.mode);
+      d.onChange((v) => (this.mode = v === "novel" ? "novel" : "chat"));
+    });
+
+    new Setting(body)
+      .setName("시나리오")
+      .setDesc("이 대화를 붙일 시나리오. 캐릭터 카드는 채팅 파일에 없어 직접 골라야 합니다.")
+      .addDropdown((d) => {
+        d.addOption("__new__", `＋ "${this.parsed.characterName}" 새 시나리오`);
+        for (const s of this.scenarios) {
+          d.addOption(s.scenarioFile, scenarioName(s));
+        }
+        d.setValue(this.scenarioFile ?? "__new__");
+        d.onChange((v) => {
+          this.scenarioFile = v === "__new__" ? null : v;
+        });
+      });
+
+    const cancel = footerMain.createEl("button", {
+      cls: "ggai-btn",
+      text: "취소",
+    });
+    cancel.addEventListener("click", () => this.settle(null));
+    const go = footerMain.createEl("button", {
+      cls: "ggai-btn ggai-btn-primary",
+      text: "가져오기",
+    });
+    go.addEventListener("click", () =>
+      this.settle({ mode: this.mode, scenarioFile: this.scenarioFile })
+    );
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+    if (!this.settled) this.onSubmit(null);
+  }
+
+  private settle(choice: StChatImportChoice | null): void {
+    if (this.settled) return;
+    this.settled = true;
+    this.onSubmit(choice);
+    this.close();
+  }
+}
+
+function scenarioName(s: ScenarioListItem): string {
+  return s.scenario.data?.name || s.folderName;
 }

@@ -17,7 +17,12 @@ import { isCancelledError } from "./ai-service";
 import { buildSpans, spansToText } from "../util/session-text";
 import { resolveMediaPrompt } from "../util/default-media-prompts";
 import { composeMediaPrompt } from "../util/media-prompt-body";
-import { buildLorebookText, loadMediaLorebooks } from "../util/media-lorebook";
+import {
+  buildLorebookText,
+  getScenarioMediaLorebookIds,
+  loadMediaLorebooks,
+  mergeLorebookIds,
+} from "../util/media-lorebook";
 import {
   buildTranslationRequest,
   chunkParagraphs,
@@ -105,7 +110,16 @@ export class TranslationService {
     if (!profile) return { ok: false, error: "번역에 사용할 모델 프로필이 없습니다." };
 
     const text = spansToText(buildSpans(session));
-    const books = await loadMediaLorebooks(this.plugin.store, translation.lorebookIds);
+    // 활성 설정 로어북 + 시나리오 공유 번역 로어북(시나리오 탭에서 선택, 전 세션 공유).
+    const scenarioIds = await getScenarioMediaLorebookIds(
+      this.plugin.store,
+      sessionFile,
+      "translation"
+    );
+    const books = await loadMediaLorebooks(
+      this.plugin.store,
+      mergeLorebookIds(translation.lorebookIds, scenarioIds)
+    );
     return {
       ok: true,
       text,
@@ -444,6 +458,7 @@ export class TranslationService {
       const r = await this.plugin.ai.generate({
         profileId: profile.id,
         prompt: `${TRANSLATION_IO_INSTRUCTIONS}\n\n${combined}`,
+        label: "번역",
       });
       return r.text;
     }
@@ -453,6 +468,7 @@ export class TranslationService {
         { role: "system", content: TRANSLATION_IO_INSTRUCTIONS },
         { role: "user", content: combined },
       ],
+      label: "번역",
     });
     return r.text;
   }

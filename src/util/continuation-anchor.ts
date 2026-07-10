@@ -12,10 +12,20 @@
  * 종료 시 `anchorSkipFinal` 이 항상 숫자를 돌려준다.
  */
 
-/** 문장 종결 부호. 연속(…, ?!, ...)은 한 덩어리로 취급. */
-const TERMINATORS = /[.!?…。！？]/;
-/** 종결 부호 뒤에 붙을 수 있는 닫는 따옴표/괄호류. */
-const CLOSERS = /["'’”」』)\]»›]/;
+/**
+ * 문장 종결 부호. 연속(…, ?!, ...)은 한 덩어리로 취급.
+ * ASCII(.!?) 외에 전각/CJK(。！？．)·말줄임표(…‥)·데바나가리(।॥)·아랍(؟۔) 포함.
+ */
+const TERMINATORS = /[.!?…‥。．！？।॥؟۔]/;
+/**
+ * 공백 없이도 문장 경계가 되는 "자기 완결형" 종결 부호.
+ * 일본어·중국어 등은 문장 끝(。！？) 뒤에 공백을 넣지 않으므로, ASCII(.!?) 처럼
+ * 뒤 공백을 강제하면 CJK 본문 전체가 한 문장으로 뭉쳐 앵커가 부풀어버린다.
+ * ASCII 마침표/물음표/느낌표는 약어·소수점 오분할을 막기 위해 여기서 제외한다.
+ */
+const SELF_DELIM_TERMINATORS = /[…‥。．！？।॥؟۔]/;
+/** 종결 부호 뒤에 붙을 수 있는 닫는 따옴표/괄호류(전각·CJK 포함). */
+const CLOSERS = /["'’”」』）】〕》〉］)\]»›]/;
 
 const WS = /\s/;
 
@@ -129,7 +139,11 @@ function sentenceStarts(t: string): number[] {
     }
     if (TERMINATORS.test(ch)) {
       let j = i;
-      while (j < t.length && TERMINATORS.test(t[j])) j++;
+      let selfDelim = false;
+      while (j < t.length && TERMINATORS.test(t[j])) {
+        if (SELF_DELIM_TERMINATORS.test(t[j])) selfDelim = true;
+        j++;
+      }
       // 소수점: 숫자 사이의 단독 '.' 은 경계가 아니다.
       if (
         j === i + 1 &&
@@ -143,11 +157,19 @@ function sentenceStarts(t: string): number[] {
         continue;
       }
       while (j < t.length && CLOSERS.test(t[j])) j++;
+      // 종결 부호 뒤 공백/줄바꿈 → 그 뒤에서 새 문장.
       if (j < t.length && WS.test(t[j])) {
         let k = j;
         while (k < t.length && WS.test(t[k])) k++;
         if (k < t.length) starts.push(k);
         i = k;
+        continue;
+      }
+      // 공백이 없어도 전각/CJK 종결 부호는 그 자리에서 문장 경계
+      // (일본어·중국어는 마침표 뒤에 공백을 넣지 않는다).
+      if (selfDelim && j < t.length) {
+        starts.push(j);
+        i = j;
         continue;
       }
       i = Math.max(j, i + 1);

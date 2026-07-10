@@ -27,7 +27,6 @@ import {
   toggleIllustrationFavorite,
 } from "../util/illustrations";
 import { getDeepestLatestDescendant } from "../util/session-tree";
-import { generateSessionTitleNow } from "../services/session-title-service";
 import { IllustrationGalleryModal, type GalleryItem } from "./gallery-modal";
 import { openImageLightbox } from "./image-lightbox";
 import {
@@ -46,17 +45,15 @@ import {
   confirmDeleteSession,
   confirmDeleteUser,
   copyScenarioWithPrompt,
-  copySession,
   createAndOpenSession,
   exportPromptPreset,
-  exportSessionReading,
   openSessionByPath,
   promptNewLorebook,
   promptNewScenario,
   promptNewUser,
-  promptRenameSession,
   runImportPicker,
 } from "./entity-actions";
+import { buildSessionMenu } from "./session-menu";
 import { BranchSection } from "./detail/branch-section";
 import { PromptSetEditorSection } from "./detail/prompt-set-editor-section";
 import { UserEditorSection } from "./user-editor-section";
@@ -149,6 +146,8 @@ export class DashboardView extends ItemView {
     scenario: ScenarioListItem;
   }> = [];
   private sessionDisplayLimit = SESSION_TAB_PAGE;
+  /** 세션 탭 "시리즈 보기" 토글 — 다음화로 연결된 세션들을 시리즈 단위로 묶어 보기. */
+  private sessionSeriesView = false;
   private users: UserListItem[] = [];
   private lorebooks: LorebookListItem[] = [];
   private promptPresets: PromptListItem[] = [];
@@ -264,6 +263,8 @@ export class DashboardView extends ItemView {
     this.registerEvent(
       this.store.on("session-illustrations-changed", debouncedRecent)
     );
+    // 안 읽음 뱃지 갱신 (홈 히어로 카드 / 세션 탭 / 시나리오 상세 세션 줄).
+    this.registerEvent(this.store.on("session-unread-changed", debouncedRecent));
     this.registerEvent(
       this.store.on("users-changed", () =>
         void this.refreshUserData().then(() => this.refreshSurface())
@@ -1241,10 +1242,11 @@ export class DashboardView extends ItemView {
     }
 
     const info = card.createDiv({ cls: "ggai-dash-hero-info" });
-    info.createDiv({
-      cls: "ggai-dash-hero-session",
+    const titleEl = info.createDiv({ cls: "ggai-dash-hero-session" });
+    titleEl.createSpan({
       text: item.session.session.meta.name || item.session.folderName,
     });
+    this.appendUnreadBadge(titleEl, item.session.sessionFile);
     const timeLabel = formatRelativeTime(sessionRecentTime(item.session));
     const metaBits = [scenarioName];
     if (persona.name) metaBits.push(persona.name);
@@ -1253,6 +1255,11 @@ export class DashboardView extends ItemView {
       cls: "ggai-dash-hero-meta",
       text: metaBits.join(" · "),
     });
+    // 부재중 도착한 응답의 첫 줄 미리보기 — 카톡 목록처럼 "무슨 말이 왔는지"를 보여준다.
+    const unread = this.plugin.getSessionUnread(item.session.sessionFile);
+    if (unread?.preview) {
+      info.createDiv({ cls: "ggai-dash-hero-preview", text: unread.preview });
+    }
 
     this.makePressable(card, () =>
       void openSessionByPath(this.plugin, item.session.sessionFile)
@@ -1287,6 +1294,17 @@ export class DashboardView extends ItemView {
     if (!body) return;
     body.empty();
 
+    // 상단 툴바 — 시리즈 보기 토글 (다음화로 연결된 세션들을 시리즈 단위로 묶어 보기).
+    const bar = body.createDiv({ cls: "ggai-dash-session-bar" });
+    const seriesBtn = bar.createEl("button", { cls: "ggai-btn" });
+    seriesBtn.toggleClass("is-active", this.sessionSeriesView);
+    setIcon(seriesBtn.createSpan(), "layers");
+    seriesBtn.createSpan({ text: "시리즈 보기" });
+    seriesBtn.addEventListener("click", () => {
+      this.sessionSeriesView = !this.sessionSeriesView;
+      this.renderSessionTab();
+    });
+
     if (this.allSessions.length === 0) {
       this.renderEmpty(
         body,
@@ -1296,6 +1314,11 @@ export class DashboardView extends ItemView {
     }
 
     const activeFile = this.plugin.getActiveOrLastSessionFile();
+    if (this.sessionSeriesView) {
+      this.renderSeriesGrouped(body, activeFile);
+      return;
+    }
+
     const list = body.createDiv({ cls: "ggai-dash-session-cards" });
     const shown = this.allSessions.slice(0, this.sessionDisplayLimit);
     for (const { session, scenario } of shown) {
@@ -1311,6 +1334,65 @@ export class DashboardView extends ItemView {
         this.sessionDisplayLimit += SESSION_TAB_PAGE;
         this.renderSessionTab();
       });
+    }
+  }
+
+  /**
+   * 시리즈 보기 — 다음화로 연결된 세션들을 시리즈(series.id) 단위로 묶어 화 순서대로
+   * 보여준다. 이미 로드된 allSessions 를 그룹핑만 해서 재사용(세션 카드도 그대로 재사용).
+   */
+  private renderSeriesGrouped(body: HTMLElement, activeFile: string | null): void {
+    const groups = new Map<
+      string,
+      {
+        name: string;
+        scenarioName: string;
+        items: Array<{ session: SessionListItem; scenario: ScenarioListItem }>;
+      }
+    >();
+    for (const it of this.allSessions) {
+      const s = it.session.session.meta.series;
+      if (!s) continue;
+      let g = groups.get(s.id);
+      if (!g) {
+        g = {
+          name: s.name,
+          scenarioName: it.scenario.scenario.data.name || it.scenario.folderName,
+          items: [],
+        };
+        groups.set(s.id, g);
+      }
+      g.items.push(it);
+    }
+
+    if (groups.size === 0) {
+      this.renderEmpty(
+        body,
+        "아직 시리즈로 연결된 세션이 없습니다. 세션 메뉴(⋮)나 우측 [시나리오] 탭의 시리즈 섹션에서 [다음화 만들기]로 시작하세요."
+      );
+      return;
+    }
+
+    const ordered = Array.from(groups.values()).sort((a, b) =>
+      a.name.localeCompare(b.name)
+    );
+    for (const g of ordered) {
+      const section = body.createDiv({ cls: "ggai-dash-series-group" });
+      const head = section.createDiv({ cls: "ggai-dash-series-group-head" });
+      head.createSpan({ cls: "ggai-dash-series-group-name", text: g.name });
+      head.createSpan({
+        cls: "ggai-dash-series-group-scenario",
+        text: g.scenarioName,
+      });
+      g.items.sort(
+        (a, b) =>
+          (a.session.session.meta.series?.index ?? 0) -
+          (b.session.session.meta.series?.index ?? 0)
+      );
+      const list = section.createDiv({ cls: "ggai-dash-session-cards" });
+      for (const { session, scenario } of g.items) {
+        this.renderSessionCard(list, session, scenario, activeFile);
+      }
     }
   }
 
@@ -1332,10 +1414,12 @@ export class DashboardView extends ItemView {
       cls: "ggai-dash-session-card-scenario",
       text: scenarioName,
     });
-    main.createDiv({
-      cls: "ggai-dash-session-card-name",
+    const nameEl = main.createDiv({ cls: "ggai-dash-session-card-name" });
+    nameEl.createSpan({
       text: session.session.meta.name || session.folderName,
     });
+    this.appendSeriesBadge(nameEl, session);
+    this.appendUnreadBadge(nameEl, session.sessionFile);
     const time = formatRelativeTime(sessionRecentTime(session));
     const nodeCount = Object.keys(session.session.nodes ?? {}).length;
     main.createDiv({
@@ -1357,6 +1441,16 @@ export class DashboardView extends ItemView {
       confirmDeleteSession(this.plugin, session)
     );
     del.addClass("ggai-dash-session-card-del");
+    // ⋮ 메뉴 — 우클릭/롱프레스와 같은 메뉴를 항상 보이는 버튼으로.
+    const moreBtn = actions.createEl("button", {
+      cls: "ggai-dash-icon-btn is-plain",
+    });
+    setIcon(moreBtn, "more-vertical");
+    moreBtn.setAttr("aria-label", "세션 메뉴");
+    moreBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.sessionMenu(session).showAtMouseEvent(e);
+    });
 
     this.makePressable(card, () =>
       void openSessionByPath(this.plugin, session.sessionFile)
@@ -1366,6 +1460,28 @@ export class DashboardView extends ItemView {
       (e) => this.sessionMenu(session).showAtMouseEvent(e),
       (x, y) => this.sessionMenu(session).showAtPosition({ x, y })
     );
+  }
+
+  /** 안 읽은 응답이 있으면 이름 옆에 개수 뱃지. 세션을 열면 자동으로 사라진다. */
+  private appendUnreadBadge(parent: HTMLElement, sessionFile: string): void {
+    const unread = this.plugin.getSessionUnread(sessionFile);
+    if (!unread) return;
+    const badge = parent.createSpan({
+      cls: "ggai-unread-badge",
+      text: String(unread.count),
+    });
+    badge.title = "안 읽은 AI 응답";
+  }
+
+  /** 시리즈 세션이면 이름 옆에 "N화" 배지 — 목록만 봐도 시리즈임을 알 수 있게. */
+  private appendSeriesBadge(parent: HTMLElement, s: SessionListItem): void {
+    const series = s.session.meta.series;
+    if (!series) return;
+    const badge = parent.createSpan({
+      cls: "ggai-series-badge",
+      text: `${series.index}화`,
+    });
+    badge.title = `${series.name} 시리즈`;
   }
 
   private renderIconAction(
@@ -1931,7 +2047,7 @@ export class DashboardView extends ItemView {
     playBtn.createSpan({ text: "이어하기" });
     playBtn.addEventListener("click", () => void this.openScenario(item));
     const newBtn = this.renderToolbarButton(actions, "plus", "새 세션", () =>
-      void createAndOpenSession(this.plugin, item)
+      void createAndOpenSession(this.plugin, item, { mode: "ask" })
     );
     newBtn.removeClass("mod-cta");
     this.renderToolbarButton(actions, "pencil", "시나리오 편집", () =>
@@ -2078,10 +2194,9 @@ export class DashboardView extends ItemView {
       }
 
       const main = row.createDiv({ cls: "ggai-dash-session-main" });
-      main.createDiv({
-        cls: "ggai-dash-session-name",
-        text: s.session.meta.name || s.folderName,
-      });
+      const nameEl = main.createDiv({ cls: "ggai-dash-session-name" });
+      nameEl.createSpan({ text: s.session.meta.name || s.folderName });
+      this.appendSeriesBadge(nameEl, s);
       const time = formatRelativeTime(sessionRecentTime(s));
       const nodeCount = Object.keys(s.session.nodes ?? {}).length;
       main.createDiv({
@@ -2489,16 +2604,6 @@ export class DashboardView extends ItemView {
     }
   }
 
-  private async generateSessionTitle(s: SessionListItem): Promise<void> {
-    new Notice("제목 생성 중…");
-    const result = await generateSessionTitleNow(this.plugin, s.sessionFile);
-    if (!result.ok) {
-      new Notice(`제목 생성 실패: ${result.error}`);
-      return;
-    }
-    new Notice(`제목 생성: ${result.title}`);
-  }
-
   private async activateUser(item: UserListItem): Promise<void> {
     await this.plugin.selectActivePersona(item.userFile);
     this.renderListOnly();
@@ -2518,7 +2623,7 @@ export class DashboardView extends ItemView {
         mi
           .setTitle("새 세션")
           .setIcon("plus")
-          .onClick(() => void createAndOpenSession(this.plugin, item))
+          .onClick(() => void createAndOpenSession(this.plugin, item, { mode: "ask" }))
       )
       .addItem((mi) =>
         mi
@@ -2547,61 +2652,11 @@ export class DashboardView extends ItemView {
       );
   }
 
+  /** 세션 공용 메뉴 — 항목 구성은 session-menu.ts 한 곳에서만 관리한다. */
   private sessionMenu(s: SessionListItem): Menu {
-    return new Menu()
-      .addItem((mi) =>
-        mi
-          .setTitle("열기")
-          .setIcon("play")
-          .onClick(() => void openSessionByPath(this.plugin, s.sessionFile))
-      )
-      .addItem((mi) =>
-        mi
-          .setTitle("노드 · 가지치기")
-          .setIcon("git-branch")
-          .onClick(() => void this.openBranch(s))
-      )
-      .addItem((mi) =>
-        mi
-          .setTitle("읽기 모드로 내보내기")
-          .setIcon("file-down")
-          .onClick(() => exportSessionReading(this.plugin, s))
-      )
-      .addItem((mi) =>
-        mi
-          .setTitle("이름 변경")
-          .setIcon("text-cursor-input")
-          .onClick(() => promptRenameSession(this.plugin, s))
-      )
-      .addItem((mi) =>
-        mi
-          .setTitle("제목 생성")
-          .setIcon("sparkles")
-          .onClick(() => void this.generateSessionTitle(s))
-      )
-      .addItem((mi) =>
-        mi
-          .setTitle("복제")
-          .setIcon("copy")
-          .onClick(() =>
-            void copySession(this.plugin, s, (newFile) =>
-              openSessionByPath(this.plugin, newFile)
-            )
-          )
-      )
-      .addItem((mi) =>
-        mi
-          .setTitle(s.session.meta.favorite ? "즐겨찾기 해제" : "즐겨찾기")
-          .setIcon("star")
-          .onClick(() => void this.toggleSessionFavorite(s))
-      )
-      .addSeparator()
-      .addItem((mi) =>
-        mi
-          .setTitle("삭제")
-          .setIcon("trash-2")
-          .onClick(() => confirmDeleteSession(this.plugin, s))
-      );
+    return buildSessionMenu(this.plugin, s, {
+      onBranch: () => void this.openBranch(s),
+    });
   }
 
   private userMenu(item: UserListItem): Menu {

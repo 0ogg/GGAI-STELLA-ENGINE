@@ -34,7 +34,24 @@ import {
   recordSummaryAnchor,
 } from "../src/util/summarize-session";
 import { buildSpans, spansToText } from "../src/util/session-text";
-import { createBlankSession } from "../src/util/new-session";
+import {
+  buildChatLog,
+  buildChatMessages,
+  CHAT_MESSAGE_SEPARATOR,
+  chatRoleOfKind,
+} from "../src/util/chat-messages";
+import {
+  buildChatEpisodeTailNodes,
+  createBlankSession,
+  planChatEpisodeTail,
+} from "../src/util/new-session";
+import { buildChatImportSession } from "../src/util/build-chat-import";
+import {
+  applyChatTurnNames,
+  buildTextCompletionPrompt,
+  trimChatCompletionOutput,
+} from "../src/util/text-completion-prompt";
+import type { ChatMessage } from "../src/util/context-builder";
 import {
   SESSION_SEED_CHUNK_CHARS,
   splitTextByBudget,
@@ -2191,6 +2208,26 @@ asyncTests.push((async () => {
   // 말줄임표(…) / "..." 연속 부호도 경계.
   assert.equal(extractAnchorSentence("그래서… 그는 떠났다"), "그는 떠났다");
   assert.equal(extractAnchorSentence("글쎄... 모르겠다"), "모르겠다");
+  // 일본어: 마침표(。) 뒤 공백이 없어도 문장 경계.
+  assert.equal(
+    extractAnchorSentence("「行くぞ」と彼は言った。彼女は黙って頷いた。"),
+    "彼女は黙って頷いた。"
+  );
+  // 중국어: 물음표/마침표 전각 부호도 공백 없이 경계.
+  assert.equal(
+    extractAnchorSentence("他站了起来。她看着窗外，轻声问。"),
+    "她看着窗外，轻声问。"
+  );
+  // 일본어 말줄임표(공백 없음) 뒤 문장.
+  assert.equal(
+    extractAnchorSentence("そうか……彼は目を閉じた。"),
+    "彼は目を閉じた。"
+  );
+  // 종결 부호 + 전각 닫는 괄호(。」) 뒤에 바로 이어지는 문장.
+  assert.equal(
+    extractAnchorSentence("「もう行こう。」彼は歩き出した。"),
+    "彼は歩き出した。"
+  );
   // 마지막 문장이 너무 짧으면 앞 문장까지 포함.
   assert.equal(extractAnchorSentence("긴 문장이 있었다. 끝."), "긴 문장이 있었다. 끝.");
   // 미완성 꼬리(종결 부호 없음)도 그대로 앵커가 된다 + 뒤 공백 제거.
@@ -2354,3 +2391,437 @@ void Promise.all(asyncTests)
     console.error(err);
     process.exitCode = 1;
   });
+
+// ── 챗 모드 (M6/C1): 노드=메시지 재구성 — chat-messages.ts ──────────
+{
+  const S = CHAT_MESSAGE_SEPARATOR;
+
+  // 역할 매핑 — span author 가 아니라 노드 kind.
+  assert.equal(chatRoleOfKind("root"), "assistant");
+  assert.equal(chatRoleOfKind("ai-continue"), "assistant");
+  assert.equal(chatRoleOfKind("ai-regen"), "assistant");
+  assert.equal(chatRoleOfKind("user-write"), "user");
+  assert.equal(chatRoleOfKind("user-edit"), null);
+
+  const chat: StellaSession = {
+    schemaVersion: 1,
+    meta: {
+      id: "c", name: "c", scenarioId: "scn", mode: "chat",
+      createdAt: 1, modifiedAt: 1, lastPlayedAt: 1, favorite: false,
+      rootId: "r", activeLeafId: "u3",
+    },
+    nodes: {
+      r: {
+        id: "r", parent: null, kind: "root",
+        patches: [{ op: "append", spans: [{ author: "ai", text: "인사말이다." }] }],
+        createdAt: 1,
+      },
+      u1: {
+        id: "u1", parent: "r", kind: "user-write",
+        patches: [{ op: "append", spans: [{ author: "user", text: S + "반가워." }] }],
+        createdAt: 2,
+      },
+      a1: {
+        id: "a1", parent: "u1", kind: "ai-continue",
+        patches: [{ op: "append", spans: [{ author: "ai", text: S + "나도 반가워." }] }],
+        createdAt: 3,
+      },
+      u2: {
+        id: "u2", parent: "a1", kind: "user-write",
+        patches: [{ op: "append", spans: [{ author: "user", text: S + "연속 유저 1" }] }],
+        createdAt: 4,
+      },
+      u3: {
+        id: "u3", parent: "u2", kind: "user-write",
+        patches: [{ op: "append", spans: [{ author: "user", text: S + "연속 유저 2" }] }],
+        createdAt: 5,
+      },
+    },
+  };
+
+  // 기본 재구성 — 순서/역할/노드 귀속.
+  const msgs = buildChatMessages(chat, "u3");
+  assert.deepEqual(
+    msgs.map((m) => [m.nodeId, m.role]),
+    [["r", "assistant"], ["u1", "user"], ["a1", "assistant"], ["u2", "user"], ["u3", "user"]]
+  );
+  // 오프셋 체계 일치 — 메시지 텍스트를 이으면 평탄화 본문(buildSpans)과 동일.
+  const flat = spansToText(buildSpans(chat, "u3"));
+  assert.equal(msgs.map((m) => m.text).join(""), flat);
+
+  // 전송 로그 — 구분자 trim, 연속 같은 역할도 별개 항목 유지 (병합 금지).
+  const log = buildChatLog(chat, "u3");
+  assert.deepEqual(log, [
+    { role: "assistant", content: "인사말이다." },
+    { role: "user", content: "반가워." },
+    { role: "assistant", content: "나도 반가워." },
+    { role: "user", content: "연속 유저 1" },
+    { role: "user", content: "연속 유저 2" },
+  ]);
+
+  // 메시지 편집 — user-edit replace 노드. 원래 메시지의 노드/역할 유지.
+  const editFrom = flat.indexOf("나도");
+  chat.nodes["e1"] = {
+    id: "e1", parent: "u3", kind: "user-edit",
+    patches: [{
+      op: "replace", from: editFrom, to: editFrom + "나도".length,
+      spans: [{ author: "user", text: "정말로" }],
+    }],
+    createdAt: 6,
+  };
+  const edited = buildChatMessages(chat, "e1");
+  assert.equal(edited.length, 5, "편집은 메시지 수를 바꾸지 않는다");
+  assert.equal(edited[2].nodeId, "a1", "편집돼도 메시지는 원래 노드 소속");
+  assert.equal(edited[2].role, "assistant", "편집돼도 역할 유지");
+  assert.equal(edited[2].text, S + "정말로 반가워.");
+  // 편집 후에도 평탄화 본문과 바이트 동일.
+  assert.equal(
+    edited.map((m) => m.text).join(""),
+    spansToText(buildSpans(chat, "e1"))
+  );
+
+  // 메시지 삭제 — 메시지 전체 구간 delete → 목록에서 사라지고 나머지는 유지.
+  const flat2 = spansToText(buildSpans(chat, "e1"));
+  const delFrom = flat2.indexOf(S + "연속 유저 1");
+  chat.nodes["e2"] = {
+    id: "e2", parent: "e1", kind: "user-edit",
+    patches: [{ op: "delete", from: delFrom, to: delFrom + (S + "연속 유저 1").length }],
+    createdAt: 7,
+  };
+  const afterDel = buildChatMessages(chat, "e2");
+  assert.deepEqual(
+    afterDel.map((m) => m.nodeId),
+    ["r", "u1", "a1", "u3"],
+    "삭제된 메시지만 빠진다"
+  );
+  assert.equal(
+    afterDel.map((m) => m.text).join(""),
+    spansToText(buildSpans(chat, "e2"))
+  );
+
+  // 스와이프(형제) — 다른 리프로 재구성하면 그 경로의 메시지만.
+  chat.nodes["a1b"] = {
+    id: "a1b", parent: "u1", kind: "ai-regen",
+    patches: [{ op: "append", spans: [{ author: "ai", text: S + "다른 응답." }] }],
+    createdAt: 8,
+  };
+  const swiped = buildChatLog(chat, "a1b");
+  assert.deepEqual(swiped.map((m) => m.content), [
+    "인사말이다.", "반가워.", "다른 응답.",
+  ]);
+
+  // 챗 세션 생성 — 대형 first_mes 도 통짜 1노드 (씨드 분할 안 함) + mode 기록.
+  const longSeed = "가나다라마 ".repeat(600).trim(); // > SESSION_SEED_SPLIT_MIN
+  const chatSession = createBlankSession("t", "scn", longSeed, undefined, "chat");
+  assert.equal(chatSession.meta.mode, "chat");
+  assert.equal(Object.keys(chatSession.nodes).length, 1, "챗 씨드는 노드 1개");
+  const novelSession = createBlankSession("t", "scn", longSeed);
+  assert.equal(novelSession.meta.mode, "novel");
+  assert.ok(
+    Object.keys(novelSession.nodes).length > 1,
+    "소설 씨드 분할은 기존 동작 유지"
+  );
+}
+
+// ── 챗 재생성 수정 보존 (delete+append 갈아끼우기) — 회귀 금지 ──────
+{
+  const S = CHAT_MESSAGE_SEPARATOR;
+  const chat: StellaSession = {
+    schemaVersion: 1,
+    meta: {
+      id: "c2", name: "c2", scenarioId: "scn", mode: "chat",
+      createdAt: 1, modifiedAt: 1, lastPlayedAt: 1, favorite: false,
+      rootId: "r", activeLeafId: "a1",
+    },
+    nodes: {
+      r: {
+        id: "r", parent: null, kind: "root",
+        patches: [{ op: "append", spans: [{ author: "ai", text: "인사말이다." }] }],
+        createdAt: 1,
+      },
+      u1: {
+        id: "u1", parent: "r", kind: "user-write",
+        patches: [{ op: "append", spans: [{ author: "user", text: S + "반가워." }] }],
+        createdAt: 2,
+      },
+      a1: {
+        id: "a1", parent: "u1", kind: "ai-continue",
+        patches: [{ op: "append", spans: [{ author: "ai", text: S + "나도 반가워." }] }],
+        createdAt: 3,
+      },
+    },
+  };
+
+  // 1) 유저가 자기 직전 메시지(u1)를 편집 — user-edit 노드가 리프에 붙는다.
+  const flat0 = spansToText(buildSpans(chat, "a1"));
+  const eFrom = flat0.indexOf("반가워.");
+  chat.nodes["e1"] = {
+    id: "e1", parent: "a1", kind: "user-edit",
+    patches: [{
+      op: "replace", from: eFrom, to: eFrom + "반가워.".length,
+      spans: [{ author: "user", text: "안녕, 반가워!" }],
+    }],
+    createdAt: 4,
+  };
+  chat.meta.activeLeafId = "e1";
+
+  // 2) 마지막 AI 메시지 갈아끼우기 — replaceFrom = 마지막 메시지 구간 시작.
+  const msgs1 = buildChatMessages(chat, "e1");
+  const last = msgs1[msgs1.length - 1];
+  assert.equal(last.nodeId, "a1");
+  const flat1 = spansToText(buildSpans(chat, "e1"));
+  const replaceFrom = flat1.length - last.text.length;
+  chat.nodes["r1"] = {
+    id: "r1", parent: "e1", kind: "ai-regen",
+    patches: [
+      { op: "delete", from: replaceFrom, to: flat1.length },
+      { op: "append", spans: [{ author: "ai", text: S + "새 응답이다." }] },
+    ],
+    createdAt: 5,
+  };
+  chat.meta.activeLeafId = "r1";
+
+  const msgs2 = buildChatMessages(chat, "r1");
+  // 편집은 보존되고, 마지막 AI 메시지만 새 노드로 갈아끼워진다.
+  assert.deepEqual(
+    msgs2.map((m) => [m.nodeId, m.role]),
+    [["r", "assistant"], ["u1", "user"], ["r1", "assistant"]]
+  );
+  const log2 = buildChatLog(chat, "r1");
+  assert.deepEqual(log2.map((m) => m.content), [
+    "인사말이다.", "안녕, 반가워!", "새 응답이다.",
+  ]);
+  // 평탄화 본문과 바이트 동일 불변식 유지.
+  assert.equal(
+    msgs2.map((m) => m.text).join(""),
+    spansToText(buildSpans(chat, "r1"))
+  );
+}
+
+// ── 챗 세션 → 텍스트 컴플리션: 이름 턴 + 출력 절단 (ST 호환) ──────────
+{
+  const names = { user: "철수", char: "스텔라" };
+
+  // 히스토리(chat 소스)만 이름 프리픽스, 그 사이 주입/프롬프트는 불변,
+  // 끝에 {{char}}: 오프너 — 원본 배열은 변형하지 않는다.
+  const messages: ChatMessage[] = [
+    {
+      role: "system", content: "메인 프롬프트.",
+      source: { type: "prompt", label: "Main" }, contextKind: "prompt",
+    },
+    {
+      role: "assistant", content: "인사말이다.",
+      source: { type: "chat", label: "Chat History #1" }, contextKind: "history",
+    },
+    {
+      role: "system", content: "작가노트.",
+      source: { type: "authorNote", label: "Session: author's note" },
+      contextKind: "prompt",
+    },
+    {
+      role: "user", content: "반가워.",
+      source: { type: "chat", label: "Chat History #2" }, contextKind: "history",
+    },
+  ];
+  const named = applyChatTurnNames(messages, names);
+  assert.deepEqual(
+    named.map((m) => m.content),
+    ["메인 프롬프트.", "스텔라: 인사말이다.", "작가노트.", "철수: 반가워.", "스텔라:"]
+  );
+  assert.equal(messages[1].content, "인사말이다.", "원본 메시지 불변");
+  // 평문 평탄화 — 프롬프트가 오프너로 끝나 모델이 캐릭터 발화로 이어 쓴다.
+  const prompt = buildTextCompletionPrompt(named);
+  assert.ok(prompt.endsWith("철수: 반가워.\n스텔라:"), prompt.slice(-40));
+
+  // 출력 절단 — 유저 턴부터 삭제 + 캐릭터 라벨 제거.
+  assert.equal(
+    trimChatCompletionOutput(" 응답이다.\n철수: 내가 왜 여기 있지?", names),
+    "응답이다."
+  );
+  // 오프너 에코 + 중간 반복 라벨 제거.
+  assert.equal(
+    trimChatCompletionOutput("스텔라: 첫 줄.\n스텔라: 둘째 줄.", names),
+    "첫 줄.\n둘째 줄."
+  );
+  // 응답 전체가 유저 턴이면 폐기 (빈 응답 경로로 무산).
+  assert.equal(trimChatCompletionOutput("철수: 사칭이다.", names), "");
+  // max_tokens 컷 — 끝에 반쯤 잘린 스탑 스트링 제거.
+  assert.equal(trimChatCompletionOutput("잘린 응답\n철", names), "잘린 응답");
+  // 이름에 정규식 특수문자가 있어도 안전.
+  const weird = { user: "a+b", char: "c(d)" };
+  assert.equal(
+    trimChatCompletionOutput("c(d): 응답\na+b: 질문", weird),
+    "응답"
+  );
+
+  // 유저 턴 없이 생성 종료 + 미완성 마지막 문단 → 그 문단만 제거.
+  assert.equal(
+    trimChatCompletionOutput("완결 문단이다.\n\n미완성 조각 그리고", names),
+    "완결 문단이다."
+  );
+  // 마지막 문단이 완결이면 그대로 둔다.
+  assert.equal(
+    trimChatCompletionOutput("첫 문단.\n\n둘째 문단!", names),
+    "첫 문단.\n\n둘째 문단!"
+  );
+  // 닫는 따옴표로 끝난 대사 문단은 완결로 본다.
+  assert.equal(
+    trimChatCompletionOutput('내레이션.\n\n"대사입니다."', names),
+    '내레이션.\n\n"대사입니다."'
+  );
+  // 문단이 하나뿐이면 미완성이라도 지우지 않는다(빈 응답 무산 방지).
+  assert.equal(
+    trimChatCompletionOutput("짧은 미완성 조각", names),
+    "짧은 미완성 조각"
+  );
+  // 유저 턴을 만났으면 그 앞이 미완성이라도 문단 제거를 적용하지 않는다.
+  assert.equal(
+    trimChatCompletionOutput("완결.\n\n미완성 조각\n철수: 질문", names),
+    "완결.\n\n미완성 조각"
+  );
+}
+
+// ─── 챗 다음화 인계 — 메시지 경계/역할 보존 (planChatEpisodeTail + buildChatEpisodeTailNodes) ───
+{
+  const S = CHAT_MESSAGE_SEPARATOR;
+  const chat: StellaSession = {
+    schemaVersion: 1,
+    meta: {
+      id: "ep", name: "ep", scenarioId: "scn", mode: "chat",
+      createdAt: 1, modifiedAt: 1, lastPlayedAt: 1, favorite: false,
+      rootId: "r", activeLeafId: "e1",
+    },
+    nodes: {
+      r: {
+        id: "r", parent: null, kind: "root",
+        patches: [{ op: "append", spans: [{ author: "ai", text: "인사말." }] }],
+        createdAt: 1,
+      },
+      u1: {
+        id: "u1", parent: "r", kind: "user-write",
+        patches: [{ op: "append", spans: [{ author: "user", text: S + "질문 하나." }] }],
+        createdAt: 2,
+      },
+      a1: {
+        id: "a1", parent: "u1", kind: "ai-continue",
+        patches: [{ op: "append", spans: [{ author: "ai", text: S + "답변 하나." }] }],
+        createdAt: 3,
+      },
+      u2: {
+        id: "u2", parent: "a1", kind: "user-write",
+        patches: [{ op: "append", spans: [{ author: "user", text: S + "질문 둘." }] }],
+        createdAt: 4,
+      },
+      a2: {
+        id: "a2", parent: "u2", kind: "ai-continue",
+        patches: [{ op: "append", spans: [{ author: "ai", text: S + "답변 둘." }] }],
+        createdAt: 5,
+      },
+      // 마지막 AI 메시지를 고친 편집 노드 — 인계 메시지에 편집이 반영돼야 한다.
+      e1: {
+        id: "e1", parent: "a2", kind: "user-edit",
+        patches: [{
+          op: "replace",
+          from: ("인사말." + S + "질문 하나." + S + "답변 하나." + S + "질문 둘." + S).length,
+          to: ("인사말." + S + "질문 하나." + S + "답변 하나." + S + "질문 둘." + S + "답변 둘.").length,
+          spans: [{ author: "user", text: "답변 둘 (수정)." }],
+        }],
+        createdAt: 6,
+      },
+    },
+  };
+
+  // 최근 3개 메시지 인계 — 역할 유지 + 편집 반영 + 경계는 첫 인계 메시지의 직전 노드.
+  const plan = planChatEpisodeTail(chat, 3);
+  assert.deepEqual(
+    plan.messages,
+    [
+      { role: "assistant", text: "답변 하나." },
+      { role: "user", text: "질문 둘." },
+      { role: "assistant", text: "답변 둘 (수정)." },
+    ],
+    "챗 인계는 역할을 유지한 메시지 목록이다"
+  );
+  assert.equal(plan.boundaryNodeId, "u1", "경계 = 첫 인계 메시지의 직전 path 노드");
+
+  // 메시지 수보다 크게 잡으면 전체 인계 + 경계 없음 (소설과 동일한 의미).
+  const whole = planChatEpisodeTail(chat, 99);
+  assert.equal(whole.boundaryNodeId, null);
+  assert.equal(whole.messages.length, 5);
+
+  // 새 화 심기 — 메시지 1개 = 노드 1개, 역할대로 kind, 재구성하면 원본과 동일.
+  const next = createBlankSession("ep 2화", "scn", "", undefined, "chat");
+  const built = buildChatEpisodeTailNodes(next.meta.rootId, plan.messages, 100);
+  Object.assign(next.nodes, built.nodes);
+  next.meta.activeLeafId = built.leafId;
+  const carried = buildChatMessages(next);
+  assert.deepEqual(
+    carried.map((m) => [m.role, m.text.startsWith(S) ? m.text.slice(S.length) : m.text]),
+    [
+      ["assistant", "답변 하나."],
+      ["user", "질문 둘."],
+      ["assistant", "답변 둘 (수정)."],
+    ],
+    "새 화에서도 말풍선 경계/역할이 그대로다"
+  );
+  const kinds = Object.values(built.nodes)
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map((n) => n.kind);
+  assert.deepEqual(kinds, ["ai-continue", "user-write", "ai-continue"]);
+  // 평탄화 불변식 — 메시지 텍스트 연결 = buildSpans 본문.
+  assert.equal(
+    carried.map((m) => m.text).join(""),
+    spansToText(buildSpans(next))
+  );
+  // 인계 메시지가 없으면 leaf 는 root 그대로.
+  const empty = buildChatEpisodeTailNodes("root-x", [], 100);
+  assert.equal(empty.leafId, "root-x");
+  assert.equal(Object.keys(empty.nodes).length, 0);
+}
+
+// ─── ST 채팅 임포트 — 유저가 먼저 시작한 채팅의 첫 메시지 역할 보존 ───
+{
+  const parsed = {
+    userName: "철수",
+    characterName: "스텔라",
+    messages: [
+      { role: "user" as const, swipes: [{ source: "유저가 먼저 말한다." }], activeIndex: 0 },
+      { role: "assistant" as const, swipes: [{ source: "AI 가 답한다." }], activeIndex: 0 },
+    ],
+  };
+  const built = buildChatImportSession(parsed, "chat", 1000);
+  const session: StellaSession = {
+    schemaVersion: 1,
+    meta: {
+      id: "im", name: "im", scenarioId: "scn", mode: "chat",
+      createdAt: 1, modifiedAt: 1, lastPlayedAt: 1, favorite: false,
+      rootId: built.rootId, activeLeafId: built.activeLeafId,
+    },
+    nodes: built.nodes,
+  };
+  const msgs = buildChatMessages(session);
+  assert.deepEqual(
+    msgs.map((m) => [m.role, m.text.trim()]),
+    [
+      ["user", "유저가 먼저 말한다."],
+      ["assistant", "AI 가 답한다."],
+    ],
+    "유저 시작 채팅의 첫 메시지는 유저 말풍선이다"
+  );
+  // 전송 로그에서도 유저 발화로 나간다.
+  assert.deepEqual(buildChatLog(session), [
+    { role: "user", content: "유저가 먼저 말한다." },
+    { role: "assistant", content: "AI 가 답한다." },
+  ]);
+
+  // AI(인사말) 시작 채팅은 기존대로 root=assistant.
+  const parsed2 = {
+    userName: "철수",
+    characterName: "스텔라",
+    messages: [
+      { role: "assistant" as const, swipes: [{ source: "인사말." }], activeIndex: 0 },
+    ],
+  };
+  const built2 = buildChatImportSession(parsed2, "chat", 1000);
+  assert.equal(built2.nodes[built2.rootId].kind, "root");
+}

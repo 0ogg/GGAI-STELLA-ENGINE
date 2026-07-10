@@ -22,15 +22,22 @@ import { resolveMediaPrompt } from "../util/default-media-prompts";
 import { composeMediaPrompt } from "../util/media-prompt-body";
 import { buildSpans, spansToText } from "../util/session-text";
 import {
+  buildCompactionRequestBody,
   buildSummaryRequestBody,
   clearSummaryCheckpoint,
   collectAnchorChain,
+  collectEffectiveSummary,
+  COMPACTION_IO_INSTRUCTIONS,
+  composeSummaryContextForPath,
   countGenerationsSince,
   DEFAULT_SUMMARY_THRESHOLD,
   extractNewPassage,
+  parseCompactionResponse,
   parseSummaryResponse,
+  planCompaction,
   planSummaryBoundaries,
   RECENT_EVENTS_FOR_CONTEXT,
+  recordCompaction,
   recordSummaryAnchor,
   SUMMARY_IO_INSTRUCTIONS,
 } from "../util/summarize-session";
@@ -106,7 +113,11 @@ export class SummaryService {
       settings.summarize.threshold ?? DEFAULT_SUMMARY_THRESHOLD
     );
     const gens = countGenerationsSince(session, target, last?.nodeId);
-    if (gens < threshold) return skip();
+    if (gens < threshold) {
+      // 요약 주기는 아직이어도 누적 요약이 상한을 넘었으면 압축은 돌린다.
+      await this.compactIfNeeded(sessionFile, target);
+      return skip();
+    }
     return this.summarize(sessionFile, target);
   }
 
@@ -234,12 +245,114 @@ export class SummaryService {
         opts?.onProgress?.(b + 1, total);
       }
 
+      // 누적 요약이 상한을 넘으면 오래된 상위 절반을 압축한다 (자기 취소 컨트롤러 사용).
+      await this.compactIfNeeded(sessionFile, target);
       if (produced === 0) return skip();
       return { ok: true, skipped: false, errors: [] };
     } finally {
       this.runs.delete(ac);
       this.plugin.store.trigger("summary-running-changed");
     }
+  }
+
+  /**
+   * 누적 요약 압축 — 합성된 요약이 사용자 지정 토큰 상한(summarize.maxTokens)을 넘으면
+   * 경로 위 "오래된 상위 절반" 앵커들의 events 를 한 덩어리로 압축한다. 앵커는 지우지
+   * 않고 압축본이 합성 시 덮어쓴다. 한 번 접어도 여전히 상한을 넘으면(상한을 낮춘 경우
+   * 등) 몇 회 반복한다. 실패/취소는 조용히 멈춘다(앞선 압축은 유지).
+   */
+  async compactIfNeeded(sessionFile: string, leafId?: string): Promise<void> {
+    if (!this.plugin.ai.isAvailable()) return;
+    const session = await this.plugin.store.getSession(sessionFile);
+    if (!session) return;
+    const settings = await this.plugin.resolveActiveSettings(sessionFile);
+    const maxTokens = settings.summarize?.maxTokens ?? 0;
+    if (!(maxTokens > 0)) return;
+
+    const target = leafId ?? session.meta.activeLeafId;
+    const profile =
+      this.plugin.ai.getProfileById(settings.summarize?.modelProfileId) ??
+      this.plugin.ai.getDefaultGenerationProfile();
+    if (!profile) return;
+    const prompt = resolveMediaPrompt(
+      "summary",
+      settings.summarize?.promptId,
+      this.plugin.data.mediaPrompts
+    );
+    const promptText = prompt?.prompt ?? "";
+
+    const ac = new AbortController();
+    this.runs.add(ac);
+    this.plugin.store.trigger("summary-running-changed");
+    try {
+      for (let iter = 0; iter < 4; iter++) {
+        if (ac.signal.aborted) return;
+        const summaries = await this.plugin.store.getSessionSummaries(sessionFile);
+        const composed = composeSummaryContextForPath(session, summaries, target);
+        if (composed.trim() === "") return;
+        if (this.plugin.ai.countTokens(composed, profile.id) <= maxTokens) return;
+
+        const effective = collectEffectiveSummary(session, summaries, target);
+        const plan = planCompaction(effective);
+        if (!plan) return; // 더 접을 블록이 없음
+        // 경계가 기존 압축본 그대로면(새 앵커를 하나도 흡수 못 함) 더 줄일 수 없다 —
+        // 상한이 압축본 하나보다 작은 병적 설정. 헛도는 재요청을 막고 멈춘다.
+        if (
+          effective.compaction &&
+          plan.throughNodeId === effective.compaction.throughNodeId
+        ) {
+          return;
+        }
+
+        const seg = await this.requestCompaction(
+          profile,
+          promptText,
+          buildCompactionRequestBody(plan.oldEvents),
+          ac.signal
+        );
+        if (!seg.ok) return; // 실패/취소 — 조용히 멈춘다
+
+        const store = await this.plugin.store.getSessionSummaries(sessionFile);
+        recordCompaction(store, {
+          throughNodeId: plan.throughNodeId,
+          events: seg.events,
+          state: plan.state,
+          tokens: this.plugin.ai.countTokens(seg.events, profile.id),
+          absorbedThroughNodeId: effective.compaction?.throughNodeId,
+        });
+        await this.plugin.store.saveSessionSummaries(sessionFile, store);
+      }
+    } finally {
+      this.runs.delete(ac);
+      this.plugin.store.trigger("summary-running-changed");
+    }
+  }
+
+  /** 압축 요청 1번 (재시도 포함). 성공하면 압축된 events, 실패/취소면 ok:false. */
+  private async requestCompaction(
+    profile: GenProfileLite,
+    promptText: string,
+    payload: string,
+    signal?: AbortSignal
+  ): Promise<{ ok: true; events: string } | { ok: false }> {
+    for (let attempt = 0; attempt < SUMMARY_ATTEMPTS; attempt++) {
+      if (signal?.aborted) return { ok: false };
+      try {
+        const text = await this.callModel(
+          profile,
+          COMPACTION_IO_INSTRUCTIONS,
+          promptText,
+          payload,
+          signal
+        );
+        const r = parseCompactionResponse(text);
+        if (r) return { ok: true, events: r.events };
+      } catch (err) {
+        if (isCancelledError(err)) return { ok: false };
+      }
+      if (attempt < SUMMARY_ATTEMPTS - 1) await delay(SUMMARY_RETRY_DELAY_MS);
+    }
+    return { ok: false };
   }
 
   /**
@@ -262,6 +375,7 @@ export class SummaryService {
       try {
         const responseText = await this.callModel(
           profile,
+          SUMMARY_IO_INSTRUCTIONS,
           promptText,
           payload,
           signal
@@ -297,6 +411,7 @@ export class SummaryService {
 
   private async callModel(
     profile: { id: string; kind: "chat" | "text" },
+    io: string,
     instruction: string,
     payload: string,
     signal?: AbortSignal
@@ -306,18 +421,20 @@ export class SummaryService {
     if (profile.kind === "text") {
       const r = await this.plugin.ai.generate({
         profileId: profile.id,
-        prompt: `${SUMMARY_IO_INSTRUCTIONS}\n\n${combined}`,
+        prompt: `${io}\n\n${combined}`,
         signal,
+        label: "요약",
       });
       return r.text;
     }
     const r = await this.plugin.ai.chat({
       profileId: profile.id,
       messages: [
-        { role: "system", content: SUMMARY_IO_INSTRUCTIONS },
+        { role: "system", content: io },
         { role: "user", content: combined },
       ],
       signal,
+      label: "요약",
     });
     return r.text;
   }
