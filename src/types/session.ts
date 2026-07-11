@@ -99,6 +99,19 @@ export interface SessionNode {
   label?: string;
   /** AI 생성 노드에만 존재. */
   gen?: SessionGenMeta;
+  /** 선채팅(캐릭터 선발화)으로 만들어진 노드 표시 (P1). 없으면 일반 생성. */
+  proactive?: boolean;
+}
+
+/**
+ * 선채팅(캐릭터 선발화, P1) 세션 단위 설정. 켜기/실시간만 세션이 갖고,
+ * 빈도·미확인 누적 상한 같은 상세는 플러그인 설정(전역)에 둔다.
+ */
+export interface ProactiveSessionSettings {
+  /** 이 세션에서 캐릭터가 먼저 말 걸기 허용. */
+  enabled?: boolean;
+  /** 실시간 채팅 — 선발화 지시문에 현재 시간과 마지막 대화 후 경과를 반영. */
+  realtime?: boolean;
 }
 
 export interface SessionMeta {
@@ -141,6 +154,8 @@ export interface SessionMeta {
   illustration?: IllustrationActiveSettings;
   /** 요약 활성 설정 — 자동 요약(summaries.json 노드 앵커 누적)의 실행 조건. */
   summarize?: SummaryActiveSettings;
+  /** 선채팅(P1) 세션 설정 — 챗 리모컨 종 버튼으로 토글. 빈도/상한은 플러그인 설정. */
+  proactive?: ProactiveSessionSettings;
   /** NAI 형식으로 보내기 — 텍스트 컴플리션 전송 시 <|system|>/<|user|>/<|assistant|> 턴으로 감싼다. */
   naiFormat?: boolean;
   /** 이어쓰기 이음새 보정 (챗 모델) — 마지막 문장 반복을 유도한 뒤 응답에서 제거. */

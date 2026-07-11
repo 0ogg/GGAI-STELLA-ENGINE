@@ -122,6 +122,7 @@ export class ChatSessionView extends ItemView {
   private illustrationBtn: HTMLButtonElement | null = null;
   private wandBtn: HTMLButtonElement | null = null;
   private nodeFavBtn: HTMLButtonElement | null = null;
+  private proactiveBtn: HTMLButtonElement | null = null;
   /** 아바타 재료 — refreshMacroContext 에서 함께 갱신. */
   private scenarioThumbPath: string | null = null;
   private personaThumbPath: string | null = null;
@@ -164,6 +165,10 @@ export class ChatSessionView extends ItemView {
     this.stellaPanel = s?.stellaPanel === true;
     const next = s && typeof s.sessionFile === "string" ? s.sessionFile : null;
     if (next && next !== this.sessionFile) {
+      // 생성 중 재타게팅 방지는 openStellaSession 이 담당하지만, 예상 밖 경로
+      // (레이아웃 복원 등)로 여기 오면 생성을 중단해 잠금·스트리밍이 새 세션에
+      // 새어들지 않게 한다.
+      this.generation?.abort.abort();
       await this.flushPendingEdits();
       this.sessionFile = next;
       this.plugin.rememberActiveSessionFile(next);
@@ -181,6 +186,11 @@ export class ChatSessionView extends ItemView {
 
   getSessionFile(): string | null {
     return this.sessionFile;
+  }
+
+  /** AI 생성(스트리밍) 진행 중 — 이 탭은 다른 세션으로 갈아끼우면 안 된다 (session-host 규약). */
+  isGenerating(): boolean {
+    return this.generation != null;
   }
 
   async flushPendingEdits(): Promise<void> {
@@ -883,6 +893,21 @@ export class ChatSessionView extends ItemView {
     const rightBottom = right.createEl("div", {
       cls: "ggai-toolbar-row ggai-toolbar-row-bottom",
     });
+    // 선채팅 — 탭: 이 세션 온오프 / 꾹: 실시간 채팅(시간 인지) 온오프.
+    const bBtn = rightBottom.createEl("button", {
+      cls: "ggai-btn ggai-icon-btn ggai-media-trigger-btn",
+    });
+    setIcon(bBtn, "bell");
+    bBtn.setAttr(
+      "aria-label",
+      "선채팅 on/off — 캐릭터가 먼저 말 걸기 (꾹: 실시간 채팅 on/off)"
+    );
+    bBtn.setAttr("data-tooltip-position", "top");
+    attachLongPress(bBtn, {
+      onTap: () => void this.toggleProactive(),
+      onLongPress: () => void this.toggleProactiveRealtime(),
+    });
+    this.proactiveBtn = bBtn;
     mkIconBtn(rightBottom, "panel-right", "우측 패널 열기", () =>
       void this.plugin.revealDetail()
     );
@@ -922,6 +947,11 @@ export class ChatSessionView extends ItemView {
     if (this.wandBtn) {
       this.wandBtn.disabled = generating;
       this.wandBtn.toggleClass("is-select-on", this.paraSelectMode);
+    }
+    const pa = this.session.meta.proactive;
+    if (this.proactiveBtn) {
+      this.proactiveBtn.toggleClass("is-active", pa?.enabled === true);
+      this.proactiveBtn.toggleClass("is-auto-on", pa?.realtime === true);
     }
 
     this.nodeFavBtn?.toggleClass("is-active", cur.favorite === true);
@@ -998,6 +1028,40 @@ export class ChatSessionView extends ItemView {
     } finally {
       this.suppressOwnSessionEvent = false;
     }
+  }
+
+  /** 탭 — 이 세션의 선채팅(캐릭터 선발화) on/off. */
+  private async toggleProactive(): Promise<void> {
+    if (!this.session) return;
+    const next = this.session.meta.proactive?.enabled !== true;
+    this.session.meta.proactive = {
+      ...(this.session.meta.proactive ?? {}),
+      enabled: next,
+    };
+    this.updateToolbar();
+    new Notice(
+      next
+        ? "선채팅 켜짐 — 이 세션의 캐릭터가 먼저 말을 걸 수 있습니다."
+        : "선채팅 꺼짐"
+    );
+    await this.persistSession("선채팅 설정 저장 실패");
+  }
+
+  /** 꾹 — 실시간 채팅 on/off (선채팅에 현재 시간·경과 반영). */
+  private async toggleProactiveRealtime(): Promise<void> {
+    if (!this.session) return;
+    const next = this.session.meta.proactive?.realtime !== true;
+    this.session.meta.proactive = {
+      ...(this.session.meta.proactive ?? {}),
+      realtime: next,
+    };
+    this.updateToolbar();
+    new Notice(
+      next
+        ? "실시간 채팅 켜짐 — 선채팅이 현재 시간과 지난 시간을 인지합니다."
+        : "실시간 채팅 꺼짐"
+    );
+    await this.persistSession("선채팅 설정 저장 실패");
   }
 
   /** 꾹 — 자동 삽화 on/off. */

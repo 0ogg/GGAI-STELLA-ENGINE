@@ -24,6 +24,7 @@ import { TranslationService } from "./services/translation-service";
 import { SummaryService } from "./services/summary-service";
 import { IllustrationService } from "./services/illustration-service";
 import { ParagraphRegenService } from "./services/paragraph-regen-service";
+import { ProactiveService } from "./services/proactive-service";
 import {
   SettingsPanelRegistry,
   type SettingsPanel,
@@ -67,6 +68,7 @@ import { installGlobalImeTracker } from "./views/edit-guard";
 import { IllustrationOutputView } from "./views/illustration-output-view";
 import { ChatSessionView } from "./views/chat-session-view";
 import {
+  canRetargetSessionView,
   getSessionHostLeaves,
   isSessionHostView,
   SESSION_HOST_VIEW_TYPES,
@@ -161,6 +163,10 @@ export interface StellaPluginSettings {
   notifySound?: boolean;
   /** 응답 도착 진동 (기본 켜짐). 모바일(안드로이드)에서만 동작. */
   notifyVibrate?: boolean;
+  /** 선채팅 빈도 성향 (기본 "mid"). 스케줄러가 다음 발화 간격을 뽑을 때 사용. */
+  proactiveFrequency?: "low" | "mid" | "high";
+  /** 선채팅 미확인 누적 상한 (기본 2, 0=제한 없음) — 안 읽은 선채팅이 이만큼 쌓이면 그 세션은 쉼. */
+  proactiveMaxUnread?: number;
 }
 
 /**
@@ -208,6 +214,8 @@ export default class StellaEnginePlugin extends Plugin {
   illustration!: IllustrationService;
   /** 문단 재생성 실행기 — 세션창 문단 선택 모드의 재생성 패널이 호출한다. */
   paragraphRegen!: ParagraphRegenService;
+  /** 선채팅 실행기 (P1) — 캐릭터가 먼저 말 거는 메시지를 뷰 없이 생성. */
+  proactive!: ProactiveService;
   /** 확장 탭 설정 패널 레지스트리. 내장/외부 패널 모두 `registerSettingsPanel()` 로 등록. */
   settingsPanels!: SettingsPanelRegistry;
   /** 확장 모듈 레지스트리 — 컨텍스트 기여 / 생성-완료 훅 / 로어북 선택 대체. */
@@ -253,6 +261,7 @@ export default class StellaEnginePlugin extends Plugin {
     this.summary = new SummaryService(this);
     this.illustration = new IllustrationService(this);
     this.paragraphRegen = new ParagraphRegenService(this);
+    this.proactive = new ProactiveService(this);
     this.settingsPanels = new SettingsPanelRegistry(() =>
       this.store.trigger("settings-panels-changed")
     );
@@ -332,6 +341,20 @@ export default class StellaEnginePlugin extends Plugin {
       id: "cleanup-stella-ghost-tabs",
       name: "유령 탭 정리",
       callback: () => this.reconcileStellaLeaves(),
+    });
+    // 선채팅 수동 트리거 — P1 검증용 임시 명령. 스케줄러가 들어오면 유지 여부 재검토.
+    this.addCommand({
+      id: "proactive-chat-once",
+      name: "선채팅 받아보기 (테스트)",
+      callback: async () => {
+        const sessionFile = this.getActiveOrLastSessionFile();
+        if (!sessionFile) {
+          new Notice("최근 세션이 없습니다.");
+          return;
+        }
+        const result = await this.proactive.send(sessionFile);
+        if (!result.ok) new Notice(`선채팅 실패: ${result.error}`);
+      },
     });
 
     // 6. 리본 아이콘 — 실행용 아이콘 하나만 둔다(나머지 진입은 전부 커맨드).
@@ -871,6 +894,21 @@ export default class StellaEnginePlugin extends Plugin {
   }
 
   /**
+   * 이미 열려 있는 세션 탭을 찾아 활성화(reveal)한다. 열려 있으면 true.
+   * 알림 클릭 등에서 "보던 탭을 갈아치우지 않고" 대기 중인 탭으로 이동할 때 쓴다.
+   */
+  revealOpenSession(sessionFile: string): boolean {
+    for (const leaf of getSessionHostLeaves(this.app.workspace)) {
+      const view = leaf.view;
+      if (isSessionHostView(view) && view.getSessionFile() === sessionFile) {
+        this.app.workspace.revealLeaf(leaf);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * 열려 있는 세션 뷰를 해당 노드 위치로 스크롤한다 (분기는 바꾸지 않는다).
    * 세션이 열려 있지 않거나 그 노드가 활성 경로에 없으면 false.
    */
@@ -986,8 +1024,18 @@ export default class StellaEnginePlugin extends Plugin {
   ): Promise<void> {
     this.rememberActiveSessionFile(sessionFile);
     const viewType = await this.resolveSessionViewType(sessionFile);
-    const panel = this.getStellaPanelLeaf();
-    const leaf = panel ?? this.findReusableSessionLeaf() ?? this.app.workspace.getLeaf("tab");
+    // 생성(스트리밍) 중인 세션 탭은 다른 세션으로 갈아끼우지 않는다 — 그 뷰의
+    // generation 잠금/로딩 표시가 새로 연 세션 탭에 그대로 새어들고, 스트리밍
+    // 텍스트/저장까지 꼬인다. 그런 탭은 건너뛰고 새 탭에 연다.
+    const rawPanel = this.getStellaPanelLeaf();
+    const panel =
+      rawPanel && canRetargetSessionView(rawPanel.view, sessionFile)
+        ? rawPanel
+        : null;
+    const leaf =
+      panel ??
+      this.findReusableSessionLeaf(sessionFile) ??
+      this.app.workspace.getLeaf("tab");
     if (panel) this.stellaPanelLeaf = panel;
     await leaf.setViewState({
       type: viewType,
@@ -1139,12 +1187,12 @@ export default class StellaEnginePlugin extends Plugin {
     return found;
   }
 
-  private findReusableSessionLeaf(): WorkspaceLeaf | null {
+  private findReusableSessionLeaf(sessionFile: string): WorkspaceLeaf | null {
     const active = this.app.workspace.activeLeaf;
-    if (this.isReusableSessionTarget(active)) return active;
+    if (this.isReusableSessionTarget(active, sessionFile)) return active;
 
     const emptySessionLeaf = getSessionHostLeaves(this.app.workspace).find(
-      (leaf) => this.isReusableSessionTarget(leaf)
+      (leaf) => this.isReusableSessionTarget(leaf, sessionFile)
     );
     if (emptySessionLeaf) return emptySessionLeaf;
 
@@ -1165,13 +1213,20 @@ export default class StellaEnginePlugin extends Plugin {
     });
   }
 
-  private isReusableSessionTarget(leaf: WorkspaceLeaf | null): leaf is WorkspaceLeaf {
+  private isReusableSessionTarget(
+    leaf: WorkspaceLeaf | null,
+    sessionFile: string
+  ): leaf is WorkspaceLeaf {
     if (!leaf) return false;
     const viewType = leaf.view.getViewType();
     if (viewType === "empty") return true;
     // User-requested policy: selecting a different session should replace the
     // currently open Stella session tab.
-    return isSessionHostView(leaf.view);
+    // 단, 생성(스트리밍) 중인 세션 탭은 예외 — 갈아끼우면 잠금/로딩이 새어든다.
+    return (
+      isSessionHostView(leaf.view) &&
+      canRetargetSessionView(leaf.view, sessionFile)
+    );
   }
 
   /**
@@ -1478,6 +1533,48 @@ class StellaSettingTab extends PluginSettingTab {
             btn.setDisabled(false);
           }
         })
+      );
+
+    // ── 선채팅 (세션별 켜기는 채팅 세션 리모컨의 종 버튼) ──
+    new Setting(containerEl)
+      .setName("선채팅 빈도")
+      .setDesc(
+        "캐릭터가 먼저 말을 거는 평균 빈도입니다. 세션별 켜고 끄기는 채팅 세션 하단 리모컨의 종(🔔) 버튼으로 합니다."
+      )
+      .addDropdown((drop) =>
+        drop
+          .addOption("low", "가끔")
+          .addOption("mid", "보통")
+          .addOption("high", "자주")
+          .setValue(this.plugin.data.settings?.proactiveFrequency ?? "mid")
+          .onChange(async (value) => {
+            await this.plugin.savePluginData({
+              settings: {
+                ...(this.plugin.data.settings ?? {}),
+                proactiveFrequency: value as "low" | "mid" | "high",
+              },
+            });
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("선채팅 미확인 누적 상한")
+      .setDesc(
+        "안 읽은 선채팅이 이 개수만큼 쌓이면 그 세션은 선채팅을 멈춥니다 (세션을 열어 읽으면 다시 시작). 관심 없는 세션이 계속 생성 요청을 쓰지 않게 합니다. 0 = 제한 없음."
+      )
+      .addSlider((slider) =>
+        slider
+          .setLimits(0, 10, 1)
+          .setValue(this.plugin.data.settings?.proactiveMaxUnread ?? 2)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            await this.plugin.savePluginData({
+              settings: {
+                ...(this.plugin.data.settings ?? {}),
+                proactiveMaxUnread: value,
+              },
+            });
+          })
       );
 
     new Setting(containerEl)

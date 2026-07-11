@@ -6679,8 +6679,16 @@ body.is-mobile .ggai-dash-page {
 .ggai-chat-para {
   margin: 0;
 }
+/* margin 은 문단 자체의 line-height 여백 위에 추가로 얹혀 두 배로 넓어 보인다
+   (소설 뷰의 .ggai-para-gap 은 line-height 자체가 간격 전체 높이라 이 문제가 없다).
+   line-height 와 무관한 고정 높이 spacer 로 대신해 슬라이더 값이 그대로 반영되게 한다. */
 .ggai-chat-para + .ggai-chat-para {
-  margin-top: var(--ggai-view-para-gap, 8px);
+  margin-top: 0;
+}
+.ggai-chat-para + .ggai-chat-para::before {
+  content: "";
+  display: block;
+  height: var(--ggai-view-para-gap, 8px);
 }
 .ggai-chat-bubble em {
   font-style: italic;

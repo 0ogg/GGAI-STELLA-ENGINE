@@ -27,8 +27,10 @@ import {
   requestSessionTitle,
 } from "../util/session-title";
 import {
+  anchorEndsParagraph,
   anchorSkipFinal,
   anchorSkipStreaming,
+  trailingWhitespaceRange,
 } from "../util/continuation-anchor";
 import type { PromptPresetParams } from "../types/prompt";
 import type {
@@ -375,6 +377,10 @@ export class SessionView extends ItemView {
         ? s.focusIllustrationNode
         : null;
     if (next && next !== this.sessionFile) {
+      // 생성 중 재타게팅 방지는 openStellaSession 이 담당하지만, 예상 밖 경로
+      // (레이아웃 복원 등)로 여기 오면 생성을 중단해 잠금·스트리밍이 새 세션에
+      // 새어들지 않게 한다.
+      this.generation?.abort.abort();
       // ??삘뀲 ?紐꾨??곗쨮 ?대Ŋ猿??? 疫꿸퀣??pending ????됱몵筌?筌띾뜄龜??
       await this.commitPending();
       this.flushScrollSave(); // 떠나는 세션의 스크롤 위치 저장
@@ -397,6 +403,11 @@ export class SessionView extends ItemView {
   /** detail view ???紐??癒?퐣 ??뽮쉐 ?紐꾨?野껋럥以덄몴?筌╈돦荑???????? */
   getSessionFile(): string | null {
     return this.sessionFile;
+  }
+
+  /** AI 생성(스트리밍) 진행 중 — 이 탭은 다른 세션으로 갈아끼우면 안 된다 (session-host 규약). */
+  isGenerating(): boolean {
+    return this.generation != null;
   }
 
   /**
@@ -2358,6 +2369,7 @@ export class SessionView extends ItemView {
 
     // 1) ?뚢뫂???쎈뱜 ??슢諭?v2 ??preset + lorebook + scenario + session 癰귣챶揆
     const parentSpans = buildSpans(this.session, parentId);
+    const parentText = spansToText(parentSpans);
     const scenarioFile = scenarioFileOfSessionFile(this.sessionFile);
     const scenarios = await this.store.getScenarios();
     const scenarioName =
@@ -2530,7 +2542,7 @@ export class SessionView extends ItemView {
           }
         }
         // 스트림 종료 — 보류/미판정 상태를 확정하고 앵커 반복을 최종 제거.
-        this.finalizeAnchorStrip(anchorSentence, node);
+        this.finalizeAnchorStrip(anchorSentence, node, parentText);
         if ((this.generation?.accumulatedText ?? "").length === 0 && !abort.signal.aborted) {
           emptyResponse = true;
           console.warn("[GGAI Stella] empty chat completion response", {
@@ -2566,7 +2578,8 @@ export class SessionView extends ItemView {
       // 중단/오류로 스트림이 끊긴 경우에도 앵커 반복 제거를 확정 (재호출 안전).
       this.finalizeAnchorStrip(
         payload.kind === "chat" ? payload.anchor : undefined,
-        node
+        node,
+        parentText
       );
       if (node.gen) {
         node.gen.tokensIn = usage.inputTokens;
@@ -2608,7 +2621,6 @@ export class SessionView extends ItemView {
         true
       );
       if (!aborted && !emptyResponse && !blankGeneration) {
-        const parentText = spansToText(parentSpans);
         await this.maybeGenerateSessionTitle({
           generatedText,
           parentText,
@@ -2637,16 +2649,32 @@ export class SessionView extends ItemView {
    */
   private finalizeAnchorStrip(
     anchor: string | undefined,
-    node: SessionNode
+    node: SessionNode,
+    parentText: string
   ): void {
     const gen = this.generation;
     if (!gen || !anchor || gen.rawText === undefined) return;
-    gen.accumulatedText = gen.rawText.slice(
-      anchorSkipFinal(gen.rawText, anchor)
-    );
+    const skip = anchorSkipFinal(gen.rawText, anchor);
+    // 이음새 공백 정리 — 앵커가 문장/대사 중간이면(anchorEndsParagraph=false) 이
+    // 자리의 줄바꿈은 이어쓰기를 끊으므로 걷어낸다. 완결 문장/대사로 끝난 앵커면
+    // 새 문단이 올 수 있는 자리이므로 모델이 넣은 줄바꿈을 그대로 보존한다.
+    // 반복 여부(skip)와 무관 — 반복 없이 이어쓴 응답의 선행 줄바꿈도 같은 기준.
+    const collapseSeam = !anchorEndsParagraph(anchor);
+    let kept = gen.rawText.slice(skip);
+    if (collapseSeam) kept = kept.replace(/^\s+/, "");
+    gen.accumulatedText = kept;
     const append = node.patches[0];
     if (append.op === "append" && append.spans[0]) {
       append.spans[0].text = gen.accumulatedText;
+    }
+    // 중간 이음새면 본문 꼬리 공백도 delete patch 로 걷어내 바로 잇게 한다.
+    // (finally 에서 재호출되므로 멱등: patch 추가/제거를 매번 다시 판정.)
+    const ws = trailingWhitespaceRange(parentText);
+    const wantDelete = collapseSeam && ws !== null;
+    if (wantDelete && node.patches.length === 1) {
+      node.patches.push({ op: "delete", from: ws!.from, to: ws!.to });
+    } else if (!wantDelete && node.patches.length > 1) {
+      node.patches.length = 1;
     }
   }
 

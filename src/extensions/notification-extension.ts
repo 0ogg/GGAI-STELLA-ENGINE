@@ -235,15 +235,20 @@ export function registerNotificationExtension(plugin: StellaEnginePlugin): void 
 
       const name = await sessionDisplayName(plugin, sessionFile);
       const title = `「${name}」 응답 도착`;
+      // 클릭 = 그 세션으로 이동. 단 이미 다른 탭에 열려 있으면 보던 탭을
+      // 갈아치우지 않고 그 탭을 활성화한다 (대기 중인 탭으로 점프).
       const openSession = (): void => {
-        void openSessionByPath(plugin, sessionFile);
+        if (!plugin.revealOpenSession(sessionFile)) {
+          void openSessionByPath(plugin, sessionFile);
+        }
       };
 
+      // 안 읽음 뱃지가 "놓친 응답"을 계속 남겨주므로 토스트는 항상 자동으로
+      // 사라진다 (자리 비움일 때도 무한 지속하지 않음 — 돌아왔을 때 화면을 안 막음).
       const away = !document.hasFocus();
-      // 자리 비움이면 클릭까지 남는 지속형 — 돌아왔을 때 놓치지 않게.
       const notice = new Notice(
         preview ? `${title} — ${preview}` : title,
-        away ? 0 : 8000
+        away ? 12000 : 8000
       );
       notice.noticeEl.addEventListener("click", openSession);
 

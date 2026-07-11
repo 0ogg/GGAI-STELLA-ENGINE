@@ -65,6 +65,7 @@ import {
   inlineAnchorOffset,
 } from "../src/util/illustration-anchors";
 import {
+  anchorEndsParagraph,
   anchorSkipFinal,
   anchorSkipStreaming,
   buildAnchorInstruction,
@@ -2218,10 +2219,16 @@ asyncTests.push((async () => {
     extractAnchorSentence("他站了起来。她看着窗外，轻声问。"),
     "她看着窗外，轻声问。"
   );
-  // 일본어 말줄임표(공백 없음) 뒤 문장.
+  // 일본어 말줄임표는 문장 중간 포즈 — 무공백 …에서 문장을 쪼개지 않는다
+  // (조각 앵커를 받은 모델이 완결 발화로 오해해 이음새가 깨진다).
   assert.equal(
-    extractAnchorSentence("そうか……彼は目を閉じた。"),
-    "彼は目を閉じた。"
+    extractAnchorSentence("扉が開いた。そうか……彼は目を閉じた。"),
+    "そうか……彼は目を閉じた。"
+  );
+  // 여는 따옴표 + 말줄임으로 시작하는 미완 대사 — 「…부터 통째로 앵커.
+  assert.equal(
+    extractAnchorSentence("一瞬で鉄になった。\n\n「…ご主人様？"),
+    "「…ご主人様？"
   );
   // 종결 부호 + 전각 닫는 괄호(。」) 뒤에 바로 이어지는 문장.
   assert.equal(
@@ -2275,6 +2282,21 @@ asyncTests.push((async () => {
   assert.equal(anchorSkipStreaming(anchor + " 바람", anchor), anchor.length);
   // 반복 없이 충분히 길어지면 0 으로 확정 (본문 표시 시작).
   assert.equal(anchorSkipStreaming("전혀 다른 내용".repeat(60), anchor), 0);
+
+  // 이음새 줄바꿈 허용 판정 — 완결 문장/대사면 새 문단 가능(줄바꿈 보존).
+  assert.equal(anchorEndsParagraph("彼は部屋を出た。"), true);
+  assert.equal(anchorEndsParagraph("「もう行こう」"), true);
+  assert.equal(anchorEndsParagraph("「行くぞ」と彼は言った。"), true);
+  assert.equal(anchorEndsParagraph("He left the room."), true);
+  assert.equal(anchorEndsParagraph("そうか……"), true);
+  assert.equal(anchorEndsParagraph('"Yes, I am."'), true);
+  // 아포스트로피(')를 미종결 따옴표로 오검출하지 않는다.
+  assert.equal(anchorEndsParagraph("He didn't know what to say."), true);
+  // 문장/대사 중간이면 이음새 줄바꿈을 걷어낸다.
+  assert.equal(anchorEndsParagraph("近くにあるカグツチアカデミーの生徒"), false);
+  assert.equal(anchorEndsParagraph("「…ご主人様？"), false); // 대사 미종결
+  assert.equal(anchorEndsParagraph('"Are you sure?'), false); // 큰따옴표 미종결
+  assert.equal(anchorEndsParagraph("（…なんでこうなった"), false);
 }
 
 // ── 대형 첫 본문 분할 + 요약 앵커 경계 계산 ─────────────────────────

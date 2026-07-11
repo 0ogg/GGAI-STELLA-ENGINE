@@ -22,10 +22,24 @@ const TERMINATORS = /[.!?…‥。．！？।॥؟۔]/;
  * 일본어·중국어 등은 문장 끝(。！？) 뒤에 공백을 넣지 않으므로, ASCII(.!?) 처럼
  * 뒤 공백을 강제하면 CJK 본문 전체가 한 문장으로 뭉쳐 앵커가 부풀어버린다.
  * ASCII 마침표/물음표/느낌표는 약어·소수점 오분할을 막기 위해 여기서 제외한다.
+ * 말줄임표(…‥)도 제외 — 일본어에서 …는 문장 중간의 포즈(彼は…そう言った)로
+ * 훨씬 자주 쓰여, 무공백 경계로 치면 앵커가 문장 뒷조각만 남는다. 조각 앵커를
+ * 받은 모델은 그걸 완결 발화로 오해해 대사를 닫지 않거나 새 문단을 연다.
+ * …가 진짜 문장 끝이면 뒤따르는 공백/줄바꿈이 경계를 만든다.
  */
-const SELF_DELIM_TERMINATORS = /[…‥。．！？।॥؟۔]/;
+const SELF_DELIM_TERMINATORS = /[。．！？।॥؟۔]/;
 /** 종결 부호 뒤에 붙을 수 있는 닫는 따옴표/괄호류(전각·CJK 포함). */
 const CLOSERS = /["'’”」』）】〕》〉］)\]»›]/;
+/** 문장 앞에 올 수 있는 여는 따옴표/괄호류(전각·CJK 포함). */
+const OPENERS = /["'“‘「『（【〔《〈［(\[«‹]/;
+
+/**
+ * 앵커 반복 앞에 올 수 있는 "서식 문자" — 공백/따옴표/괄호/대시/마크다운 마커.
+ * 응답 앞머리에서 앵커 반복을 찾을 때, 이 문자들만 건너뛰고 실제 내용 글자를
+ * 만나면 스캔을 멈춘다. (일본어처럼 짧은 앵커가 본문 중간에 자연 재등장할 때
+ * 그 지점을 반복으로 오인해 앞 문장까지 지우는 것을 막는다.)
+ */
+const LEAD_SKIPPABLE = /[\s"'`«»‹›“”‘’「」『』（）【】〔〕《》〈〉［］()\[\]*>#~—–\-]/;
 
 const WS = /\s/;
 
@@ -100,6 +114,59 @@ export function currentParagraphLength(bodyText: string): number {
 }
 
 /**
+ * 본문 끝의 공백/줄바꿈 범위 (없으면 null).
+ *
+ * 앵커는 꼬리 공백을 무시하고 뽑지만 생성 결과는 본문 맨 끝(공백 뒤)에
+ * 이어붙는다. 이음새가 문장/대사 중간이면(anchorEndsParagraph=false) 이 범위를
+ * 함께 지워야 이어붙는 지점에 빈 줄이 끼지 않는다.
+ */
+export function trailingWhitespaceRange(
+  bodyText: string
+): { from: number; to: number } | null {
+  const trimmedLen = bodyText.replace(/\s+$/, "").length;
+  if (trimmedLen === bodyText.length) return null;
+  return { from: trimmedLen, to: bodyText.length };
+}
+
+/**
+ * 앵커가 "문단이 끝나는 지점"인가 — 이어쓰기 이음새에 줄바꿈이 허용되는지 판정.
+ *
+ * true  = 완결된 문장/대사(종결 부호나 닫는 따옴표로 끝 + 열린 따옴표 없음) →
+ *         새 문단이 올 수 있는 자리. 모델이 넣은 이음새 줄바꿈을 **보존**한다.
+ * false = 문장/대사 중간(종결 부호 없는 조각, 또는 「…ご主人様？ 처럼 대사 미종결) →
+ *         이 자리의 줄바꿈은 이어쓰기를 끊으므로 **걷어낸다**.
+ *
+ * 이 구분 덕분에 "새 문단이 맞는 자리"의 줄바꿈은 지워지지 않는다.
+ */
+export function anchorEndsParagraph(anchor: string): boolean {
+  const t = anchor.replace(/\s+$/, "");
+  if (!t) return false;
+  const last = t[t.length - 1];
+  if (!TERMINATORS.test(last) && !CLOSERS.test(last)) return false;
+  return !hasUnclosedOpener(t);
+}
+
+/** 여는 괄호/따옴표 (비대칭 쌍만; ASCII 큰따옴표는 패리티로 별도 판정). */
+const BRACKET_OPEN = /[「『（(【〔《〈［\[«‹“]/;
+const BRACKET_CLOSE = /[」』）)】〕》〉］\]»›”]/;
+
+/**
+ * 앵커 안에 닫히지 않은 여는 따옴표/괄호가 남아 있는가 (대사 미종결 판정).
+ * 한 문장 범위라 단순 카운트로 충분하다. 아포스트로피 오검출을 피하려
+ * ASCII/곡선 작은따옴표(' ’ ‘)는 세지 않는다.
+ */
+function hasUnclosedOpener(t: string): boolean {
+  let depth = 0;
+  let dquote = 0;
+  for (const ch of t) {
+    if (ch === '"') dquote ^= 1;
+    else if (BRACKET_OPEN.test(ch)) depth++;
+    else if (BRACKET_CLOSE.test(ch) && depth > 0) depth--;
+  }
+  return depth > 0 || dquote === 1;
+}
+
+/**
  * 스트리밍 중 판정 — 응답 앞머리에서 앵커 반복이 끝나는 위치(잘라낼 길이).
  *  - 숫자: 판정 완료. `raw.slice(반환값)` 이 표시할 본문.
  *  - null: 아직 데이터 부족 — 표시를 보류하고 다음 delta 를 기다린다.
@@ -156,6 +223,13 @@ function sentenceStarts(t: string): number[] {
         i = j;
         continue;
       }
+      // 문장 선두의 종결 부호 run 은 경계가 아니다 — 「…ご主人様？ 처럼 말끝을
+      // 흐리며 시작하는 대사에서 여는 따옴표와 … 를 앵커에서 떼어내면, 모델이
+      // 따옴표 없는 조각을 완결 발화로 오해해 대사를 닫지 않고 새 문단을 연다.
+      if (leadingOnly(t, starts[starts.length - 1], i)) {
+        i = j;
+        continue;
+      }
       while (j < t.length && CLOSERS.test(t[j])) j++;
       // 종결 부호 뒤 공백/줄바꿈 → 그 뒤에서 새 문장.
       if (j < t.length && WS.test(t[j])) {
@@ -182,6 +256,15 @@ function sentenceStarts(t: string): number[] {
 
 function isDigit(ch: string): boolean {
   return ch >= "0" && ch <= "9";
+}
+
+/** t[from..to) 가 공백/여는 따옴표·괄호뿐인가 — 문장 내용이 아직 시작 안 됨. */
+function leadingOnly(t: string, from: number, to: number): boolean {
+  for (let k = from; k < to; k++) {
+    const c = t[k];
+    if (!WS.test(c) && !OPENERS.test(c)) return false;
+  }
+  return true;
 }
 
 function nonWsLength(s: string): number {
@@ -222,12 +305,20 @@ function matchAnchorEnd(
   return i;
 }
 
-/** 응답 앞머리(오프셋 0~window)에서 앵커 전체 반복을 찾는다. */
+/**
+ * 응답 앞머리에서 앵커 전체 반복을 찾는다.
+ *
+ * 앵커 반복은 응답 맨 앞(선행 공백/따옴표 등 서식 문자 뒤)에만 온다. 따라서
+ * 매칭 시작점은 서식 문자만 건너뛰며 찾고, 실제 내용 글자를 만나면 멈춘다 —
+ * 그 뒤에서 앵커와 같은 구절이 나오면 그것은 반복이 아니라 자연 재등장이므로
+ * 잘라내면 안 된다(짧은 CJK 앵커에서 완성된 앞 문장이 통째로 지워지던 버그).
+ */
 function findAnchorEnd(raw: string, anchor: string): number | null {
   const limit = Math.min(HEAD_SEARCH_WINDOW, raw.length);
   for (let s = 0; s <= limit; s++) {
     const end = matchAnchorEnd(raw, s, anchor);
     if (end !== null) return end;
+    if (s < raw.length && !LEAD_SKIPPABLE.test(raw[s])) break;
   }
   return null;
 }

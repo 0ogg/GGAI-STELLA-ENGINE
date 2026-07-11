@@ -91,6 +91,24 @@ export function buildSessionMenu(
       .setIcon("star")
       .onClick(() => void toggleFavorite(plugin, s))
   );
+  // 선채팅(P1) — 챗 세션 전용. 세션창의 종 버튼과 같은 설정을 대시보드/사이드바에서도.
+  if (s.session.meta.mode === "chat") {
+    const pa = s.session.meta.proactive;
+    menu.addItem((mi) =>
+      mi
+        .setTitle(pa?.enabled === true ? "선채팅 끄기" : "선채팅 켜기")
+        .setIcon("bell")
+        .onClick(() => void toggleProactiveSetting(plugin, s, "enabled"))
+    );
+    menu.addItem((mi) =>
+      mi
+        .setTitle(
+          pa?.realtime === true ? "실시간 채팅 끄기" : "실시간 채팅 켜기"
+        )
+        .setIcon("clock")
+        .onClick(() => void toggleProactiveSetting(plugin, s, "realtime"))
+    );
+  }
   menu.addSeparator();
   menu.addItem((mi) =>
     mi
@@ -99,6 +117,34 @@ export function buildSessionMenu(
       .onClick(() => confirmDeleteSession(plugin, s))
   );
   return menu;
+}
+
+/** 선채팅 세션 설정 토글 — store 경유 저장, 열린 세션창은 session-changed 로 동기화. */
+async function toggleProactiveSetting(
+  plugin: StellaEnginePlugin,
+  s: SessionListItem,
+  key: "enabled" | "realtime"
+): Promise<void> {
+  try {
+    const session = await plugin.store.getSession(s.sessionFile);
+    if (!session) throw new Error("세션을 불러올 수 없습니다.");
+    const next = session.meta.proactive?.[key] !== true;
+    session.meta.proactive = { ...(session.meta.proactive ?? {}), [key]: next };
+    await plugin.store.saveSession(s.sessionFile, session);
+    new Notice(
+      key === "enabled"
+        ? next
+          ? "선채팅 켜짐 — 이 세션의 캐릭터가 먼저 말을 걸 수 있습니다."
+          : "선채팅 꺼짐"
+        : next
+          ? "실시간 채팅 켜짐 — 선채팅이 현재 시간과 지난 시간을 인지합니다."
+          : "실시간 채팅 꺼짐"
+    );
+  } catch (err) {
+    new Notice(
+      `선채팅 설정 저장 실패: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
 }
 
 async function toggleFavorite(
