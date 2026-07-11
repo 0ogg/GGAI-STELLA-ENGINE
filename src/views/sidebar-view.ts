@@ -10,7 +10,7 @@ import {
 import { VIEW_TYPE_SIDEBAR } from "../constants";
 import { getSessionHostLeaves } from "./session-host";
 import type StellaEnginePlugin from "../main";
-import { StellaStore } from "../state/store";
+import { StellaStore, type SessionChangeDetail } from "../state/store";
 import type { LorebookListItem } from "../util/scan-lorebooks";
 import type { ScenarioListItem } from "../util/scan-scenarios";
 import type { SessionListItem } from "../util/scan-sessions";
@@ -132,16 +132,21 @@ export class SidebarView extends ItemView {
       })
     );
     this.registerEvent(
-      this.store.on("session-changed", (file: string) => {
-        // 세션 메타(name/favorite) 가 바뀔 수 있으므로 해당 시나리오의 목록 행만 갱신.
-        for (const folder of this.expanded) {
-          const list = this.sessionsByFolder.get(folder);
-          if (list && list.some((s) => s.sessionFile === file)) {
-            void this.reloadSessions(folder);
-            return;
+      this.store.on(
+        "session-changed",
+        (file: string, detail?: SessionChangeDetail) => {
+          // 활성 설정만 바뀐 저장은 세션 줄 표시(이름/즐겨찾기/시각)와 무관.
+          if (detail?.kinds?.every((k) => k === "settings")) return;
+          // 세션 메타(name/favorite) 가 바뀔 수 있으므로 해당 시나리오의 목록 행만 갱신.
+          for (const folder of this.expanded) {
+            const list = this.sessionsByFolder.get(folder);
+            if (list && list.some((s) => s.sessionFile === file)) {
+              void this.reloadSessions(folder);
+              return;
+            }
           }
         }
-      })
+      )
     );
     this.registerEvent(
       this.store.on("session-unread-changed", (file: string) => {

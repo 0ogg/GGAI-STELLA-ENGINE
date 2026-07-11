@@ -6,7 +6,7 @@ import {
 } from "../constants";
 import type StellaEnginePlugin from "../main";
 import { AIService, type GenerationProfileLite } from "../services/ai-service";
-import { StellaStore } from "../state/store";
+import { StellaStore, type SessionChangeDetail } from "../state/store";
 import type {
   Patch,
   SessionNode,
@@ -319,7 +319,8 @@ export class SessionView extends ItemView {
    * 域???源?硫? ?癒?┛?癒?쓺???袁⑤뼎??뺣뼄. ??? baseline 揶쏄퉮???귐됱젉????멸땋 筌욊낱????얜똻???곷튊 ??뺣뼄.
    * saveSession ?紐꾪뀱 筌욊낯???true, ?紐꾪뀱 ??false. ?紐껊굶????true 筌?reload ??쎄땁.
    */
-  private suppressOwnSessionEvent = false;
+  /** 발신자 토큰 — 이 뷰의 저장이 쏜 session-changed 를 detail.origin 으로 구분. */
+  private readonly storeOrigin = `session-view:${uuidv4()}`;
 
   // ?????? B4: AI ??쎈뱜?귐됱빪 ?怨밴묶 ??????
   /** ?袁⑹삺 筌욊쑵六?餓λ쵐??AI ??밴쉐 ??null ??????疫? */
@@ -541,11 +542,19 @@ export class SessionView extends ItemView {
 
     // ?紐? 癰궰野???삘뀲 ???紐? ?紐꾩춿疫? 揶쏅Ŋ?. ?癒?┛ 癰궰野껋럩? suppressOwnSessionEvent 嚥???쎄땁.
     this.registerEvent(
-      this.store.on("session-changed", (file: string) => {
-        if (file !== this.sessionFile) return;
-        if (this.suppressOwnSessionEvent) return;
-        void this.handleExternalChange();
-      })
+      this.store.on(
+        "session-changed",
+        (file: string, detail?: SessionChangeDetail) => {
+          if (file !== this.sessionFile) return;
+          if (detail?.origin === this.storeOrigin) return; // 자기 저장 에코
+          if (detail?.kinds?.every((k) => k === "settings")) {
+            // 활성 설정만 바뀜 — 본문 재구성/비교 없이 국소 반영.
+            this.applySettingsOnlyChange();
+            return;
+          }
+          void this.handleExternalChange();
+        }
+      )
     );
     this.registerEvent(
       this.store.on("session-deleted", (file: string) => {
@@ -827,17 +836,7 @@ export class SessionView extends ItemView {
       nextSession.meta.activeLeafId === prevActiveLeafId &&
       spansToText(buildSpans(nextSession)) === prevBaselineText;
     if (textUnchanged) {
-      const nextMode = this.session.meta.translation?.output ?? "replace";
-      if (nextMode !== this.outputMode) {
-        // 출력 방식 전환 시 보던 노드를 새 레이아웃에 이어준다.
-        const anchor = this.currentAnchor();
-        this.outputMode = nextMode;
-        this.applyDisplayMode();
-        if (anchor) this.restoreToAnchor(anchor);
-      }
-      this.updateToolbar();
-      // 삽화 사용/출력 위치 등 설정 변경 반영.
-      this.renderInlineIllustrations();
+      this.applySettingsOnlyChange();
       return;
     }
 
@@ -870,6 +869,26 @@ export class SessionView extends ItemView {
     if (!shouldRestoreCaret && this.lastAnchor) {
       this.restoreToAnchor(this.lastAnchor);
     }
+  }
+
+  /**
+   * 활성 설정만 바뀐 경우의 국소 반영 — 본문 DOM 은 손대지 않는다.
+   * (session 객체는 store 캐시 공유라 이미 최신. session-changed 의
+   * kinds=["settings"] 경로와 handleExternalChange 의 textUnchanged 분기가 공용.)
+   */
+  private applySettingsOnlyChange(): void {
+    if (!this.session) return;
+    const nextMode = this.session.meta.translation?.output ?? "replace";
+    if (nextMode !== this.outputMode) {
+      // 출력 방식 전환 시 보던 노드를 새 레이아웃에 이어준다.
+      const anchor = this.currentAnchor();
+      this.outputMode = nextMode;
+      this.applyDisplayMode();
+      if (anchor) this.restoreToAnchor(anchor);
+    }
+    this.updateToolbar();
+    // 삽화 사용/출력 위치 등 설정 변경 반영.
+    this.renderInlineIllustrations();
   }
 
   /** 외부(다른 view/편집기)에서 media.json 이 바뀌면 번역 보기 상태/블록을 갱신. */
@@ -2842,15 +2861,14 @@ export class SessionView extends ItemView {
     silent = false
   ): Promise<void> {
     if (!this.session || !this.sessionFile) return;
-    this.suppressOwnSessionEvent = true;
     try {
-      await this.store.saveSession(this.sessionFile, this.session);
+      await this.store.saveSession(this.sessionFile, this.session, {
+        origin: this.storeOrigin,
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (silent) console.warn("[GGAI Stella] " + errorPrefix + ":", err);
       else new Notice(errorPrefix + ": " + msg);
-    } finally {
-      this.suppressOwnSessionEvent = false;
     }
   }
 
@@ -3617,12 +3635,9 @@ export class SessionView extends ItemView {
     this.session.meta.translation = translation;
     this.updateToolbar();
     new Notice(translation.auto ? "자동 번역 켜짐" : "자동 번역 꺼짐");
-    this.suppressOwnSessionEvent = true;
-    try {
-      await this.plugin.patchActiveSettings({ translation }, this.sessionFile);
-    } finally {
-      this.suppressOwnSessionEvent = false;
-    }
+    await this.plugin.patchActiveSettings({ translation }, this.sessionFile, {
+      origin: this.storeOrigin,
+    });
   }
 
   // 자동 번역(생성 직후)은 번역 확장(`extensions/translation-extension.ts`)이
@@ -3650,12 +3665,9 @@ export class SessionView extends ItemView {
     this.session.meta.illustration = illustration;
     this.updateToolbar();
     new Notice(illustration.auto ? "자동 삽화 켜짐" : "자동 삽화 꺼짐");
-    this.suppressOwnSessionEvent = true;
-    try {
-      await this.plugin.patchActiveSettings({ illustration }, this.sessionFile);
-    } finally {
-      this.suppressOwnSessionEvent = false;
-    }
+    await this.plugin.patchActiveSettings({ illustration }, this.sessionFile, {
+      origin: this.storeOrigin,
+    });
   }
 
   // 자동 삽화(생성 직후, 밀도 게이트)는 삽화 확장(`extensions/illustration-extension.ts`)이

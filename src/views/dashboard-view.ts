@@ -8,7 +8,7 @@ import {
 } from "obsidian";
 import { VIEW_TYPE_DASHBOARD } from "../constants";
 import type StellaEnginePlugin from "../main";
-import { StellaStore } from "../state/store";
+import { StellaStore, type SessionChangeDetail } from "../state/store";
 import type { LorebookListItem } from "../util/scan-lorebooks";
 import type { PromptListItem } from "../util/scan-prompts";
 import {
@@ -259,7 +259,17 @@ export class DashboardView extends ItemView {
     );
     this.registerEvent(this.store.on("scenarios-changed", debouncedScenarios));
     this.registerEvent(this.store.on("sessions-changed", debouncedScenarios));
-    this.registerEvent(this.store.on("session-changed", debouncedRecent));
+    this.registerEvent(
+      this.store.on(
+        "session-changed",
+        (_file: string, detail?: SessionChangeDetail) => {
+          // 활성 설정만 바뀐 저장은 홈 히어로/세션 목록 표시와 무관 —
+          // 이미지가 있는 카드를 다시 그리지 않는다 (표지 깜빡임 방지).
+          if (detail?.kinds?.every((k) => k === "settings")) return;
+          debouncedRecent();
+        }
+      )
+    );
     this.registerEvent(
       this.store.on("session-illustrations-changed", debouncedRecent)
     );

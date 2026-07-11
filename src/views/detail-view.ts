@@ -1,6 +1,7 @@
 import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
 import { VIEW_TYPE_DETAIL } from "../constants";
 import type StellaEnginePlugin from "../main";
+import type { SessionChangeDetail } from "../state/store";
 import type { ActiveSettings } from "../types/preset";
 import { BranchSection } from "./detail/branch-section";
 import { ExpandSection, type ExpandSectionUiState } from "./detail/expand-section";
@@ -187,12 +188,21 @@ export class DetailView extends ItemView {
     );
     // 활성 세션 메타가 외부에서 갱신된 경우
     this.registerEvent(
-      this.plugin.store.on("session-changed", (file: string) => {
-        if (file === this.activeSessionFile) {
+      this.plugin.store.on(
+        "session-changed",
+        (file: string, detail?: SessionChangeDetail) => {
+          if (file !== this.activeSessionFile) return;
           this.plugin.rememberActiveSessionFile(file);
+          if (detail?.kinds?.every((k) => k === "settings")) {
+            // 활성 설정만 바뀜 — 섹션 DOM 을 부수지 않고 값만 제자리 동기화.
+            // (구 동작: 현재 탭 전체 refresh → 설정 하나에 모든 섹션이 깔짝거림)
+            void this.refreshActiveSettings();
+            if (this.activeTab === "expand") void this.expandSection?.refresh();
+            return;
+          }
           this.reloadActiveSessionFile(file, true);
         }
-      })
+      )
     );
     this.registerEvent(
       this.plugin.store.on("session-deleted", (file: string) => {

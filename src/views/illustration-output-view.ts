@@ -1,6 +1,7 @@
 import { ItemView, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import { VIEW_TYPE_ILLUSTRATION_OUTPUT } from "../constants";
 import type StellaEnginePlugin from "../main";
+import type { SessionChangeDetail } from "../state/store";
 import type {
   IllustrationVariant,
   SessionIllustrations,
@@ -80,9 +81,15 @@ export class IllustrationOutputView extends ItemView {
       })
     );
     this.registerEvent(
-      this.plugin.store.on("session-changed", (file: string) => {
-        if (file === this.sessionFile) void this.reload();
-      })
+      this.plugin.store.on(
+        "session-changed",
+        (file: string, detail?: SessionChangeDetail) => {
+          if (file !== this.sessionFile) return;
+          // 활성 설정만 바뀐 저장은 삽화 표시와 무관 — 이미지 재로드 안 함.
+          if (detail?.kinds?.every((k) => k === "settings")) return;
+          void this.reload();
+        }
+      )
     );
     this.registerEvent(
       this.plugin.store.on("session-illustrations-changed", (file: string) => {
