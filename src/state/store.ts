@@ -748,7 +748,8 @@ export class StellaStore extends Events {
 
   async saveSessionTranslations(
     sessionFile: string,
-    translations: SessionTranslations
+    translations: SessionTranslations,
+    detail?: SessionChangeDetail
   ): Promise<void> {
     const path = translationsFileOfSessionFile(sessionFile);
     if (!path) throw new Error("Invalid session path");
@@ -758,7 +759,7 @@ export class StellaStore extends Events {
     const f = this.vault.getAbstractFileByPath(path);
     if (f instanceof TFile) await this.vault.modify(f, body);
     else await this.vault.create(path, body);
-    this.trigger("session-translations-changed", sessionFile);
+    this.trigger("session-translations-changed", sessionFile, detail);
   }
 
   // ─────────────────────────── reading export (.md) ───────────────────────────
@@ -899,7 +900,8 @@ export class StellaStore extends Events {
 
   async saveSessionIllustrations(
     sessionFile: string,
-    illustrations: SessionIllustrations
+    illustrations: SessionIllustrations,
+    detail?: SessionChangeDetail
   ): Promise<void> {
     const path = illustrationsFileOfSessionFile(sessionFile);
     if (!path) throw new Error("Invalid session path");
@@ -908,7 +910,7 @@ export class StellaStore extends Events {
     const f = this.vault.getAbstractFileByPath(path);
     if (f instanceof TFile) await this.vault.modify(f, body);
     else await this.vault.create(path, body);
-    this.trigger("session-illustrations-changed", sessionFile);
+    this.trigger("session-illustrations-changed", sessionFile, detail);
   }
 
   /**

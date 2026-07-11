@@ -2,6 +2,7 @@ import { ItemView, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import { VIEW_TYPE_ILLUSTRATION_OUTPUT } from "../constants";
 import type StellaEnginePlugin from "../main";
 import type { SessionChangeDetail } from "../state/store";
+import { uuidv4 } from "../util/uuid";
 import type {
   IllustrationVariant,
   SessionIllustrations,
@@ -36,8 +37,8 @@ export class IllustrationOutputView extends ItemView {
   private bodyEl!: HTMLElement;
   private regenerating = false;
   private reloadSeq = 0;
-  /** 자기 variant 선택 저장 이벤트 무시 (슬라이드 애니메이션 보존). */
-  private suppressOwnEvent = false;
+  /** 발신자 토큰 — 이 뷰의 저장이 쏜 이벤트를 detail.origin 으로 구분 (슬라이드 애니메이션 보존). */
+  private readonly storeOrigin = `illustration-output:${uuidv4()}`;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -92,9 +93,14 @@ export class IllustrationOutputView extends ItemView {
       )
     );
     this.registerEvent(
-      this.plugin.store.on("session-illustrations-changed", (file: string) => {
-        if (file === this.sessionFile && !this.suppressOwnEvent) void this.reload();
-      })
+      this.plugin.store.on(
+        "session-illustrations-changed",
+        (file: string, detail?: SessionChangeDetail) => {
+          if (file !== this.sessionFile) return;
+          if (detail?.origin === this.storeOrigin) return; // 자기 저장 에코
+          void this.reload();
+        }
+      )
     );
     this.registerEvent(
       this.plugin.store.on("session-deleted", (file: string) => {
@@ -176,16 +182,15 @@ export class IllustrationOutputView extends ItemView {
     });
   }
 
-  /** 삽화 variant 즐겨찾기 토글 — 동기 반영 + 자기 이벤트 무시 저장. */
+  /** 삽화 variant 즐겨찾기 토글 — 동기 반영, 자기 에코는 origin 으로 skip. */
   private toggleFavorite(nodeId: string, variantId: string): boolean {
     if (!this.sessionFile || !this.illustrations) return false;
     const next = toggleIllustrationFavorite(this.illustrations, nodeId, variantId);
-    this.suppressOwnEvent = true;
-    void this.plugin.store
-      .saveSessionIllustrations(this.sessionFile, this.illustrations)
-      .finally(() => {
-        this.suppressOwnEvent = false;
-      });
+    void this.plugin.store.saveSessionIllustrations(
+      this.sessionFile,
+      this.illustrations,
+      { origin: this.storeOrigin }
+    );
     return next;
   }
 
@@ -201,17 +206,13 @@ export class IllustrationOutputView extends ItemView {
     variantId: string
   ): Promise<void> {
     if (!this.sessionFile || !this.illustrations) return;
-    // 캐러셀이 이미 로컬 슬라이드했으므로 in-place 갱신 + 자기 이벤트 suppress.
+    // 캐러셀이 이미 로컬 슬라이드했으므로 in-place 갱신, 자기 에코는 origin 으로 skip.
     if (!setActiveIllustrationVariant(this.illustrations, nodeId, variantId)) return;
-    this.suppressOwnEvent = true;
-    try {
-      await this.plugin.store.saveSessionIllustrations(
-        this.sessionFile,
-        this.illustrations
-      );
-    } finally {
-      this.suppressOwnEvent = false;
-    }
+    await this.plugin.store.saveSessionIllustrations(
+      this.sessionFile,
+      this.illustrations,
+      { origin: this.storeOrigin }
+    );
   }
 
   private openRegen(nodeId: string): void {

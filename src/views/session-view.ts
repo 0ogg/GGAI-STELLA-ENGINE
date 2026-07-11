@@ -291,8 +291,6 @@ export class SessionView extends ItemView {
   private illustrations: SessionIllustrations | null = null;
   /** 삽화 생성 중 — 중복 방지 + 버튼 busy. */
   private illustrating = false;
-  /** 자기 illustrations 저장 이벤트 무시 (variant 선택 슬라이드 애니메이션 보존). */
-  private suppressOwnIllustrationsEvent = false;
   /** 인라인 삽화 위젯들 (원문 본문/번역 편집 영역 안의 원자 블록) — 재배치 시 제거용. */
   private inlineIllusEls: HTMLElement[] = [];
   /** 가장 최근 AI 생성 시작 마커(다섯 잎 꽃) — 재배치 시 제거용. */
@@ -309,8 +307,6 @@ export class SessionView extends ItemView {
   private selectionUiTimer: number | null = null;
   /** 일괄 번역 버튼이 현재 "선택 영역" 모드인지 (아이콘 교체 최소화용). */
   private batchBtnSelectionMode = false;
-  /** 자기 translations 저장 이벤트 무시 플래그 (suppressOwnSessionEvent 패턴). */
-  private suppressOwnTranslationsEvent = false;
   /** 문단 선택 모드 (문단 재생성) — 툴바 버튼 토글, 문단 클릭/탭 시 재생성 패널. */
   private paraSelectMode = false;
 
@@ -563,18 +559,24 @@ export class SessionView extends ItemView {
       })
     );
     this.registerEvent(
-      this.store.on("session-translations-changed", (file: string) => {
-        if (file !== this.sessionFile) return;
-        if (this.suppressOwnTranslationsEvent) return;
-        void this.handleExternalTranslationsChange();
-      })
+      this.store.on(
+        "session-translations-changed",
+        (file: string, detail?: SessionChangeDetail) => {
+          if (file !== this.sessionFile) return;
+          if (detail?.origin === this.storeOrigin) return; // 자기 저장 에코
+          void this.handleExternalTranslationsChange();
+        }
+      )
     );
     this.registerEvent(
-      this.store.on("session-illustrations-changed", (file: string) => {
-        if (file !== this.sessionFile) return;
-        if (this.suppressOwnIllustrationsEvent) return;
-        void this.refreshIllustrations();
-      })
+      this.store.on(
+        "session-illustrations-changed",
+        (file: string, detail?: SessionChangeDetail) => {
+          if (file !== this.sessionFile) return;
+          if (detail?.origin === this.storeOrigin) return; // 자기 저장 에코
+          void this.refreshIllustrations();
+        }
+      )
     );
 
     // ??뺢돌?귐딆궎 筌롫??(??已??紐껉퐬??筌앸Þ爰쇽㎕?섎┛) 癰궰野?????삳쐭筌???쇰뻻 域밸챶??
@@ -3319,17 +3321,16 @@ export class SessionView extends ItemView {
     await this.saveTranslationsSuppressed();
   }
 
-  /** media 저장 — 자기 이벤트는 suppress (블록은 직접 갱신하므로). */
+  /** media 저장 — origin 토큰으로 자기 이벤트를 구분 (블록은 직접 갱신하므로 skip). */
   private async saveTranslationsSuppressed(): Promise<void> {
     if (!this.sessionFile || !this.translations) return;
-    this.suppressOwnTranslationsEvent = true;
     try {
-      await this.store.saveSessionTranslations(this.sessionFile, this.translations);
+      await this.store.saveSessionTranslations(this.sessionFile, this.translations, {
+        origin: this.storeOrigin,
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       new Notice("번역 데이터 저장 실패: " + msg);
-    } finally {
-      this.suppressOwnTranslationsEvent = false;
     }
   }
 
@@ -3752,14 +3753,11 @@ export class SessionView extends ItemView {
     variantId: string
   ): Promise<void> {
     if (!this.sessionFile || !this.illustrations) return;
-    // 캐러셀이 이미 로컬 슬라이드했으므로 in-place 갱신 + 자기 이벤트 suppress(재렌더 방지).
+    // 캐러셀이 이미 로컬 슬라이드했으므로 in-place 갱신 + 자기 에코는 origin 으로 skip.
     if (!setActiveIllustrationVariant(this.illustrations, nodeId, variantId)) return;
-    this.suppressOwnIllustrationsEvent = true;
-    try {
-      await this.store.saveSessionIllustrations(this.sessionFile, this.illustrations);
-    } finally {
-      this.suppressOwnIllustrationsEvent = false;
-    }
+    await this.store.saveSessionIllustrations(this.sessionFile, this.illustrations, {
+      origin: this.storeOrigin,
+    });
   }
 
   /**
@@ -3947,12 +3945,9 @@ export class SessionView extends ItemView {
   ): boolean {
     if (!this.sessionFile || !this.illustrations) return false;
     const next = toggleIllustrationFavorite(this.illustrations, nodeId, variantId);
-    this.suppressOwnIllustrationsEvent = true;
-    void this.store
-      .saveSessionIllustrations(this.sessionFile, this.illustrations)
-      .finally(() => {
-        this.suppressOwnIllustrationsEvent = false;
-      });
+    void this.store.saveSessionIllustrations(this.sessionFile, this.illustrations, {
+      origin: this.storeOrigin,
+    });
     return next;
   }
 
@@ -4008,15 +4003,12 @@ export class SessionView extends ItemView {
       variantId
     );
     if (!removed) return;
-    // 자기 변경 이벤트는 무시 — 디스크 재로딩/전체 재렌더 폭주를 막고(모바일 멈춤 원인)
-    // in-memory 상태를 그대로 유지해 연속 삭제도 일관되게 동작한다.
-    this.suppressOwnIllustrationsEvent = true;
-    try {
-      await this.store.saveSessionIllustrations(this.sessionFile, this.illustrations);
-      await this.store.deleteSessionAsset(this.sessionFile, removed.path);
-    } finally {
-      this.suppressOwnIllustrationsEvent = false;
-    }
+    // 자기 변경 이벤트는 origin 으로 skip — 디스크 재로딩/전체 재렌더 폭주를 막고
+    // (모바일 멈춤 원인) in-memory 상태를 그대로 유지해 연속 삭제도 일관되게 동작한다.
+    await this.store.saveSessionIllustrations(this.sessionFile, this.illustrations, {
+      origin: this.storeOrigin,
+    });
+    await this.store.deleteSessionAsset(this.sessionFile, removed.path);
     // 인라인 표시만 국소 갱신 (삭제된 variant 반영). 출력 뷰는 자체 이벤트로 갱신됨.
     this.renderInlineIllustrations();
   }
@@ -4114,13 +4106,13 @@ export class SessionView extends ItemView {
     this.flushTranslationEdits();
     this.translating = true;
     this.updateToolbar();
-    this.suppressOwnTranslationsEvent = true;
     const progress: { notice: Notice | null } = { notice: null };
     try {
       const result = await this.plugin.translation.translateParagraphs(
         this.sessionFile,
         {
           ...effectiveOpts,
+          origin: this.storeOrigin, // 화면은 onProgress 로 직접 갱신 — 자기 에코 skip
           onProgress: (done, total) => {
             // 청크가 끝날 때마다 완료분을 바로 화면에 반영 (전체 끝날 때까지 대기 X).
             void this.renderTranslatedSoFar();
@@ -4136,7 +4128,7 @@ export class SessionView extends ItemView {
         this.translations = await this.store.getSessionTranslations(this.sessionFile);
         this.translationViewActive = true;
         this.translations.displayMode = "translation";
-        await this.store.saveSessionTranslations(this.sessionFile, this.translations);
+        await this.saveTranslationsSuppressed();
         this.applyDisplayMode();
         if (anchor) this.restoreToAnchor(anchor);
       }
@@ -4152,7 +4144,6 @@ export class SessionView extends ItemView {
       return undefined;
     } finally {
       progress.notice?.hide();
-      this.suppressOwnTranslationsEvent = false;
       this.translating = false;
       this.updateToolbar();
     }
@@ -4306,23 +4297,25 @@ export class SessionView extends ItemView {
       if (!this.sessionFile || this.translating) return false;
       this.translating = true;
       this.updateToolbar();
-      this.suppressOwnTranslationsEvent = true;
       try {
         await this.plugin.translation.commitPreview(
           this.sessionFile,
           preview.items,
-          { modelProfileId: preview.modelProfileId, promptId: preview.promptId }
+          {
+            modelProfileId: preview.modelProfileId,
+            promptId: preview.promptId,
+            origin: this.storeOrigin, // 아래에서 직접 재로딩/재렌더 — 자기 에코 skip
+          }
         );
         const anchor = this.currentAnchor();
         this.translations = await this.store.getSessionTranslations(this.sessionFile);
         this.translationViewActive = true;
         this.translations.displayMode = "translation";
-        await this.store.saveSessionTranslations(this.sessionFile, this.translations);
+        await this.saveTranslationsSuppressed();
         this.applyDisplayMode();
         if (anchor) this.restoreToAnchor(anchor);
         return true;
       } finally {
-        this.suppressOwnTranslationsEvent = false;
         this.translating = false;
         this.updateToolbar();
       }

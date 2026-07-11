@@ -101,8 +101,6 @@ export class ChatSessionView extends ItemView {
   private translations: SessionTranslations | null = null;
   private illustrations: SessionIllustrations | null = null;
   private translationViewActive = false;
-  private suppressOwnTranslationsEvent = false;
-  private suppressOwnIllustrationsEvent = false;
   private translating = false;
   private illustrating = false;
   private viewStyle: SessionViewStyle = clampSessionViewStyle(undefined);
@@ -257,26 +255,34 @@ export class ChatSessionView extends ItemView {
       })
     );
     this.registerEvent(
-      this.store.on("session-translations-changed", (file: string) => {
-        if (file !== this.sessionFile || this.suppressOwnTranslationsEvent) return;
-        void this.store.getSessionTranslations(file).then((t) => {
-          this.translations = t;
-          this.translationViewActive = t.displayMode === "translation";
-          runWhenImeIdle(() => {
-            this.renderMessages();
-            this.updateViewToggleBtn();
+      this.store.on(
+        "session-translations-changed",
+        (file: string, detail?: SessionChangeDetail) => {
+          if (file !== this.sessionFile) return;
+          if (detail?.origin === this.storeOrigin) return; // 자기 저장 에코
+          void this.store.getSessionTranslations(file).then((t) => {
+            this.translations = t;
+            this.translationViewActive = t.displayMode === "translation";
+            runWhenImeIdle(() => {
+              this.renderMessages();
+              this.updateViewToggleBtn();
+            });
           });
-        });
-      })
+        }
+      )
     );
     this.registerEvent(
-      this.store.on("session-illustrations-changed", (file: string) => {
-        if (file !== this.sessionFile || this.suppressOwnIllustrationsEvent) return;
-        void this.store.getSessionIllustrations(file).then((i) => {
-          this.illustrations = i;
-          runWhenImeIdle(() => this.renderMessages());
-        });
-      })
+      this.store.on(
+        "session-illustrations-changed",
+        (file: string, detail?: SessionChangeDetail) => {
+          if (file !== this.sessionFile) return;
+          if (detail?.origin === this.storeOrigin) return; // 자기 저장 에코
+          void this.store.getSessionIllustrations(file).then((i) => {
+            this.illustrations = i;
+            runWhenImeIdle(() => this.renderMessages());
+          });
+        }
+      )
     );
     this.render();
     // 모바일 — 뷰어 도구(갤러리/번역 전환)를 뷰 헤더 액션에 1회 등록.
@@ -570,13 +576,10 @@ export class ChatSessionView extends ItemView {
     if (!this.sessionFile || !this.illustrations) return;
     const removed = removeIllustrationVariant(this.illustrations, nodeId, variantId);
     if (!removed) return;
-    this.suppressOwnIllustrationsEvent = true;
-    try {
-      await this.store.saveSessionIllustrations(this.sessionFile, this.illustrations);
-      await this.store.deleteSessionAsset(this.sessionFile, removed.path);
-    } finally {
-      this.suppressOwnIllustrationsEvent = false;
-    }
+    await this.store.saveSessionIllustrations(this.sessionFile, this.illustrations, {
+      origin: this.storeOrigin,
+    });
+    await this.store.deleteSessionAsset(this.sessionFile, removed.path);
     this.renderMessages();
   }
 
@@ -752,23 +755,17 @@ export class ChatSessionView extends ItemView {
   ): Promise<void> {
     if (!this.sessionFile || !this.illustrations) return;
     if (!setActiveIllustrationVariant(this.illustrations, nodeId, variantId)) return;
-    this.suppressOwnIllustrationsEvent = true;
-    try {
-      await this.store.saveSessionIllustrations(this.sessionFile, this.illustrations);
-    } finally {
-      this.suppressOwnIllustrationsEvent = false;
-    }
+    await this.store.saveSessionIllustrations(this.sessionFile, this.illustrations, {
+      origin: this.storeOrigin,
+    });
   }
 
   private toggleIllustrationFavorite(nodeId: string, variantId: string): boolean {
     if (!this.sessionFile || !this.illustrations) return false;
     const next = toggleIllustrationFavorite(this.illustrations, nodeId, variantId);
-    this.suppressOwnIllustrationsEvent = true;
-    void this.store
-      .saveSessionIllustrations(this.sessionFile, this.illustrations)
-      .finally(() => {
-        this.suppressOwnIllustrationsEvent = false;
-      });
+    void this.store.saveSessionIllustrations(this.sessionFile, this.illustrations, {
+      origin: this.storeOrigin,
+    });
     return next;
   }
 
@@ -1245,12 +1242,9 @@ export class ChatSessionView extends ItemView {
     translations.displayMode = active ? "translation" : "source";
     this.translations = translations;
     this.translationViewActive = active;
-    this.suppressOwnTranslationsEvent = true;
-    try {
-      await this.store.saveSessionTranslations(this.sessionFile, translations);
-    } finally {
-      this.suppressOwnTranslationsEvent = false;
-    }
+    await this.store.saveSessionTranslations(this.sessionFile, translations, {
+      origin: this.storeOrigin,
+    });
     this.updateViewToggleBtn();
     this.renderMessages();
   }
@@ -1654,12 +1648,9 @@ export class ChatSessionView extends ItemView {
       changed = true;
     }
     if (!changed) return;
-    this.suppressOwnTranslationsEvent = true;
-    try {
-      await this.store.saveSessionTranslations(this.sessionFile, this.translations);
-    } finally {
-      this.suppressOwnTranslationsEvent = false;
-    }
+    await this.store.saveSessionTranslations(this.sessionFile, this.translations, {
+      origin: this.storeOrigin,
+    });
   }
 
   /** 편집 종료(blur/flush) — 커밋 후 표시본으로 복귀. */

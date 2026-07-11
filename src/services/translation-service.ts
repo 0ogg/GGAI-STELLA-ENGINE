@@ -57,6 +57,12 @@ export interface TranslateOptions {
   hashes?: string[];
   /** 청크 완료마다 호출 — (번역 완료 문단 수, 전체 대상 수). */
   onProgress?: (done: number, total: number) => void;
+  /**
+   * 발신 뷰 토큰 — 저장 이벤트(session-translations-changed)의 detail.origin 으로
+   * 전달된다. 실행을 시작한 뷰가 자기 화면을 직접 갱신(onProgress)하므로 자기 에코를
+   * skip 하는 용도.
+   */
+  origin?: string;
 }
 
 /** 미리보기 한 문단의 번역 결과 — 아직 translations.json 에 반영되지 않았다. */
@@ -300,7 +306,7 @@ export class TranslationService {
   async commitPreview(
     sessionFile: string,
     items: TranslationPreviewItem[],
-    meta: { modelProfileId: string; promptId: string }
+    meta: { modelProfileId: string; promptId: string; origin?: string }
   ): Promise<{ updatedHashes: string[] }> {
     const translations = await this.plugin.store.getSessionTranslations(sessionFile);
     const undoItems: TranslationUndoItem[] = [];
@@ -322,7 +328,9 @@ export class TranslationService {
     }
     if (undoItems.length > 0) {
       pushTranslationUndoEntry(translations, undoItems);
-      await this.plugin.store.saveSessionTranslations(sessionFile, translations);
+      await this.plugin.store.saveSessionTranslations(sessionFile, translations, {
+        origin: meta.origin,
+      });
     }
     return { updatedHashes };
   }
@@ -415,7 +423,9 @@ export class TranslationService {
 
       // 청크마다 즉시 저장 — 이후 청크가 실패해도 여기까지는 보존.
       if (chunkUpdated > 0) {
-        await this.plugin.store.saveSessionTranslations(sessionFile, translations);
+        await this.plugin.store.saveSessionTranslations(sessionFile, translations, {
+          origin: opts?.origin,
+        });
       }
       done += chunk.length;
       opts?.onProgress?.(Math.min(done, targets.length), targets.length);
@@ -434,7 +444,9 @@ export class TranslationService {
         ([hash, v]) => ({ hash, ...v })
       );
       pushTranslationUndoEntry(translations, items);
-      await this.plugin.store.saveSessionTranslations(sessionFile, translations);
+      await this.plugin.store.saveSessionTranslations(sessionFile, translations, {
+        origin: opts?.origin,
+      });
     }
     return {
       ok: errors.length === 0,
