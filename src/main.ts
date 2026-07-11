@@ -663,24 +663,30 @@ export default class StellaEnginePlugin extends Plugin {
   /**
    * 활성 설정 부분 갱신 (값이 undefined 면 그 키는 건드리지 않음).
    * 세션 있으면 세션 메타에, 없으면 PluginData.current 에 박는다.
+   * 값이 실제로 바뀔 때만 저장·방송한다 (no-op 저장이 전 뷰 재렌더를 유발하던 문제).
+   * opts.origin 은 발신 뷰 토큰 — session-changed 에 실려 자기 에코 구분에 쓰인다.
    */
   async patchActiveSettings(
     patch: Partial<ActiveSettings>,
-    sessionFile: string | null
+    sessionFile: string | null,
+    opts?: { origin?: string }
   ): Promise<void> {
     if (sessionFile) {
       const session = await this.store.getSession(sessionFile);
       if (!session) return;
-      applyActiveSettingsPatch(session.meta, patch);
-      await this.store.saveSession(sessionFile, session);
+      if (activeSettingsPatchChanges(session.meta, patch)) {
+        applyActiveSettingsPatch(session.meta, patch);
+        await this.store.saveSession(sessionFile, session, {
+          kinds: ["settings"],
+          origin: opts?.origin,
+        });
+      }
+    }
+    if (activeSettingsPatchChanges(this.data.current ?? {}, patch)) {
       const current = { ...(this.data.current ?? {}) };
       applyActiveSettingsPatch(current, patch);
       await this.savePluginData({ current });
-      return;
     }
-    const current = { ...(this.data.current ?? {}) };
-    applyActiveSettingsPatch(current, patch);
-    await this.savePluginData({ current });
   }
 
   /**
@@ -701,13 +707,15 @@ export default class StellaEnginePlugin extends Plugin {
     sessionFile: string | null,
     opts?: { silent?: boolean }
   ): Promise<void> {
-    await this.patchActiveSettings(presetToActiveSettings(preset), sessionFile);
+    const patch = presetToActiveSettings(preset);
     // 프리셋은 NAI 형식 여부를 안 들고 있으므로 모델 종류로 재유도 — 이전 모델의
     // 체크 상태가 그대로 남아 "텍스트인데 꺼짐/챗인데 켜짐"이 되는 것을 방지.
+    // 별도 저장이 아니라 같은 patch 에 합쳐 저장·방송을 1회로 유지한다.
     if (preset.modelProfileId) {
       const profile = this.ai.getProfileById(preset.modelProfileId);
-      if (profile) await this.setNaiFormatForModel(profile.kind, sessionFile);
+      if (profile) patch.naiFormat = MODEL_KIND_DEFAULTS[profile.kind].naiFormat;
     }
+    await this.patchActiveSettings(patch, sessionFile);
     // 사용자가 직접 고른 설정 — 랜덤 순환이 켜져 있어도 다음 1회 생성은 이대로.
     this.notePresetRotationManualChoice();
     if (!opts?.silent) {
@@ -1364,6 +1372,21 @@ function applyActiveSettingsPatch(
   if (patch.summarize !== undefined) target.summarize = { ...patch.summarize };
   if (patch.naiFormat !== undefined) target.naiFormat = patch.naiFormat;
   if (patch.continueAnchor !== undefined) target.continueAnchor = patch.continueAnchor;
+}
+
+/** patch 를 적용하면 target 의 값이 실제로 바뀌는가 — no-op 저장·방송 방지용. */
+function activeSettingsPatchChanges(
+  target: ActiveSettings,
+  patch: Partial<ActiveSettings>
+): boolean {
+  for (const key of Object.keys(patch) as (keyof ActiveSettings)[]) {
+    const next = patch[key];
+    if (next === undefined) continue;
+    if (JSON.stringify(target[key] ?? null) !== JSON.stringify(next ?? null)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 class StellaSettingTab extends PluginSettingTab {

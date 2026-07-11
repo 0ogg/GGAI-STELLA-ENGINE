@@ -16,7 +16,7 @@ import {
   VIEW_TYPE_SESSION,
 } from "../constants";
 import type StellaEnginePlugin from "../main";
-import type { StellaStore } from "../state/store";
+import type { SessionChangeDetail, StellaStore } from "../state/store";
 import type { AIService } from "../services/ai-service";
 import type {
   IllustrationVariant,
@@ -89,7 +89,8 @@ export class ChatSessionView extends ItemView {
   /** 현재 렌더된 메시지 목록 (활성 경로 기준 캐시 — 편집 오프셋 계산용). */
   private messages: ChatSessionMessage[] = [];
   private generation: ChatGenerationState | null = null;
-  private suppressOwnSessionEvent = false;
+  /** 발신자 토큰 — 이 뷰의 저장이 쏜 session-changed 를 detail.origin 으로 구분. */
+  private readonly storeOrigin = `chat-view:${uuidv4()}`;
   private readonly guard = new EditGuard();
   /** 말풍선 편집 중 미뤄진 재렌더 — 편집이 끝나면(blur) 반영. */
   private renderPending = false;
@@ -218,12 +219,22 @@ export class ChatSessionView extends ItemView {
 
   async onOpen(): Promise<void> {
     this.registerEvent(
-      this.store.on("session-changed", (file: string) => {
-        if (file !== this.sessionFile) return;
-        if (this.suppressOwnSessionEvent || this.guard.isSavingSelf) return;
-        if (this.generation) return; // 생성 중 외부 변경은 생성 종료 후 재로드
-        runWhenImeIdle(() => void this.reloadFromStore());
-      })
+      this.store.on(
+        "session-changed",
+        (file: string, detail?: SessionChangeDetail) => {
+          if (file !== this.sessionFile) return;
+          if (detail?.origin === this.storeOrigin) return; // 자기 저장 에코
+          if (this.guard.isSavingSelf) return;
+          if (this.generation) return; // 생성 중 외부 변경은 생성 종료 후 재로드
+          if (detail?.kinds?.every((k) => k === "settings")) {
+            // 활성 설정만 바뀜 (프리셋/모델/미디어 토글 등) — 말풍선 불변.
+            // 세션 객체는 store 캐시 공유라 이미 최신, 리모컨 상태만 동기화.
+            this.updateToolbar();
+            return;
+          }
+          runWhenImeIdle(() => void this.reloadFromStore());
+        }
+      )
     );
     // 표시 매크로 재료 변경 — 페르소나/시나리오 이름 등.
     this.registerEvent(
@@ -1022,12 +1033,9 @@ export class ChatSessionView extends ItemView {
     this.session.meta.translation = translation;
     this.updateToolbar();
     new Notice(translation.auto ? "자동 번역 켜짐" : "자동 번역 꺼짐");
-    this.suppressOwnSessionEvent = true;
-    try {
-      await this.plugin.patchActiveSettings({ translation }, this.sessionFile);
-    } finally {
-      this.suppressOwnSessionEvent = false;
-    }
+    await this.plugin.patchActiveSettings({ translation }, this.sessionFile, {
+      origin: this.storeOrigin,
+    });
   }
 
   /** 탭 — 이 세션의 선채팅(캐릭터 선발화) on/off. */
@@ -1073,12 +1081,9 @@ export class ChatSessionView extends ItemView {
     this.session.meta.illustration = illustration;
     this.updateToolbar();
     new Notice(illustration.auto ? "자동 삽화 켜짐" : "자동 삽화 꺼짐");
-    this.suppressOwnSessionEvent = true;
-    try {
-      await this.plugin.patchActiveSettings({ illustration }, this.sessionFile);
-    } finally {
-      this.suppressOwnSessionEvent = false;
-    }
+    await this.plugin.patchActiveSettings({ illustration }, this.sessionFile, {
+      origin: this.storeOrigin,
+    });
   }
 
   // ── 문단 재생성 선택 모드 ────────────────────────────────────────
@@ -1989,15 +1994,14 @@ export class ChatSessionView extends ItemView {
 
   private async persistSession(errorPrefix: string, silent = false): Promise<void> {
     if (!this.session || !this.sessionFile) return;
-    this.suppressOwnSessionEvent = true;
     try {
-      await this.store.saveSession(this.sessionFile, this.session);
+      await this.store.saveSession(this.sessionFile, this.session, {
+        origin: this.storeOrigin,
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (silent) console.warn("[GGAI Stella] " + errorPrefix + ":", err);
       else new Notice(errorPrefix + ": " + msg);
-    } finally {
-      this.suppressOwnSessionEvent = false;
     }
   }
 

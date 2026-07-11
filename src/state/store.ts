@@ -12,14 +12,18 @@
  * 로 자동 propagate. 자기가 방금 쓴 파일은 grace 기간(500ms) 동안 무시 — cache 가 이미 최신.
  *
  * 이벤트:
- *   "scenarios-changed"                  - 시나리오 목록 또는 내용 변경
+ *   "scenarios-changed"                  - 시나리오 목록 또는 내용 변경 (세션 저장은 쏘지 않음)
  *   "sessions-changed"   (folder)        - 특정 시나리오의 세션 목록 변경
- *   "session-changed"    (sessionFile)   - 특정 세션 내용 변경
+ *   "session-changed"    (sessionFile, detail?: SessionChangeDetail) - 특정 세션 변경.
+ *       detail.kinds 로 "settings"(활성 설정만) / "content"(본문 등) 구분,
+ *       detail.origin 으로 발신 뷰 토큰 전달. 없으면 전체 변경으로 취급.
  *   "session-translations-changed" (sessionFile) - 특정 세션의 translations.json (문단 번역) 변경
  *   "session-summaries-changed" (sessionFile)    - 특정 세션의 summaries.json (노드 앵커 요약) 변경
  *
- * 주의: 자기 view 가 발화한 이벤트도 본인에게 도달한다. 본인 변경에 반응하기 싫으면
- * `store.saveSession` 직전에 플래그를 세우고 핸들러에서 skip 한다 (SessionView 패턴).
+ * 주의: 자기 view 가 발화한 이벤트도 본인에게 도달한다. 본인 변경 skip 은
+ * saveSession 에 `{ origin: <뷰 토큰> }` 을 넘기고 핸들러에서 detail.origin 비교가
+ * 표준이다 (ChatSessionView 패턴). 구 방식(저장 직전 플래그 세우기, SessionView 패턴)은
+ * 마이그레이션 전 뷰에만 남아 있다.
  */
 
 import { Events, EventRef, normalizePath, TFile, TFolder, Vault } from "obsidian";
@@ -93,6 +97,24 @@ import { uuidv4 } from "../util/uuid";
  * 자기 저장이 "외부 변경"으로 오인돼 편집 중 재렌더 → 입력 포커스 소실 (2026-07-06).
  */
 const SELF_WRITE_GRACE_MS = 2000;
+
+/** session-changed 가 실어 나르는 "무엇이 바뀌었나" 분류. */
+export type SessionChangeKind =
+  /** 활성 설정 (meta 의 model/params/promptSet/translation/illustration/summarize 등) — 본문 불변. */
+  | "settings"
+  /** 본문/노드 트리/활성 리프 등 그 외 전부. */
+  | "content";
+
+/**
+ * session-changed 이벤트의 두 번째 인자. 저장하는 쪽이 이미 아는 정보를
+ * 버리지 않고 전달해, 받는 쪽이 "전부 다시 그리기 vs 국소 갱신" 을 판단하게 한다.
+ * - kinds 가 없으면 "알 수 없음" = 전체 변경으로 취급 (기존 동작과 동일).
+ * - origin 은 발신 뷰의 토큰 — 자기 저장 에코를 플래그 없이 구분한다.
+ */
+export interface SessionChangeDetail {
+  kinds?: SessionChangeKind[];
+  origin?: string;
+}
 
 export class StellaStore extends Events {
   private scenariosCache: ScenarioListItem[] | null = null;
@@ -531,8 +553,12 @@ export class StellaStore extends Events {
     this.markSelfWrite(result.sessionFile);
     this.sessionByFile.set(result.sessionFile, result.session);
     this.sessionsByFolder.delete(scenarioFolder);
+    // 세션 수/최근 시각이 바뀌므로 시나리오 목록 캐시 갱신 (구현은 saveSession 의
+    // 캐시 파기에 무임승차했었다 — saveSession 이 더는 파기하지 않으므로 여기서).
+    this.scenariosCache = null;
     this.trigger("sessions-changed", scenarioFolder);
     this.trigger("session-changed", result.sessionFile);
+    this.trigger("scenarios-changed");
     return result;
   }
 
@@ -543,20 +569,43 @@ export class StellaStore extends Events {
     this.translationsBySessionFile.delete(sessionFile);
     this.summariesBySessionFile.delete(sessionFile);
     const scenarioFolder = scenarioFolderOfSessionFolder(folder);
+    this.scenariosCache = null;
     if (scenarioFolder) {
       this.sessionsByFolder.delete(scenarioFolder);
       this.trigger("sessions-changed", scenarioFolder);
     }
     this.trigger("session-deleted", sessionFile);
+    this.trigger("scenarios-changed");
   }
 
-  async saveSession(file: string, session: StellaSession): Promise<void> {
+  async saveSession(
+    file: string,
+    session: StellaSession,
+    detail?: SessionChangeDetail
+  ): Promise<void> {
     this.markSelfWrite(file);
     this.sessionByFile.set(file, session);
     await diskSaveSession(this.vault, file, session);
-    this.scenariosCache = null;
-    this.trigger("session-changed", file);
-    this.trigger("scenarios-changed");
+    // 시나리오 목록의 "최근 플레이" 정렬 재료(lastSessionAt)만 캐시 제자리 갱신.
+    // 캐시 무효화 + scenarios-changed 방송(구 동작)은 세션 저장마다 전 뷰를
+    // 재렌더시키던 원흉 — 실제 시나리오 변경(이름/표지 등)은 saveScenario 가 쏜다.
+    if (this.scenariosCache) {
+      const sessionFolder = sessionFolderOfSessionFilePath(file);
+      const scenarioFolder = sessionFolder
+        ? scenarioFolderOfSessionFolder(sessionFolder)
+        : null;
+      const item = scenarioFolder
+        ? this.scenariosCache.find((i) => i.folder === scenarioFolder)
+        : undefined;
+      if (item) {
+        item.lastSessionAt = Math.max(
+          item.lastSessionAt,
+          session.meta.lastPlayedAt ?? 0,
+          session.meta.modifiedAt ?? 0
+        );
+      }
+    }
+    this.trigger("session-changed", file, detail);
   }
 
   async renameSession(
@@ -660,11 +709,13 @@ export class StellaStore extends Events {
     await this.vault.create(newFile, JSON.stringify(cloned, null, 2));
     this.sessionByFile.set(newFile, cloned);
     const scenarioFolder = scenarioFolderOfSessionFile(sessionFile);
+    this.scenariosCache = null;
     if (scenarioFolder) {
       this.sessionsByFolder.delete(scenarioFolder);
       this.trigger("sessions-changed", scenarioFolder);
     }
     this.trigger("session-changed", newFile);
+    this.trigger("scenarios-changed");
     return { folder, sessionFile: newFile, session: cloned };
   }
 
