@@ -97,12 +97,21 @@ export function renderMediaLorebookPicker(opts: {
 }): void {
   const block = opts.parent.createDiv({ cls: "ggai-media-block" });
   block.createDiv({ cls: "ggai-media-label", text: opts.label });
-  const count = opts.selectedIds.length;
   const btn = block.createEl("button", {
     cls: "ggai-preset-btn ggai-media-lorebook-btn",
-    text: count > 0 ? `로어북 ${count}개 선택됨` : "로어북 선택",
+    text: "로어북 선택",
   });
-  if (count > 0) btn.addClass("is-active");
+  // 저장된 id 중 실제로 존재하는 로어북만 센다 — 삭제된 로어북의 잔여 id 가
+  // "1개 선택됨"으로 계속 남아 보이던 문제 방지 (로어북 삭제 시 참조를 지우지 않음).
+  const applyCount = (count: number) => {
+    btn.setText(count > 0 ? `로어북 ${count}개 선택됨` : "로어북 선택");
+    btn.toggleClass("is-active", count > 0);
+  };
+  applyCount(opts.selectedIds.length);
+  void opts.plugin.store.getLorebooks().then((list) => {
+    const existing = new Set(list.map((l) => l.lorebook.meta.id));
+    applyCount(opts.selectedIds.filter((id) => existing.has(id)).length);
+  });
   btn.addEventListener("click", () => {
     void LorebookSelectModal.open(opts.plugin, opts.selectedIds).then((ids) => {
       if (ids) void opts.onToggle(ids);
