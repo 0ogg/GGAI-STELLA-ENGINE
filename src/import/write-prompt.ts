@@ -82,17 +82,24 @@ export async function writePromptPresetFile(
 
   raw.prompts = preset.prompts.map(serializeItem);
   if (!Array.isArray(raw.prompt_order)) raw.prompt_order = [];
-  let block = raw.prompt_order.find(
-    (b: any) => b && typeof b === "object" && b.character_id === 100000
+  // 현재 ST 는 100001(global) 블록을 읽는다. 100000 은 구버전 블록.
+  // 파일에 있는 두 블록 모두 갱신해 서로 어긋난 순서가 남지 않게 한다.
+  const blocks = raw.prompt_order.filter(
+    (b: any) =>
+      b &&
+      typeof b === "object" &&
+      (b.character_id === 100000 || b.character_id === 100001)
   );
-  if (!block) {
-    block = { character_id: 100000, order: [] };
+  if (blocks.length === 0) {
+    const block = { character_id: 100001, order: [] };
     raw.prompt_order.unshift(block);
+    blocks.push(block);
   }
-  block.order = preset.prompts.map((p) => ({
+  const order = preset.prompts.map((p) => ({
     identifier: p.identifier,
     enabled: p.enabled,
   }));
+  for (const block of blocks) block.order = order.map((o) => ({ ...o }));
   raw.stella = { id: preset.meta.id, favorite: preset.meta.favorite };
 
   const body = JSON.stringify(raw, null, 2);

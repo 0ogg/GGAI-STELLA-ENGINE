@@ -100,18 +100,22 @@ function pickDefaultOrder(
   raw: unknown
 ): { identifier?: string; enabled?: boolean }[] {
   if (!Array.isArray(raw)) return [];
-  // character_id 100000 = default. 없으면 첫 블록을 fallback.
-  let defaultBlock: { character_id?: number; order?: any[] } | undefined;
+  // 현재 ST 는 global 전략 dummyId=100001 블록에 순서를 저장한다.
+  // 100000 은 구버전 기본 블록 — 100001 이 있으면 그쪽이 최신. 둘 다 없으면 첫 블록.
+  let currentBlock: { character_id?: number; order?: any[] } | undefined;
+  let legacyBlock: { character_id?: number; order?: any[] } | undefined;
   let firstBlock: { character_id?: number; order?: any[] } | undefined;
   for (const block of raw as { character_id?: number; order?: any[] }[]) {
     if (!block || typeof block !== "object") continue;
     if (firstBlock === undefined) firstBlock = block;
-    if (block.character_id === 100000) {
-      defaultBlock = block;
-      break;
+    if (block.character_id === 100001 && currentBlock === undefined) {
+      currentBlock = block;
+    }
+    if (block.character_id === 100000 && legacyBlock === undefined) {
+      legacyBlock = block;
     }
   }
-  const block = defaultBlock ?? firstBlock;
+  const block = currentBlock ?? legacyBlock ?? firstBlock;
   return Array.isArray(block?.order) ? (block!.order as any[]) : [];
 }
 
