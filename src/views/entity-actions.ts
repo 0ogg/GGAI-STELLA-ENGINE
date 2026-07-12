@@ -680,17 +680,28 @@ export async function openGroupMemberManager(
     plugin.app,
     session.meta.name,
     rows,
-    async (keptIds) => {
-      const kept = new Set(keptIds);
+    session.meta.mode === "chat",
+    {
+      autoChainMax: groupItem.group.autoChainMax ?? 0,
+      maxConsecutiveSpeaker: groupItem.group.maxConsecutiveSpeaker ?? 1,
+    },
+    async ({ keptScenarioIds, settings }) => {
+      const kept = new Set(keptScenarioIds);
       kept.add(hostId); // 주인공은 무조건 유지
       const next = groupItem.group.members.filter((m) => kept.has(m.scenarioId));
       if (!next.some((m) => m.scenarioId === hostId)) {
         next.unshift({ scenarioId: hostId });
       }
       groupItem.group.members = next;
+      groupItem.group.autoChainMax =
+        settings.autoChainMax > 0 ? settings.autoChainMax : undefined;
+      groupItem.group.maxConsecutiveSpeaker =
+        settings.maxConsecutiveSpeaker > 1
+          ? settings.maxConsecutiveSpeaker
+          : undefined;
       try {
         await plugin.store.saveGroup(groupItem.groupFile, groupItem.group);
-        new Notice("그룹 멤버를 저장했습니다.");
+        new Notice("그룹 설정을 저장했습니다.");
       } catch (err) {
         new Notice(
           `저장 실패: ${err instanceof Error ? err.message : String(err)}`
@@ -755,7 +766,7 @@ export async function openGroupCreator(
         result.groupName,
         seed,
         plugin.data.current,
-        "novel"
+        result.mode
       );
       created.session.meta.groupId = group.group.id;
       const activePersona = await plugin.resolveActiveUserProfile();

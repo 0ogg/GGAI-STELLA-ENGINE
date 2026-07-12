@@ -22,6 +22,8 @@ export interface GroupCreateResult {
   memberScenarioIds: string[];
   groupName: string;
   opening: GroupOpening;
+  /** 세션 종류 — 소설(이어쓰기) / 채팅(발화자 번갈아). */
+  mode: "novel" | "chat";
 }
 
 /**
@@ -36,6 +38,7 @@ export class GroupCreateModal extends Modal {
   private openingTouched = false;
   private openingMemberId = "";
   private openingText = "";
+  private mode: "novel" | "chat" = "chat";
 
   // 실시간 갱신 핸들들.
   private hostBadgeByRow = new Map<string, HTMLElement>();
@@ -84,6 +87,31 @@ export class GroupCreateModal extends Modal {
       badge.hide();
       this.hostBadgeByRow.set(row.scenarioId, badge);
     }
+
+    // ── 세션 종류 (소설 / 채팅) ──────────────────
+    const modeField = body.createDiv({ cls: "ggai-group-create-field" });
+    modeField.createEl("label", {
+      cls: "ggai-group-create-label",
+      text: "세션 종류",
+    });
+    const modeSeg = modeField.createDiv({ cls: "ggai-group-create-mode" });
+    const mkMode = (value: "novel" | "chat", label: string, hint: string) => {
+      const btn = modeSeg.createEl("button", {
+        cls: "ggai-btn ggai-group-create-mode-btn",
+      });
+      btn.createDiv({ cls: "ggai-group-create-mode-title", text: label });
+      btn.createDiv({ cls: "ggai-group-create-mode-hint", text: hint });
+      btn.toggleClass("is-active", this.mode === value);
+      btn.addEventListener("click", () => {
+        this.mode = value;
+        for (const el of Array.from(modeSeg.children)) {
+          el.toggleClass("is-active", el === btn);
+        }
+      });
+      return btn;
+    };
+    mkMode("chat", "채팅", "캐릭터들이 번갈아 대화");
+    mkMode("novel", "소설", "한 흐름으로 이어쓰기");
 
     // ── 그룹 이름 ────────────────────────────────
     const nameField = body.createDiv({ cls: "ggai-group-create-field" });
@@ -262,6 +290,7 @@ export class GroupCreateModal extends Modal {
       memberScenarioIds,
       groupName: this.groupName.trim(),
       opening,
+      mode: this.mode,
     });
     this.close();
   }

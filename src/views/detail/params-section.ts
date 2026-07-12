@@ -27,7 +27,7 @@ const SPECS: ParamSpec[] = [
   { key: "topP", label: "Top P", min: 0, max: 1, step: 0.01, fallback: 1, gate: "topP" },
   { key: "minP", label: "Min P", min: 0, max: 1, step: 0.01, fallback: 0, gate: "minP" },
   { key: "maxContext", label: "Max Context", min: 1024, max: 200000, step: 1024, fallback: 8192, integer: true },
-  { key: "maxOutputTokens", label: "Max Output Tokens", min: 64, max: 3000, step: 1, fallback: 1024, integer: true },
+  { key: "maxOutputTokens", label: "Max Output Tokens", min: 64, max: 65536, step: 1, fallback: 1024, integer: true },
 ];
 
 /**
@@ -52,6 +52,8 @@ export class ParamsSection {
   private activeModelProfileId: string | undefined;
   /** 같은 프로필의 max input tokens 값이 Core 쪽에서 바뀐 것도 감지하기 위한 이전값. */
   private lastProfileMaxContextTokens: number | undefined;
+  /** 같은 프로필의 max output tokens 상한이 Core 쪽에서 바뀐 것도 감지하기 위한 이전값. */
+  private lastProfileMaxOutputTokens: number | undefined;
 
   /** 누적된 슬라이더 변경. flush 시 한 번에 patch. */
   private pendingPatch: PromptPresetParams = {};
@@ -91,10 +93,13 @@ export class ParamsSection {
     // 모델 id 는 그대로여도 Core 쪽에서 그 프로필의 max input tokens 값이 바뀌었을 수 있다
     // (프로필 편집 → profiles-changed → refreshActiveSettings, modelProfileId 자체는 불변).
     const profileMaxContextTokens = this.activeProfileMaxTokens();
-    const sameProfileLimit = this.lastProfileMaxContextTokens === profileMaxContextTokens;
+    const sameContextLimit = this.lastProfileMaxContextTokens === profileMaxContextTokens;
     this.lastProfileMaxContextTokens = profileMaxContextTokens;
+    const profileMaxOutputTokens = this.activeProfileMaxOutputTokens();
+    const sameOutputLimit = this.lastProfileMaxOutputTokens === profileMaxOutputTokens;
+    this.lastProfileMaxOutputTokens = profileMaxOutputTokens;
     // 자기 저장으로 돌아온 setActive 는 슬라이더 DOM 을 파괴하지 않는다 (드래그 중 mouseup 손실 방지).
-    if (!(sameValues && sameSession && sameModel && sameProfileLimit)) this.render();
+    if (!(sameValues && sameSession && sameModel && sameContextLimit && sameOutputLimit)) this.render();
   }
 
   /** 미적용 debounce 가 있으면 즉시 저장. */
@@ -132,7 +137,16 @@ export class ParamsSection {
       return;
     }
     const profileMaxContext = this.activeProfileMaxTokens();
-    for (const spec of visible) this.renderRow(spec, spec.key === "maxContext" ? profileMaxContext : undefined);
+    const profileMaxOutput = this.activeProfileMaxOutputTokens();
+    for (const spec of visible) {
+      const override =
+        spec.key === "maxContext"
+          ? profileMaxContext
+          : spec.key === "maxOutputTokens"
+            ? profileMaxOutput
+            : undefined;
+      this.renderRow(spec, override);
+    }
   }
 
   /** 활성 모델 프로필의 allowedParams. 모델 미지정 또는 legacy 면 undefined (=모두 허용). */
@@ -145,6 +159,12 @@ export class ParamsSection {
   private activeProfileMaxTokens(): number | undefined {
     const p = this.plugin.ai.getProfileById(this.activeModelProfileId);
     return p?.maxContextTokens;
+  }
+
+  /** 활성 모델 프로필에 설정된 출력 토큰 상한. Max Output Tokens 슬라이더 상한으로 쓴다. */
+  private activeProfileMaxOutputTokens(): number | undefined {
+    const p = this.plugin.ai.getProfileById(this.activeModelProfileId);
+    return p?.maxOutputTokensLimit;
   }
 
   private renderRow(spec: ParamSpec, maxOverride?: number): void {

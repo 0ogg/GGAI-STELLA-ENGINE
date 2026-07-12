@@ -10,7 +10,8 @@ import {
   type ContextBuilderInputV2,
   type ContextBuilderOutputV2,
 } from "./context-builder";
-import { buildChatLog } from "./chat-messages";
+import { buildChatLog, buildChatMessages } from "./chat-messages";
+import type { StellaGroup } from "../types/group";
 
 /** 챗 세션 로그 — excludeTail 이면 끝의 assistant 메시지 1개 제외 (챗 재생성 전용). */
 function buildChatSessionLog(
@@ -23,6 +24,34 @@ function buildChatSessionLog(
     log.pop();
   }
   return log;
+}
+
+/**
+ * 그룹 챗 세션 로그 — 각 메시지에 `이름: ` 프리픽스 (ST 그룹 force-names 호환).
+ * AI 메시지 이름은 노드의 발화자(`node.speaker`), 없으면 호스트 캐릭터.
+ * 모델이 여러 화자를 구분하고 이름 지목에 반응할 수 있게 한다.
+ */
+function buildGroupChatSessionLog(
+  session: StellaSession,
+  leafId: string,
+  excludeTail: boolean,
+  userName: string,
+  hostName: string,
+  nameById: Map<string, string>
+): { role: "user" | "assistant"; content: string }[] {
+  const msgs = buildChatMessages(session, leafId).filter(
+    (m) => m.text.trim().length > 0
+  );
+  if (excludeTail && msgs.length > 0 && msgs[msgs.length - 1].role === "assistant") {
+    msgs.pop();
+  }
+  return msgs.map((m) => {
+    const speaker =
+      m.role === "user"
+        ? userName
+        : nameById.get(session.nodes[m.nodeId]?.speaker ?? "") ?? hostName;
+    return { role: m.role, content: `${speaker}: ${m.text.trim()}` };
+  });
 }
 import {
   buildAnchorInstruction,
@@ -87,6 +116,11 @@ export interface SessionRequestPayloadChat {
    * 앞머리에서 이 문장 반복을 후처리로 제거해야 한다 (continuation-anchor.ts).
    */
   anchor?: string;
+  /**
+   * 그룹 챗 전용 — 생성 결과에서 다른 멤버/유저 턴(`이름:`)을 절단하고 발화자
+   * 라벨을 벗겨야 한다는 표시 (trimChatCompletionOutput, dropIncompleteTail 없이).
+   */
+  names?: ChatCompletionNames;
 }
 
 export type SessionRequestPayload =
@@ -130,6 +164,12 @@ export interface PlanSessionRequestOptions {
    * 키가 존재하는 필드만 덮으므로(spread), 없는 필드는 활성 설정 그대로다.
    */
   settingsOverride?: ActiveSettings;
+  /**
+   * 그룹 챗 발화자 — 멤버 시나리오의 stella.id (G2). 그룹 챗 세션에서만 의미.
+   * 지정된 멤버의 카드가 풀 카드(시나리오 슬롯)로 들어가고 나머지 멤버(호스트
+   * 포함)는 프로필 로어북으로 합류한다. 없거나 멤버가 아니면 호스트가 발화자.
+   */
+  speakerId?: string;
 }
 
 /**
@@ -180,6 +220,52 @@ export async function planSessionRequest(
   const scenarioItem = scenarios.find((i) => i.scenarioFile === scenarioFile);
   const scenarioData = scenarioItem?.scenario.data ?? { name: "(unknown)" };
   const { profile: user } = await plugin.resolveActiveUserProfile();
+  const userName = user.name?.trim() || "User";
+
+  // ── 그룹 세션 (G1/G2) — 멤버 목록과 (챗) 발화자를 먼저 해석한다.
+  // 그룹 로드 실패는 조용히 단일 캐릭터 컨텍스트로 진행 (그룹이 삭제된 세션도
+  // 열려야 함).
+  let group: StellaGroup | null = null;
+  if (session.meta.groupId) {
+    try {
+      group = (await plugin.store.getGroupById(session.meta.groupId))?.group ?? null;
+    } catch (err) {
+      console.warn("[GGAI Stella] 그룹 로드 실패:", err);
+    }
+  }
+  const memberNameById = new Map<string, string>();
+  if (group) {
+    const byStellaId = new Map(
+      scenarios.map((i) => [i.scenario.data?.extensions?.stella?.id, i] as const)
+    );
+    for (const m of group.members) {
+      const name = byStellaId.get(m.scenarioId)?.scenario.data?.name?.trim();
+      if (name) memberNameById.set(m.scenarioId, name);
+    }
+  }
+  const isGroupChat = group != null && session.meta.mode === "chat";
+  // 발화자 (G2) — 그룹 챗에서만 의미. 멤버가 아니면 호스트로 폴백.
+  const speakerId =
+    isGroupChat &&
+    opts.speakerId &&
+    group!.members.some((m) => m.scenarioId === opts.speakerId)
+      ? opts.speakerId
+      : session.meta.scenarioId;
+  // 발화자 = 풀 카드: 호스트가 아니면 시나리오 슬롯을 발화자 카드로 교체하고,
+  // 나머지 멤버(호스트 포함)는 프로필 로어북(압축)으로 합류한다.
+  let speakerData = scenarioData;
+  if (isGroupChat && speakerId !== session.meta.scenarioId) {
+    const sc = scenarios.find(
+      (i) => i.scenario.data?.extensions?.stella?.id === speakerId
+    );
+    if (sc) speakerData = sc.scenario.data;
+  }
+  const speakerName = (speakerData.name ?? "").trim() || "Character";
+  const otherNames = isGroupChat
+    ? [...memberNameById.entries()]
+        .filter(([id]) => id !== speakerId)
+        .map(([, name]) => name)
+    : undefined;
 
   // 활성 프롬프트 세트 (없으면 폴백)
   const promptSetId = settings.promptSetId ?? session.meta.promptPresetId;
@@ -211,23 +297,38 @@ export async function planSessionRequest(
     : resolveActiveLorebooks(plugin.store, scenarioItem?.scenario ?? null, session)
   ).catch((): StellaLorebook[] => []);
 
-  // 그룹 세션 (G1): 멤버 프로필(호스트 제외)을 가상 로어북으로 합류시킨다.
-  // 전송본 단일 경로라 미리보기·생성에 자동으로 동일 반영. 그룹 로드 실패는
-  // 조용히 단일 캐릭터 컨텍스트로 진행 (그룹이 삭제된 세션도 열려야 함).
-  if (session.meta.groupId) {
-    try {
-      const groupItem = await plugin.store.getGroupById(session.meta.groupId);
-      if (groupItem) {
-        const all = await plugin.store.getScenarios();
-        const memberBook = buildGroupMemberLorebook(
-          groupItem.group,
-          all.map((i) => i.scenario),
-          session.meta.scenarioId
-        );
-        if (memberBook) lorebooks.push(memberBook);
-      }
-    } catch (err) {
-      console.warn("[GGAI Stella] 그룹 멤버 컨텍스트 로드 실패:", err);
+  // 그룹 세션 (G1/G2): 발화자를 뺀 멤버 프로필을 가상 로어북으로 합류시킨다
+  // (소설 그룹은 발화자 = 호스트 고정). 전송본 단일 경로라 미리보기·생성에
+  // 자동으로 동일 반영.
+  if (group) {
+    const memberBook = buildGroupMemberLorebook(
+      group,
+      scenarios.map((i) => i.scenario),
+      isGroupChat ? speakerId : session.meta.scenarioId
+    );
+    if (memberBook) lorebooks.push(memberBook);
+
+    // 멤버가 각자 끼고 있는 시나리오 로어북도 합집합으로 참여시킨다.
+    // 세션의 disabledScenarioLorebookIds 로 끌 수 있게 같은 disabled 셋을 존중하고,
+    // 이미 들어온 책(호스트 로어북 등)과 id 로 중복 제거한다.
+    const disabledLore = new Set(session.meta.disabledScenarioLorebookIds ?? []);
+    const alreadyLore = new Set(lorebooks.map((l) => l.meta.id));
+    const memberLoreIds: string[] = [];
+    for (const member of group.members) {
+      if (member.scenarioId === session.meta.scenarioId) continue; // 호스트는 이미 반영
+      const sc = scenarios.find(
+        (i) => i.scenario.data?.extensions?.stella?.id === member.scenarioId
+      );
+      const st = sc?.scenario.data?.extensions?.stella;
+      if (!st) continue;
+      if (st.defaultLorebookId) memberLoreIds.push(st.defaultLorebookId);
+      for (const id of st.extraLorebookIds ?? []) memberLoreIds.push(id);
+    }
+    for (const id of memberLoreIds) {
+      if (disabledLore.has(id) || alreadyLore.has(id)) continue;
+      alreadyLore.add(id);
+      const item = await plugin.store.getLorebookById(id);
+      if (item) lorebooks.push(item.lorebook);
     }
   }
 
@@ -243,18 +344,19 @@ export async function planSessionRequest(
 
   const v2input: ContextBuilderInputV2 = {
     preset,
+    // 그룹 챗이면 시나리오 슬롯 = 이번 발화자의 풀 카드 (그 외엔 호스트 카드).
     scenario: {
-      name: scenarioData.name ?? "(unknown)",
-      description: (scenarioData as any).description,
-      personality: (scenarioData as any).personality,
-      scenario: (scenarioData as any).scenario,
-      mes_example: (scenarioData as any).mes_example,
-      first_message: (scenarioData as any).first_mes,
-      system_prompt: (scenarioData as any).system_prompt,
-      post_history_instructions: (scenarioData as any).post_history_instructions,
-      depth_prompt: (scenarioData as any).extensions?.depth_prompt,
-      creator_notes: (scenarioData as any).creator_notes,
-      character_version: (scenarioData as any).character_version,
+      name: speakerData.name ?? "(unknown)",
+      description: (speakerData as any).description,
+      personality: (speakerData as any).personality,
+      scenario: (speakerData as any).scenario,
+      mes_example: (speakerData as any).mes_example,
+      first_message: (speakerData as any).first_mes,
+      system_prompt: (speakerData as any).system_prompt,
+      post_history_instructions: (speakerData as any).post_history_instructions,
+      depth_prompt: (speakerData as any).extensions?.depth_prompt,
+      creator_notes: (speakerData as any).creator_notes,
+      character_version: (speakerData as any).character_version,
     },
     persona: { name: user.name, description: user.description },
     lorebooks,
@@ -262,9 +364,19 @@ export async function planSessionRequest(
     novelChatRoleMode,
     // 챗 세션 로그는 span author 추측이 아니라 노드에서 직접 만든다 —
     // 연속 같은 역할 메시지가 구분 없이 붙는 문제 방지 (챗 모드 스펙.md).
+    // 그룹 챗은 메시지마다 발화자 이름을 붙인다 (ST force-names 호환).
     sessionLog:
       session.meta.mode === "chat"
-        ? buildChatSessionLog(session, leafId, opts.excludeTailAssistant === true)
+        ? isGroupChat
+          ? buildGroupChatSessionLog(
+              session,
+              leafId,
+              opts.excludeTailAssistant === true,
+              userName,
+              scenarioData.name?.trim() || "(unknown)",
+              memberNameById
+            )
+          : buildChatSessionLog(session, leafId, opts.excludeTailAssistant === true)
         : buildSessionLog(parentSpans, session.meta.mode, {
             novelChatRoleMode,
           }),
@@ -299,16 +411,16 @@ export async function planSessionRequest(
     // 텍스트 모델은 NAI 형식 기본 ON(명시적으로 끈 경우만 평문).
     const naiFormat = resolveNaiFormat(profile.kind, settings.naiFormat);
     // 챗 세션 → 텍스트 모델: ST 호환 이름 턴 — 히스토리를 `이름: ` 프리픽스로
-    // 평탄화하고 끝에 `{{char}}:` 오프너를 연다. 미리보기도 이 payload 그대로.
+    // 평탄화하고 끝에 `발화자이름:` 오프너를 연다. 미리보기도 이 payload 그대로.
+    // 그룹 챗은 로그에 발화자별 이름이 이미 붙어 있으니 오프너만 연다.
     const chatNames: ChatCompletionNames | undefined =
       session.meta.mode === "chat"
-        ? {
-            user: user.name?.trim() || "User",
-            char: (scenarioData.name ?? "").trim() || "Character",
-          }
+        ? { user: userName, char: speakerName, others: otherNames }
         : undefined;
     const flatMessages = chatNames
-      ? applyChatTurnNames(output.messages, chatNames)
+      ? applyChatTurnNames(output.messages, chatNames, {
+          historyAlreadyNamed: isGroupChat,
+        })
       : output.messages;
     const segments = naiFormat
       ? buildNaiFormatSegments(flatMessages)
@@ -340,7 +452,18 @@ export async function planSessionRequest(
         });
       }
     }
-    payload = { kind: "chat", messages, anchor };
+    // 그룹 챗 (G2): 이번 턴은 이 발화자만 말하라는 지시문을 끝에 붙인다
+    // (ST group nudge 호환). 미리보기도 이 payload 를 그대로 그린다.
+    let names: ChatCompletionNames | undefined;
+    if (isGroupChat) {
+      names = { user: userName, char: speakerName, others: otherNames };
+      messages.push({
+        role: "user",
+        content: `[Write the next reply only as ${speakerName}.]`,
+        source: { type: "prompt", label: "그룹 발화 지시" },
+      });
+    }
+    payload = { kind: "chat", messages, anchor, names };
   }
 
   return {

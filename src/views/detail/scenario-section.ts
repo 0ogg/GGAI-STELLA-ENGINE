@@ -61,6 +61,8 @@ export class ScenarioSection {
   /** 메모리/작가노트 옆의 "이 세션의 로어북" 영역 — 부분 갱신용. */
   private sessionLorebookAreaEl: HTMLElement | null = null;
   private lorebooks: LorebookListItem[] = [];
+  /** 그룹 세션일 때 멤버(호스트 제외)가 들고 온 로어북 — id + 어느 멤버 것인지. */
+  private groupMemberLore: Array<{ id: string; memberName: string }> = [];
 
   private sessionSaveTimer: number | null = null;
   private sessionPending: { memory?: string; authorNote?: string } = {};
@@ -195,6 +197,53 @@ export class ScenarioSection {
     }
     this.session = await this.plugin.store.refreshSession(this.activeSessionFile);
     this.lorebooks = await this.plugin.store.refreshLorebooks().catch(() => []);
+    this.groupMemberLore = await this.computeGroupMemberLore();
+  }
+
+  /**
+   * 그룹 세션이면 멤버(호스트 제외)들이 각자 끼고 있는 시나리오 로어북 목록.
+   * 호스트 로어북과 중복되는 id 는 제외("시나리오에서" 그룹에 이미 보임).
+   */
+  private async computeGroupMemberLore(): Promise<
+    Array<{ id: string; memberName: string }>
+  > {
+    const session = this.session;
+    if (!session?.meta.groupId) return [];
+    const gi = await this.plugin.store
+      .getGroupById(session.meta.groupId)
+      .catch(() => null);
+    if (!gi) return [];
+    const scenarios = await this.plugin.store.getScenarios().catch(() => []);
+    const byId = new Map(
+      scenarios.map(
+        (i) => [i.scenario.data?.extensions?.stella?.id, i] as const
+      )
+    );
+    const hostStella = byId.get(session.meta.scenarioId)?.scenario.data
+      ?.extensions?.stella;
+    const exclude = new Set<string>();
+    if (hostStella?.defaultLorebookId) exclude.add(hostStella.defaultLorebookId);
+    for (const id of hostStella?.extraLorebookIds ?? []) exclude.add(id);
+
+    const out: Array<{ id: string; memberName: string }> = [];
+    const seen = new Set<string>();
+    for (const m of gi.group.members) {
+      if (m.scenarioId === session.meta.scenarioId) continue;
+      const sc = byId.get(m.scenarioId);
+      const st = sc?.scenario.data?.extensions?.stella;
+      if (!st) continue;
+      const name = sc?.scenario.data?.name?.trim() || "(멤버)";
+      const ids = [
+        st.defaultLorebookId,
+        ...(st.extraLorebookIds ?? []),
+      ].filter((v): v is string => !!v);
+      for (const id of ids) {
+        if (exclude.has(id) || seen.has(id)) continue;
+        seen.add(id);
+        out.push({ id, memberName: name });
+      }
+    }
+    return out;
   }
 
   /**
@@ -214,6 +263,7 @@ export class ScenarioSection {
   /** 외부에서 로어북 목록이 바뀌었을 때 — 두 영역 모두 부분 갱신. */
   async refreshLorebooks(): Promise<void> {
     this.lorebooks = await this.plugin.store.refreshLorebooks().catch(() => []);
+    this.groupMemberLore = await this.computeGroupMemberLore();
     this.renderLorebookArea();
     this.renderSessionLorebookArea();
   }
@@ -536,6 +586,42 @@ export class ScenarioSection {
         const label = row.createSpan({
           cls: "ggai-lorebook-checklist-label",
           text: name,
+        });
+        if (!item) label.addClass("is-faint");
+        const handler = () =>
+          void this.handleToggleScenarioLorebook(id, cb.checked);
+        cb.addEventListener("change", handler);
+        if (item) {
+          label.addEventListener("click", () => {
+            cb.checked = !cb.checked;
+            handler();
+          });
+        }
+      }
+    }
+
+    // ─── 그룹 멤버가 들고 온 책 (호스트 제외, on/off 토글) ───
+    if (this.groupMemberLore.length > 0) {
+      const memberWrap = wrap.createDiv({ cls: "ggai-session-lorebook-group" });
+      memberWrap.createDiv({
+        cls: "ggai-text-field-label",
+        text: "그룹 멤버에서",
+      });
+      const memberListEl = memberWrap.createDiv({
+        cls: "ggai-lorebook-checklist",
+      });
+      for (const { id, memberName } of this.groupMemberLore) {
+        const item = this.lorebooks.find((l) => l.lorebook.meta.id === id);
+        const name = item?.lorebook.meta.name ?? "(삭제됨)";
+        const row = memberListEl.createDiv({
+          cls: "ggai-lorebook-checklist-row",
+        });
+        const cb = row.createEl("input", { type: "checkbox" });
+        cb.checked = !disabled.has(id);
+        if (!item) cb.disabled = true;
+        const label = row.createSpan({
+          cls: "ggai-lorebook-checklist-label",
+          text: `${name} · ${memberName}`,
         });
         if (!item) label.addClass("is-faint");
         const handler = () =>

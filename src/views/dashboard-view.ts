@@ -141,6 +141,11 @@ export class DashboardView extends ItemView {
 
   private scenarios: ScenarioListItem[] = [];
   private recentSessions: RecentSessionItem[] = [];
+  /** 그룹 id → 멤버 표지 목록 (순서 = 그룹 멤버 순서, [0]=호스트). 그룹 세션 카드용. */
+  private groupCoversById = new Map<
+    string,
+    Array<{ thumbPath: string | null; name: string }>
+  >();
   /** 세션 탭 — 모든 시나리오의 세션을 최근 플레이순으로. */
   private allSessions: Array<{
     session: SessionListItem;
@@ -260,6 +265,8 @@ export class DashboardView extends ItemView {
     );
     this.registerEvent(this.store.on("scenarios-changed", debouncedScenarios));
     this.registerEvent(this.store.on("sessions-changed", debouncedScenarios));
+    // 그룹 멤버 변경(초대/내보내기) — 세션 카드 겹친 표지 재구성.
+    this.registerEvent(this.store.on("groups-changed", debouncedScenarios));
     this.registerEvent(
       this.store.on(
         "session-changed",
@@ -431,7 +438,64 @@ export class DashboardView extends ItemView {
 
   private async refreshScenarioData(): Promise<void> {
     this.scenarios = await this.store.refreshScenarios().catch(() => []);
+    await this.loadGroupCovers();
     await this.refreshRecentData();
+  }
+
+  /** 그룹별 멤버 표지 목록을 미리 모아 둔다 (그룹 세션 카드에서 겹쳐 표시용). */
+  private async loadGroupCovers(): Promise<void> {
+    this.groupCoversById.clear();
+    const groups = await this.store.getGroups().catch(() => []);
+    if (groups.length === 0) return;
+    const byStellaId = new Map<string, ScenarioListItem>();
+    for (const s of this.scenarios) {
+      const id = s.scenario.data?.extensions?.stella?.id;
+      if (id) byStellaId.set(id, s);
+    }
+    for (const { group } of groups) {
+      const covers = group.members.flatMap((m) => {
+        const sc = byStellaId.get(m.scenarioId);
+        if (!sc) return [];
+        return [
+          {
+            thumbPath: sc.thumbnailPath,
+            name: sc.scenario.data.name || sc.folderName,
+          },
+        ];
+      });
+      if (covers.length > 0) this.groupCoversById.set(group.id, covers);
+    }
+  }
+
+  /** 세션이 그룹(멤버 2명 이상)이면 멤버 표지 목록, 아니면 null. */
+  private groupCoversForSession(
+    session: SessionListItem
+  ): Array<{ thumbPath: string | null; name: string }> | null {
+    const gid = session.session.meta.groupId;
+    if (!gid) return null;
+    const covers = this.groupCoversById.get(gid);
+    return covers && covers.length > 1 ? covers : null;
+  }
+
+  /** 멤버 표지를 겹쳐 그린다 — 최대 max 칸, 초과 시 마지막 칸은 +N 표시. */
+  private renderStackedCovers(
+    host: HTMLElement,
+    covers: Array<{ thumbPath: string | null; name: string }>,
+    max: number
+  ): void {
+    host.addClass("ggai-cover-stack");
+    const overflow = covers.length > max;
+    const shown = overflow ? covers.slice(0, max - 1) : covers;
+    shown.forEach((c) => {
+      const el = host.createDiv({ cls: "ggai-cover-stack-item" });
+      renderThumb(this.app, el, c.thumbPath, c.name, "scroll-text");
+    });
+    if (overflow) {
+      host.createDiv({
+        cls: "ggai-cover-stack-item ggai-cover-stack-more",
+        text: `+${covers.length - shown.length}`,
+      });
+    }
   }
 
   private async refreshRecentData(): Promise<void> {
@@ -1241,14 +1305,29 @@ export class DashboardView extends ItemView {
     );
     card.createDiv({ cls: "ggai-dash-card-shade" });
 
-    // 표지 오버레이 — 페르소나는 항상, 시나리오 표지는 삽화가 배경일 때만.
+    // 표지 오버레이 — 페르소나는 항상. 그룹이면 멤버 표지 4명(초과분 +N),
+    // 단일 세션이면 시나리오 표지는 삽화가 배경일 때만.
     const covers = card.createDiv({ cls: "ggai-dash-hero-covers" });
     const persona = this.resolveHeroPersona(item.session.session);
     const pCover = covers.createDiv({
       cls: "ggai-dash-hero-cover is-persona",
     });
     renderThumb(this.app, pCover, persona.thumbPath, persona.name || "Persona", "user");
-    if (hasIllust) {
+    const groupCovers = this.groupCoversForSession(item.session);
+    if (groupCovers) {
+      const HERO_MEMBER_MAX = 4;
+      for (const c of groupCovers.slice(0, HERO_MEMBER_MAX)) {
+        const el = covers.createDiv({ cls: "ggai-dash-hero-cover is-scenario" });
+        renderThumb(this.app, el, c.thumbPath, c.name, "scroll-text");
+      }
+      const extra = groupCovers.length - HERO_MEMBER_MAX;
+      if (extra > 0) {
+        covers.createDiv({
+          cls: "ggai-dash-hero-cover is-scenario ggai-dash-hero-cover-more",
+          text: `+${extra}`,
+        });
+      }
+    } else if (hasIllust) {
       const sCover = covers.createDiv({
         cls: "ggai-dash-hero-cover is-scenario",
       });
@@ -1421,7 +1500,12 @@ export class DashboardView extends ItemView {
     card.toggleClass("is-active", session.sessionFile === activeFile);
 
     const thumb = card.createDiv({ cls: "ggai-dash-session-card-thumb" });
-    renderThumb(this.app, thumb, scenario.thumbnailPath, scenarioName, "scroll-text");
+    const groupCovers = this.groupCoversForSession(session);
+    if (groupCovers) {
+      this.renderStackedCovers(thumb, groupCovers, 3);
+    } else {
+      renderThumb(this.app, thumb, scenario.thumbnailPath, scenarioName, "scroll-text");
+    }
 
     const main = card.createDiv({ cls: "ggai-dash-session-card-main" });
     main.createDiv({

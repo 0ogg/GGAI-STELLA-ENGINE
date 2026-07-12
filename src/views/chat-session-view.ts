@@ -9,7 +9,15 @@
  *  - meta.mode !== "chat" 세션이 들어오면 소설 뷰로 즉시 넘긴다 (뷰 혼입 방지).
  */
 
-import { ItemView, Notice, Platform, TFile, WorkspaceLeaf, setIcon } from "obsidian";
+import {
+  ItemView,
+  Menu,
+  Notice,
+  Platform,
+  TFile,
+  WorkspaceLeaf,
+  setIcon,
+} from "obsidian";
 import {
   VIEW_TYPE_CHAT_SESSION,
   VIEW_TYPE_DASHBOARD,
@@ -24,6 +32,12 @@ import type {
   SessionTranslations,
 } from "../types/media";
 import type { Patch, SessionNode, StellaSession } from "../types/session";
+import type { StellaGroup } from "../types/group";
+import {
+  parseTalkativeness,
+  pickNextSpeaker,
+  type GroupSpeakerCandidate,
+} from "../util/group-speaker";
 import { planSessionRequest } from "../util/build-session-context";
 import {
   buildChatMessages,
@@ -126,6 +140,23 @@ export class ChatSessionView extends ItemView {
   private scenarioThumbPath: string | null = null;
   private personaThumbPath: string | null = null;
 
+  // ── 그룹 챗 (G2) — 발화자 시스템 ──
+  /** 세션의 그룹 (meta.groupId) — refreshMacroContext 에서 갱신. */
+  private group: StellaGroup | null = null;
+  /** 멤버 표시 재료 — 발화자 결정/라벨/아바타 공용. */
+  private groupMembers: {
+    scenarioId: string;
+    name: string;
+    thumbPath: string | null;
+    talkativeness: number;
+  }[] = [];
+  /** 발화자 지목 (입력창 옆 버튼). null = 자동 결정. 세션에 저장하지 않는다. */
+  private pinnedSpeakerId: string | null = null;
+  private speakerBtn: HTMLButtonElement | null = null;
+  /** 자동 연쇄 — 이번 라운드 남은 AI 발화 수. 타이핑 시작 시 즉시 0. */
+  private autoChainRemaining = 0;
+  private autoChainTimer: number | null = null;
+
   private messagesEl: HTMLElement | null = null;
   private inputEl: HTMLTextAreaElement | null = null;
   private sendBtn: HTMLButtonElement | null = null;
@@ -168,6 +199,8 @@ export class ChatSessionView extends ItemView {
       // (레이아웃 복원 등)로 여기 오면 생성을 중단해 잠금·스트리밍이 새 세션에
       // 새어들지 않게 한다.
       this.generation?.abort.abort();
+      this.cancelAutoChain();
+      this.pinnedSpeakerId = null;
       await this.flushPendingEdits();
       this.sessionFile = next;
       this.plugin.rememberActiveSessionFile(next);
@@ -245,6 +278,15 @@ export class ChatSessionView extends ItemView {
         void this.refreshMacroContext().then(() => this.renderMessages());
       })
     );
+    // 그룹 멤버 변경 (초대/내보내기) — 발화자 후보/라벨 재료 갱신.
+    this.registerEvent(
+      this.store.on("groups-changed", () => {
+        void this.refreshMacroContext().then(() => {
+          this.updateSpeakerBtn();
+          this.renderMessages();
+        });
+      })
+    );
     this.registerEvent(
       this.store.on("session-deleted", (file: string) => {
         if (file !== this.sessionFile) return;
@@ -290,6 +332,7 @@ export class ChatSessionView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.cancelAutoChain();
     this.viewStylePopover?.close();
     this.viewStylePopover = null;
     await this.flushPendingEdits();
@@ -331,13 +374,50 @@ export class ChatSessionView extends ItemView {
     let scenarioData: any = null;
     this.scenarioThumbPath = null;
     this.personaThumbPath = null;
+    this.group = null;
+    this.groupMembers = [];
     if (this.sessionFile) {
+      const scenarios = await this.store.getScenarios().catch(() => []);
       const scenarioFile = scenarioFileOfSessionFile(this.sessionFile);
       if (scenarioFile) {
-        const scenarios = await this.store.getScenarios().catch(() => []);
         const item = scenarios.find((i) => i.scenarioFile === scenarioFile);
         scenarioData = item?.scenario.data ?? null;
         this.scenarioThumbPath = item?.thumbnailPath ?? null;
+      }
+      // 그룹 챗 (G2) — 멤버 이름/표지/수다스러움(ST talkativeness) 재료.
+      const groupId = this.session?.meta.groupId;
+      if (groupId) {
+        const gi = await this.store.getGroupById(groupId).catch(() => null);
+        if (gi) {
+          this.group = gi.group;
+          const byId = new Map(
+            scenarios.map(
+              (i) => [i.scenario.data?.extensions?.stella?.id, i] as const
+            )
+          );
+          this.groupMembers = gi.group.members.flatMap((m) => {
+            const sc = byId.get(m.scenarioId);
+            const name = sc?.scenario.data?.name?.trim();
+            if (!name) return [];
+            return [
+              {
+                scenarioId: m.scenarioId,
+                name,
+                thumbPath: sc?.thumbnailPath ?? null,
+                talkativeness: parseTalkativeness(
+                  (sc?.scenario.data as any)?.extensions?.talkativeness
+                ),
+              },
+            ];
+          });
+          // 지목했던 발화자가 내보내졌으면 자동으로 복귀.
+          if (
+            this.pinnedSpeakerId &&
+            !this.groupMembers.some((m) => m.scenarioId === this.pinnedSpeakerId)
+          ) {
+            this.pinnedSpeakerId = null;
+          }
+        }
       }
     }
     if (userFile) {
@@ -372,6 +452,11 @@ export class ChatSessionView extends ItemView {
       return;
     }
     this.session = await this.store.getSession(this.sessionFile);
+    // 그룹 링크가 생기거나 사라졌으면 (플레이 중 초대 등) 멤버 재료도 갱신.
+    if ((this.session?.meta.groupId ?? null) !== (this.group?.id ?? null)) {
+      await this.refreshMacroContext();
+      this.updateSpeakerBtn();
+    }
     this.renderMessages();
   }
 
@@ -387,6 +472,178 @@ export class ChatSessionView extends ItemView {
   }
 
   // ── 렌더 ────────────────────────────────────────────────────────
+
+  // ── 그룹 챗 (G2) — 발화자 결정/지목/자동 연쇄 ────────────────────
+
+  private isGroupChat(): boolean {
+    return (
+      this.group != null &&
+      this.groupMembers.length > 1 &&
+      this.session?.meta.mode === "chat"
+    );
+  }
+
+  private memberOf(scenarioId: string | undefined | null) {
+    if (!scenarioId) return null;
+    return this.groupMembers.find((m) => m.scenarioId === scenarioId) ?? null;
+  }
+
+  /** 노드의 발화자 표시 재료 — speaker 없는 노드(그룹 이전/일반)는 호스트. */
+  private speakerDisplayOf(nodeId: string): {
+    name: string;
+    thumbPath: string | null;
+    colorIndex: number;
+  } {
+    const hostId = this.session?.meta.scenarioId ?? "";
+    const speakerId = this.session?.nodes[nodeId]?.speaker ?? hostId;
+    const member = this.memberOf(speakerId) ?? this.memberOf(hostId);
+    const idx = this.groupMembers.findIndex(
+      (m) => m.scenarioId === (member?.scenarioId ?? hostId)
+    );
+    return {
+      name: member?.name ?? this.displayMacroCtx.char ?? "AI",
+      thumbPath: member ? member.thumbPath : this.scenarioThumbPath,
+      colorIndex: idx >= 0 ? idx : 0,
+    };
+  }
+
+  /**
+   * 다음 발화자 결정 — 지목(핀) > 이름 불림 > 가중 랜덤(수다스러움+미발화 보정).
+   * 그룹 챗이 아니면 undefined (일반 단일 캐릭터 생성).
+   */
+  private chooseSpeakerForNext(): string | undefined {
+    if (!this.session || !this.isGroupChat()) return undefined;
+    if (this.pinnedSpeakerId && this.memberOf(this.pinnedSpeakerId)) {
+      return this.pinnedSpeakerId;
+    }
+    const hostId = this.session.meta.scenarioId;
+    const msgs = buildChatMessages(this.session);
+    const last = msgs[msgs.length - 1];
+    const speakerOf = (nodeId: string) =>
+      this.session!.nodes[nodeId]?.speaker ?? hostId;
+    const lastSpeakerId =
+      last?.role === "assistant" ? speakerOf(last.nodeId) : null;
+    // 직전 발화자가 끝에서 연속으로 몇 번 말했는지 (중복 발화 상한 판정).
+    let lastSpeakerStreak = 0;
+    if (lastSpeakerId) {
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].role !== "assistant") break;
+        if (speakerOf(msgs[i].nodeId) !== lastSpeakerId) break;
+        lastSpeakerStreak++;
+      }
+    }
+    const recentSpeakerIds = msgs
+      .filter((m) => m.role === "assistant")
+      .slice(-4)
+      .map((m) => speakerOf(m.nodeId));
+    const candidates: GroupSpeakerCandidate[] = this.groupMembers;
+    return (
+      pickNextSpeaker({
+        candidates,
+        lastMessageText: last ? this.displayTextOf(last) : "",
+        lastSpeakerId,
+        lastSpeakerStreak,
+        maxConsecutiveSame: this.group?.maxConsecutiveSpeaker,
+        recentSpeakerIds,
+      }) ?? hostId
+    );
+  }
+
+  /** 한 라운드(유저 발화 뒤)의 최대 연속 AI 발화 수 — 그룹 설정, 없으면 멤버 수(상한 3). */
+  private maxAutoReplies(): number {
+    const configured = this.group?.autoChainMax;
+    if (configured && configured > 0) return Math.max(1, Math.floor(configured));
+    return Math.min(3, this.groupMembers.length);
+  }
+
+  /** 발화자 선택 버튼 표시 — 자동(users 아이콘) 또는 지목 멤버 아바타. */
+  private updateSpeakerBtn(): void {
+    const btn = this.speakerBtn;
+    if (!btn) return;
+    btn.toggleClass("is-hidden", !this.isGroupChat());
+    btn.empty();
+    const pinned = this.memberOf(this.pinnedSpeakerId);
+    btn.toggleClass("is-pinned", pinned != null);
+    if (pinned) {
+      const avatar = btn.createDiv({ cls: "ggai-chat-speaker-avatar" });
+      renderThumb(this.app, avatar, pinned.thumbPath, pinned.name, "user");
+      btn.setAttr("aria-label", `발화자: ${pinned.name} (탭해서 변경)`);
+    } else {
+      setIcon(btn, "users");
+      btn.setAttr("aria-label", "발화자: 자동 (탭해서 지목)");
+    }
+    btn.setAttr("data-tooltip-position", "top");
+  }
+
+  /** 입력창 옆 발화자 메뉴 — 자동 + 멤버 목록. */
+  private openSpeakerMenu(e: MouseEvent): void {
+    const menu = new Menu();
+    menu.addItem((item) =>
+      item
+        .setTitle("자동 (다음 발화자 추천)")
+        .setIcon("users")
+        .setChecked(this.pinnedSpeakerId == null)
+        .onClick(() => {
+          this.pinnedSpeakerId = null;
+          this.updateSpeakerBtn();
+        })
+    );
+    for (const m of this.groupMembers) {
+      menu.addItem((item) =>
+        item
+          .setTitle(m.name)
+          .setIcon("user")
+          .setChecked(this.pinnedSpeakerId === m.scenarioId)
+          .onClick(() => {
+            this.pinnedSpeakerId = m.scenarioId;
+            this.updateSpeakerBtn();
+          })
+      );
+    }
+    menu.showAtMouseEvent(e);
+  }
+
+  /** 자동 연쇄 중단 — 타이핑/이동/재생성 등 사용자 개입 시 즉시. */
+  private cancelAutoChain(): void {
+    this.autoChainRemaining = 0;
+    if (this.autoChainTimer != null) {
+      window.clearTimeout(this.autoChainTimer);
+      this.autoChainTimer = null;
+    }
+  }
+
+  /** 생성 완료 후 다음 발화자 자동 이어가기 예약 (남은 횟수 있을 때만). */
+  private scheduleAutoChain(): void {
+    if (!this.isGroupChat() || this.autoChainRemaining <= 0) return;
+    if (this.autoChainTimer != null) window.clearTimeout(this.autoChainTimer);
+    this.autoChainTimer = window.setTimeout(() => {
+      this.autoChainTimer = null;
+      void this.runAutoChainStep();
+    }, 700);
+  }
+
+  private async runAutoChainStep(): Promise<void> {
+    if (!this.session || !this.sessionFile || this.generation) return;
+    if (!this.isGroupChat() || this.autoChainRemaining <= 0) return;
+    // 사용자가 입력 중이면 연쇄를 조용히 멈춘다 (타이핑 인터럽트).
+    if ((this.inputEl?.value ?? "").trim() !== "") {
+      this.cancelAutoChain();
+      return;
+    }
+    this.autoChainRemaining--;
+    await this.runGeneration(this.session.meta.activeLeafId, "ai-continue", {
+      speakerId: this.chooseSpeakerForNext(),
+      chain: true,
+    });
+  }
+
+  /** [계속 진행] — 자동 연쇄 한 라운드를 다시 연다 (상한 도달/중단 후 이어가기). */
+  private async continueGroupRound(): Promise<void> {
+    if (!this.session || this.generation) return;
+    await this.flushPendingEdits();
+    this.autoChainRemaining = this.maxAutoReplies();
+    await this.runAutoChainStep();
+  }
 
   private render(): void {
     const root = this.containerEl.children[1] as HTMLElement;
@@ -450,7 +707,11 @@ export class ChatSessionView extends ItemView {
         void this.handleSend();
       }
     });
-    this.inputEl.addEventListener("input", () => this.autosizeInput());
+    this.inputEl.addEventListener("input", () => {
+      // 타이핑 인터럽트 — 사용자가 쓰기 시작하면 자동 연쇄를 즉시 멈춘다 (G2).
+      if ((this.inputEl?.value ?? "") !== "") this.cancelAutoChain();
+      this.autosizeInput();
+    });
     // 선택 모드에서 입력창을 탭하면 입력창 텍스트가 재생성 대상이 된다.
     this.inputEl.addEventListener(
       "mousedown",
@@ -516,6 +777,7 @@ export class ChatSessionView extends ItemView {
 
   /** 로비(대시보드)로 — 미저장 편집을 커밋한 뒤 같은 탭에서 전환 (소설과 동일). */
   private async goToLobby(): Promise<void> {
+    this.cancelAutoChain();
     await this.flushPendingEdits();
     await this.leaf.setViewState({
       type: VIEW_TYPE_DASHBOARD,
@@ -636,27 +898,37 @@ export class ChatSessionView extends ItemView {
       });
       row.dataset.nodeId = msg.nodeId;
 
-      // 아바타 — AI 는 시나리오 표지, 유저는 페르소나 썸네일 (말풍선 옆).
+      // 발화자 표시 재료 — 그룹 챗이면 노드의 발화자 멤버 (G2), 아니면 시나리오.
+      const groupChat = this.isGroupChat();
+      const speaker =
+        msg.role === "assistant" && groupChat
+          ? this.speakerDisplayOf(msg.nodeId)
+          : null;
+
+      // 아바타 — AI 는 발화자(시나리오) 표지, 유저는 페르소나 썸네일 (말풍선 옆).
       const avatar = row.createDiv({ cls: "ggai-chat-avatar" });
       renderThumb(
         this.app,
         avatar,
-        msg.role === "user" ? this.personaThumbPath : this.scenarioThumbPath,
+        msg.role === "user"
+          ? this.personaThumbPath
+          : speaker?.thumbPath ?? this.scenarioThumbPath,
         msg.role === "user"
           ? this.displayMacroCtx.user ?? "User"
-          : this.displayMacroCtx.char ?? "AI",
+          : speaker?.name ?? this.displayMacroCtx.char ?? "AI",
         msg.role === "user" ? "user" : "book-open"
       );
 
       const stack = row.createDiv({ cls: "ggai-chat-stack" });
-      // 이름 라벨 — AI = 시나리오 이름, 유저 = 페르소나 이름 (누구의 말인지).
-      stack.createDiv({
+      // 이름 라벨 — AI = 발화자(시나리오) 이름, 유저 = 페르소나 이름.
+      const nameEl = stack.createDiv({
         cls: "ggai-chat-name",
         text:
           msg.role === "user"
             ? this.displayMacroCtx.user ?? "User"
-            : this.displayMacroCtx.char ?? "AI",
+            : speaker?.name ?? this.displayMacroCtx.char ?? "AI",
       });
+      if (speaker) nameEl.addClass(`is-speaker-${speaker.colorIndex % 6}`);
       const bubble = stack.createDiv({ cls: "ggai-chat-bubble" });
       bubble.dataset.index = String(index);
 
@@ -694,9 +966,23 @@ export class ChatSessionView extends ItemView {
     if (this.generation && !this.streamBubbleEl) {
       const row = host.createDiv({ cls: "ggai-chat-msg is-assistant is-generating" });
       row.dataset.nodeId = this.generation.nodeId;
-      const bubble = row.createDiv({ cls: "ggai-chat-bubble" });
-      bubble.setText(this.generation.accumulatedText);
-      this.streamBubbleEl = bubble;
+      // 그룹 챗 — 누가 말하는 중인지 아바타+이름 라벨을 먼저 보여준다.
+      if (this.isGroupChat()) {
+        const speaker = this.speakerDisplayOf(this.generation.nodeId);
+        const avatar = row.createDiv({ cls: "ggai-chat-avatar" });
+        renderThumb(this.app, avatar, speaker.thumbPath, speaker.name, "book-open");
+        const stack = row.createDiv({ cls: "ggai-chat-stack" });
+        stack
+          .createDiv({ cls: "ggai-chat-name", text: speaker.name })
+          .addClass(`is-speaker-${speaker.colorIndex % 6}`);
+        const bubble = stack.createDiv({ cls: "ggai-chat-bubble" });
+        bubble.setText(this.generation.accumulatedText);
+        this.streamBubbleEl = bubble;
+      } else {
+        const bubble = row.createDiv({ cls: "ggai-chat-bubble" });
+        bubble.setText(this.generation.accumulatedText);
+        this.streamBubbleEl = bubble;
+      }
     }
 
     // 마지막 메시지 컨트롤 — 스와이프(형제 이동) + 재생성.
@@ -888,6 +1174,14 @@ export class ChatSessionView extends ItemView {
     const rightTop = right.createEl("div", {
       cls: "ggai-toolbar-row ggai-toolbar-row-top",
     });
+    // 그룹 챗 — 발화자 선택 (자동 / 멤버 지목). 일반 세션에선 숨김(플레이 중
+    // 초대로 그룹이 되는 순간 바로 보이도록 항상 만들어 두고 is-hidden 으로 토글).
+    this.speakerBtn = rightTop.createEl("button", {
+      cls: "ggai-btn ggai-icon-btn ggai-chat-speaker-btn",
+    });
+    this.speakerBtn.setAttr("data-tooltip-position", "top");
+    this.speakerBtn.addEventListener("click", (e) => this.openSpeakerMenu(e));
+    this.updateSpeakerBtn();
     this.nodeFavBtn = mkIconBtn(rightTop, "save", "세이브 (노드 즐겨찾기)", () =>
       void this.toggleNodeFavorite()
     );
@@ -968,6 +1262,7 @@ export class ChatSessionView extends ItemView {
   /** undo — 활성 리프를 부모로 (마지막 메시지/편집 접기). redo 스택에 쌓는다. */
   private async handleUndo(): Promise<void> {
     if (!this.session || this.generation) return;
+    this.cancelAutoChain();
     await this.flushPendingEdits();
     const cur = this.session.nodes[this.session.meta.activeLeafId];
     if (!cur?.parent) return;
@@ -981,6 +1276,7 @@ export class ChatSessionView extends ItemView {
   /** redo — undo 스택 우선, 없으면 최근 자식으로 전진. */
   private async handleRedo(): Promise<void> {
     if (!this.session || this.generation) return;
+    this.cancelAutoChain();
     await this.flushPendingEdits();
     let targetId: string | null = null;
     while (this.redoStack.length > 0) {
@@ -1007,6 +1303,7 @@ export class ChatSessionView extends ItemView {
   /** 끝으로 — 현재 리프에서 가장 깊은 최신 후손으로. */
   private async handleJumpEnd(): Promise<void> {
     if (!this.session || this.generation) return;
+    this.cancelAutoChain();
     await this.flushPendingEdits();
     const deepest = getDeepestLatestDescendant(
       this.session,
@@ -1423,6 +1720,16 @@ export class ChatSessionView extends ItemView {
       setIcon(regenBtn, "rotate-ccw");
       regenBtn.addEventListener("click", () => void this.regenerateLastAssistant());
     }
+
+    // 그룹 챗 — [계속 진행]: 다음 캐릭터가 이어서 말한다 (자동 연쇄 재개, G2).
+    if (this.isGroupChat()) {
+      const contBtn = controls.createEl("button", {
+        cls: "clickable-icon",
+        attr: { "aria-label": "계속 진행 — 다음 캐릭터가 이어서 말함" },
+      });
+      setIcon(contBtn, "play");
+      contBtn.addEventListener("click", () => void this.continueGroupRound());
+    }
   }
 
   /**
@@ -1439,21 +1746,26 @@ export class ChatSessionView extends ItemView {
     const last = msgs[msgs.length - 1];
     if (!last || last.role !== "assistant") return;
 
+    // 재생성은 원래 그 메시지를 말한 발화자를 유지한다 (발화자 교체는 G3).
+    this.cancelAutoChain();
+    const speakerId = this.session.nodes[last.nodeId]?.speaker;
     const leafId = this.session.meta.activeLeafId;
     if (last.nodeId === leafId) {
       const parent = this.session.nodes[leafId]?.parent;
-      if (parent) await this.runGeneration(parent, "ai-regen");
+      if (parent) await this.runGeneration(parent, "ai-regen", { speakerId });
       return;
     }
     // 마지막 AI 메시지 구간 시작 오프셋 (선행 구분자 포함해서 걷어낸다).
     const flatLen = spansToText(buildSpans(this.session)).length;
     await this.runGeneration(leafId, "ai-regen", {
       replaceFrom: flatLen - last.text.length,
+      speakerId,
     });
   }
 
   private async swipeTo(sibling: SessionNode): Promise<void> {
     if (!this.session || !this.sessionFile || this.generation) return;
+    this.cancelAutoChain();
     await this.flushPendingEdits();
     const target = getDeepestLatestDescendant(this.session, sibling.id);
     this.session.meta.activeLeafId = target?.id ?? sibling.id;
@@ -1754,6 +2066,7 @@ export class ChatSessionView extends ItemView {
       this.generation.abort.abort();
       return;
     }
+    this.cancelAutoChain();
     await this.flushPendingEdits();
 
     const text = this.inputEl?.value.trim() ?? "";
@@ -1788,7 +2101,15 @@ export class ChatSessionView extends ItemView {
       this.renderMessages();
     }
 
-    await this.runGeneration(this.session.meta.activeLeafId, "ai-continue");
+    // 그룹 챗 — 발화자 결정(지목 > 이름 불림 > 가중 랜덤) + 자동 연쇄 라운드 시작.
+    // 지목(핀) 중이면 그 캐릭터 1명만 답한다 (연쇄 없음).
+    if (this.isGroupChat() && !this.pinnedSpeakerId) {
+      this.autoChainRemaining = this.maxAutoReplies() - 1;
+    }
+    await this.runGeneration(this.session.meta.activeLeafId, "ai-continue", {
+      speakerId: this.chooseSpeakerForNext(),
+      chain: true,
+    });
   }
 
   private async runGeneration(
@@ -1800,6 +2121,10 @@ export class ChatSessionView extends ItemView {
        * 구간)을 지우고 새 메시지를 붙인다. 컨텍스트에서도 그 메시지를 제외.
        */
       replaceFrom?: number;
+      /** 그룹 챗 발화자 (멤버 시나리오 stella.id) — 노드 귀속 + 전송본 반영. */
+      speakerId?: string;
+      /** 그룹 챗 자동 연쇄의 한 스텝 — 성공 시 다음 발화자를 예약한다. */
+      chain?: boolean;
     }
   ): Promise<void> {
     if (!this.session || !this.sessionFile || this.generation) return;
@@ -1813,6 +2138,7 @@ export class ChatSessionView extends ItemView {
     const plan = await planSessionRequest(this.plugin, sessionFile, {
       leafId: parentId,
       excludeTailAssistant: opts?.replaceFrom != null,
+      speakerId: opts?.speakerId,
     });
     if ("error" in plan) {
       new Notice(plan.error);
@@ -1852,6 +2178,10 @@ export class ChatSessionView extends ItemView {
       createdAt: Date.now(),
       gen: { model: profile.model, tokensIn: 0, tokensOut: 0, profile: profile.name },
     };
+    // 그룹 챗 — 이 메시지의 발화자 귀속 (라벨/재생성/다음 발화자 결정 재료).
+    if (this.isGroupChat() && opts?.speakerId && this.memberOf(opts.speakerId)) {
+      node.speaker = opts.speakerId;
+    }
     this.session.nodes[nodeId] = node;
     this.session.meta.activeLeafId = nodeId;
     this.redoStack = [];
@@ -1922,6 +2252,18 @@ export class ChatSessionView extends ItemView {
         new Notice("생성 실패: " + (err?.message ?? String(err)));
       }
     } finally {
+      // 그룹 챗 (챗 컴플리션): 다른 멤버/유저 턴 절단 + 발화자 라벨 제거 —
+      // 스트리밍이 끝난 뒤 한 번 적용한다 (텍스트 컴플리션은 위에서 이미 처리).
+      if (payload.kind === "chat" && payload.names) {
+        const raw = this.generation?.accumulatedText ?? "";
+        if (raw) {
+          applyText(
+            trimChatCompletionOutput(raw, payload.names, {
+              dropIncompleteTail: false,
+            })
+          );
+        }
+      }
       const generatedText = this.generation?.accumulatedText ?? "";
       if (node.gen) {
         node.gen.tokensIn = usage.inputTokens;
@@ -1956,6 +2298,8 @@ export class ChatSessionView extends ItemView {
           parentText,
           profile,
         });
+        // 그룹 챗 자동 연쇄 — 이 스텝이 성공했으면 다음 발화자를 예약한다.
+        if (opts?.chain) this.scheduleAutoChain();
       }
     }
   }

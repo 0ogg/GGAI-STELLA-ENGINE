@@ -23,6 +23,7 @@ import type StellaEnginePlugin from "../main";
 import type { SessionChangeDetail } from "../state/store";
 import type { SessionNode } from "../types/session";
 import { planSessionRequest } from "../util/build-session-context";
+import { trimChatCompletionOutput } from "../util/text-completion-prompt";
 import { buildSpans, spansToText } from "../util/session-text";
 import { CHAT_MESSAGE_SEPARATOR } from "../util/chat-messages";
 import { formatIdleEn } from "../util/idle-duration";
@@ -394,7 +395,13 @@ export class ProactiveService {
       paramsOverride: plan.paramsOverride,
       label: opts.returnNudge ? "복귀 독촉" : "선채팅",
     });
-    const text = (res.text ?? "").trim();
+    let text = (res.text ?? "").trim();
+    // 그룹 챗 세션 — 다른 멤버/유저 턴 절단 + 발화자 라벨 제거 (챗 뷰와 동일).
+    if (plan.payload.names) {
+      text = trimChatCompletionOutput(text, plan.payload.names, {
+        dropIncompleteTail: false,
+      });
+    }
     if (!text) return { ok: false, error: "모델이 빈 응답을 보냈습니다." };
 
     // 일반 ai 노드로 저장 — 챗 뷰의 이어쓰기와 같은 형태 (구분자 + ai span).

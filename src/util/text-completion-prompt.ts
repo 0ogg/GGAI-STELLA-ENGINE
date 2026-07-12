@@ -191,24 +191,34 @@ export function buildNaiFormatSegments(messages: ChatMessage[]): PromptSegment[]
 export interface ChatCompletionNames {
   /** 유저(페르소나) 이름 — {{user}}. */
   user: string;
-  /** 캐릭터(시나리오) 이름 — {{char}}. */
+  /** 캐릭터(시나리오) 이름 — {{char}}. 그룹 챗은 이번 발화자 이름. */
   char: string;
+  /**
+   * 그룹 챗 — 발화자를 뺀 나머지 멤버 이름들. 이들의 `이름:` 턴 시작도
+   * 유저 턴과 똑같이 스탑(절단) 대상이 된다 (남의 대사를 쓰면 잘라낸다).
+   */
+  others?: string[];
 }
 
 /**
  * 챗 히스토리 메시지에 `이름: ` 프리픽스를 붙이고, 끝에 `{{char}}:` 오프너
  * 메시지를 추가한다 — 평문/NAI 형식 평탄화 직전에 적용 (원본 배열 불변).
  * 히스토리 사이에 낀 주입/메모리/작가노트(비 chat 소스)는 건드리지 않는다.
+ * 그룹 챗은 로그 조립 단계에서 발화자별 이름이 이미 붙어 있으므로
+ * `historyAlreadyNamed` 로 프리픽스를 건너뛰고 오프너만 연다.
  */
 export function applyChatTurnNames(
   messages: ChatMessage[],
-  names: ChatCompletionNames
+  names: ChatCompletionNames,
+  opts?: { historyAlreadyNamed?: boolean }
 ): ChatMessage[] {
-  const named: ChatMessage[] = messages.map((m) => {
-    if (m.contextKind !== "history" || m.source?.type !== "chat") return m;
-    const name = m.role === "user" ? names.user : names.char;
-    return { ...m, content: `${name}: ${m.content}` };
-  });
+  const named: ChatMessage[] = opts?.historyAlreadyNamed
+    ? [...messages]
+    : messages.map((m) => {
+        if (m.contextKind !== "history" || m.source?.type !== "chat") return m;
+        const name = m.role === "user" ? names.user : names.char;
+        return { ...m, content: `${name}: ${m.content}` };
+      });
   named.push({
     role: "assistant",
     content: `${names.char}:`,
@@ -246,34 +256,55 @@ function dropIncompleteTailParagraph(text: string): string {
 
 /**
  * 텍스트 컴플리션 출력 후처리 — ST cleanUpMessage 참조.
- *  1) 끝에 반쯤 잘린 `\n{{user}}:` 스탑 스트링 제거 (max_tokens 컷 대비)
- *  2) 응답이 통째로 유저 턴이면 폐기 ("" — 빈 응답 경로로 무산)
- *  3) 첫 `\n{{user}}:` 턴부터 끝까지 절단
+ * 스탑 이름 = 유저 + (그룹 챗이면) 발화자 외 다른 멤버 전원.
+ *  1) 끝에 반쯤 잘린 `\n이름:` 스탑 스트링 제거 (max_tokens 컷 대비)
+ *  2) 응답이 통째로 남의 턴이면 폐기 ("" — 빈 응답 경로로 무산)
+ *  3) 첫 `\n이름:` 턴부터 끝까지 절단
  *  4) 줄 앞 `{{char}}:` 라벨 제거 (오프너 에코 + 반복 라벨)
- *  5) 유저 턴을 못 만나고 끝났으면(생성 자연 종료/토큰 컷) 미완성 마지막 문단 제거
+ *  5) 남의 턴을 못 만나고 끝났으면(생성 자연 종료/토큰 컷) 미완성 마지막 문단 제거
+ *     — 챗 컴플리션(그룹 절단만 필요) 경로는 `dropIncompleteTail: false` 로 끈다.
  */
 export function trimChatCompletionOutput(
   text: string,
-  names: ChatCompletionNames
+  names: ChatCompletionNames,
+  opts?: { dropIncompleteTail?: boolean }
 ): string {
   let out = text;
-  const userStop = `\n${names.user}:`;
-  for (let j = userStop.length; j > 0; j--) {
-    if (out.endsWith(userStop.slice(0, j))) {
-      out = out.slice(0, -j);
-      break;
+  const stopNames = [names.user, ...(names.others ?? [])].filter(
+    (n) => n.trim().length > 0
+  );
+  // 1) 끝의 부분 스탑 제거 — 가장 길게 걸리는 것 하나.
+  let partialCut = 0;
+  for (const name of stopNames) {
+    const stop = `\n${name}:`;
+    for (let j = stop.length; j > partialCut; j--) {
+      if (out.endsWith(stop.slice(0, j))) {
+        partialCut = j;
+        break;
+      }
     }
   }
-  if (out.trimStart().startsWith(`${names.user}:`)) return "";
-  const stopIdx = out.indexOf(userStop);
-  // 유저 턴을 만났는가 = 어시스턴트 턴이 완결됐다는 신호. 못 만나면 잘린 것.
-  const hitUserTurn = stopIdx >= 0;
-  if (hitUserTurn) out = out.slice(0, stopIdx);
+  if (partialCut > 0) out = out.slice(0, -partialCut);
+
+  const head = out.trimStart();
+  if (stopNames.some((n) => head.startsWith(`${n}:`))) return "";
+
+  // 3) 가장 먼저 나오는 스탑 턴에서 절단.
+  let stopIdx = -1;
+  for (const name of stopNames) {
+    const idx = out.indexOf(`\n${name}:`);
+    if (idx >= 0 && (stopIdx < 0 || idx < stopIdx)) stopIdx = idx;
+  }
+  // 스탑 턴을 만났는가 = 발화자 턴이 완결됐다는 신호. 못 만나면 잘린 것.
+  const hitStopTurn = stopIdx >= 0;
+  if (hitStopTurn) out = out.slice(0, stopIdx);
   out = out.replace(
     new RegExp(`(^|\\n)${escapeRegExp(names.char)}:[ \\t]*`, "g"),
     "$1"
   );
-  if (!hitUserTurn) out = dropIncompleteTailParagraph(out);
+  if (!hitStopTurn && opts?.dropIncompleteTail !== false) {
+    out = dropIncompleteTailParagraph(out);
+  }
   return out.trim();
 }
 

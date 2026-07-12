@@ -37,6 +37,8 @@ export interface GenerationProfileLite {
   allowedParams?: AllowedParams;
   /** 프로필에 설정된 입력(프롬프트) 토큰 상한. 초과 시 Core 가 요청 자체를 거부하므로, Stella 의 Max Context 슬라이더 상한 클램프에 쓴다. undefined=제한 없음. */
   maxContextTokens?: number;
+  /** 프로필에 설정된 출력 토큰 상한(Core "max output tokens"). Stella 의 Max Output Tokens 슬라이더 상한 클램프에 쓴다. undefined=제한 없음. */
+  maxOutputTokensLimit?: number;
 }
 
 /** 호환을 위한 별칭. 점진 폐기 예정. */
@@ -197,6 +199,8 @@ export class AIService extends Events {
             : undefined,
         maxContextTokens:
           typeof p.params?.maxContextTokens === "number" ? p.params.maxContextTokens : undefined,
+        maxOutputTokensLimit:
+          typeof p.params?.maxTokens === "number" ? p.params.maxTokens : undefined,
       }));
       mapped.sort(compareGenerationProfiles);
       this.profileCache = mapped;

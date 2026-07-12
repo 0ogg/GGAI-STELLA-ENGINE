@@ -52,6 +52,10 @@ import {
   buildTextCompletionPrompt,
   trimChatCompletionOutput,
 } from "../src/util/text-completion-prompt";
+import {
+  parseTalkativeness,
+  pickNextSpeaker,
+} from "../src/util/group-speaker";
 import type { ChatMessage } from "../src/util/context-builder";
 import {
   SESSION_SEED_CHUNK_CHARS,
@@ -2875,4 +2879,153 @@ void Promise.all(asyncTests)
   };
   const built2 = buildChatImportSession(parsed2, "chat", 1000);
   assert.equal(built2.nodes[built2.rootId].kind, "root");
+}
+
+// ── 그룹 챗 (G2): 다음 발화자 결정 — group-speaker.ts ───────────────
+{
+  const members = [
+    { scenarioId: "a", name: "아라", talkativeness: 0.5 },
+    { scenarioId: "b", name: "보라", talkativeness: 0.5 },
+    { scenarioId: "c", name: "채아", talkativeness: 0.5 },
+  ];
+
+  // 1) 직전 메시지에 이름이 불린 멤버 우선 (한국어 조사 붙어도 지목).
+  assert.equal(
+    pickNextSpeaker({
+      candidates: members,
+      lastMessageText: "보라야, 네 생각은 어때?",
+      random: () => 0.99,
+    }),
+    "b",
+    "이름이 불린 멤버가 우선 지목된다"
+  );
+
+  // 2) 직전 발화자는 (기본 상한 1) 연속 지목되지 않는다.
+  for (const roll of [0.01, 0.5, 0.99]) {
+    const picked = pickNextSpeaker({
+      candidates: members,
+      lastMessageText: "…",
+      lastSpeakerId: "a",
+      lastSpeakerStreak: 1,
+      random: () => roll,
+    });
+    assert.notEqual(picked, "a", "직전 발화자 연속 지목 금지(상한 1)");
+  }
+
+  // 2b) 중복 발화 상한이 2면 streak 1 에서는 직전 발화자도 후보에 남는다
+  //     (가중치상 불리하지만 roll 0 근처면 잡힌다 — 후보 풀에 존재).
+  {
+    const pickedSame = pickNextSpeaker({
+      candidates: [
+        { scenarioId: "a", name: "아라", talkativeness: 1 },
+        { scenarioId: "b", name: "보라", talkativeness: 0 }, // 랜덤 제외
+      ],
+      lastSpeakerId: "a",
+      lastSpeakerStreak: 1,
+      maxConsecutiveSame: 2,
+      random: () => 0.0,
+    });
+    assert.equal(pickedSame, "a", "상한 2면 streak 1 에서 연속 발화 가능");
+  }
+  // 2c) streak 이 상한에 도달하면 직전 발화자는 반드시 빠진다.
+  for (const roll of [0.01, 0.99]) {
+    assert.notEqual(
+      pickNextSpeaker({
+        candidates: members,
+        lastSpeakerId: "a",
+        lastSpeakerStreak: 2,
+        maxConsecutiveSame: 2,
+        random: () => roll,
+      }),
+      "a",
+      "상한 도달 시 연속 발화 금지"
+    );
+  }
+
+  // 3) talkativeness 0 멤버는 랜덤 후보에서 빠진다 (ST 호환) — 이름이 불리면 말한다.
+  const quiet = [
+    { scenarioId: "a", name: "아라", talkativeness: 0 },
+    { scenarioId: "b", name: "보라", talkativeness: 1 },
+  ];
+  for (const roll of [0.01, 0.99]) {
+    assert.equal(
+      pickNextSpeaker({ candidates: quiet, random: () => roll }),
+      "b",
+      "수다스러움 0 은 랜덤에서 제외"
+    );
+  }
+  assert.equal(
+    pickNextSpeaker({ candidates: quiet, lastMessageText: "아라, 말해봐" }),
+    "a",
+    "수다스러움 0 이라도 이름이 불리면 발화"
+  );
+
+  // 4) 최근 말 안 한 멤버 보정 — 같은 가중치면 미발화 멤버 쪽 확률이 커진다.
+  //    (a, b 만 최근 발화 → roll 0 근처가 아니면 c 가 잡히는 영역이 넓다)
+  assert.equal(
+    pickNextSpeaker({
+      candidates: members,
+      recentSpeakerIds: ["a", "b"],
+      lastSpeakerId: "b",
+      random: () => 0.99, // 누적 가중치 끝 = 보정 받은 c
+    }),
+    "c",
+    "최근 미발화 멤버가 가중치 보정을 받는다"
+  );
+
+  // 5) 후보 1명이면 그 멤버, 0명이면 null.
+  assert.equal(pickNextSpeaker({ candidates: [members[0]] }), "a");
+  assert.equal(pickNextSpeaker({ candidates: [] }), null);
+
+  // talkativeness 파서 — 문자열/범위 밖/없음.
+  assert.equal(parseTalkativeness("0.8"), 0.8);
+  assert.equal(parseTalkativeness(2), 1);
+  assert.equal(parseTalkativeness(undefined), 0.5);
+}
+
+// ── 그룹 챗 (G2): 출력 절단 — 다른 멤버 턴도 스탑 ────────────────────
+{
+  const names = { user: "철수", char: "아라", others: ["철수", "보라", "채아"] };
+
+  // 다른 멤버의 턴이 시작되면 절단 (유저 턴과 동일 취급).
+  assert.equal(
+    trimChatCompletionOutput("내 대답이야.\n보라: 끼어든다!", names, {
+      dropIncompleteTail: false,
+    }),
+    "내 대답이야."
+  );
+  // 여러 스탑 중 가장 먼저 나오는 지점에서 절단.
+  assert.equal(
+    trimChatCompletionOutput("응답.\n채아: 하나\n철수: 둘", names, {
+      dropIncompleteTail: false,
+    }),
+    "응답."
+  );
+  // 발화자 라벨 에코 제거 + 통째로 남의 턴이면 폐기.
+  assert.equal(
+    trimChatCompletionOutput("아라: 안녕!", names, { dropIncompleteTail: false }),
+    "안녕!"
+  );
+  assert.equal(
+    trimChatCompletionOutput("보라: 사칭이다.", names, { dropIncompleteTail: false }),
+    ""
+  );
+  // 끝에 반쯤 잘린 스탑 제거.
+  assert.equal(
+    trimChatCompletionOutput("잘린 응답\n보", names, { dropIncompleteTail: false }),
+    "잘린 응답"
+  );
+  // dropIncompleteTail:false — 챗 컴플리션 경로는 미완성 문단을 지우지 않는다.
+  assert.equal(
+    trimChatCompletionOutput("완결 문단.\n\n미완성 조각 그리고", names, {
+      dropIncompleteTail: false,
+    }),
+    "완결 문단.\n\n미완성 조각 그리고"
+  );
+  // others 없는 1:1 은 기존 동작 그대로 (유저 스탑 + 미완성 꼬리 제거).
+  const solo = { user: "철수", char: "스텔라" };
+  assert.equal(
+    trimChatCompletionOutput("응답이다.\n철수: 질문", solo),
+    "응답이다."
+  );
 }

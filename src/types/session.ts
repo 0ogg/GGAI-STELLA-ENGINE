@@ -101,6 +101,11 @@ export interface SessionNode {
   gen?: SessionGenMeta;
   /** 선채팅(캐릭터 선발화)으로 만들어진 노드 표시 (P1). 없으면 일반 생성. */
   proactive?: boolean;
+  /**
+   * 그룹 챗 발화자 — 이 AI 메시지를 말한 멤버의 시나리오 stella.id (G2).
+   * 없으면 호스트 시나리오 발화로 간주 (그룹 이전 노드/일반 세션 호환).
+   */
+  speaker?: string;
 }
 
 /**

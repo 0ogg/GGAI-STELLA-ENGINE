@@ -29,4 +29,15 @@ export interface StellaGroup {
   playCount: number;
   /** 멤버 시나리오들. 순서 = 표시 순서. */
   members: StellaGroupMember[];
+  /**
+   * 그룹 챗 — 유저 발화 뒤 자동으로 이어지는 최대 AI 발화 수 (누적 대화 상한, G2/G3).
+   * 미설정/0 = 기본(멤버 수, 최대 3). 값을 키우면 캐릭터끼리 더 오래 대화한다.
+   * [계속 진행] 버튼은 이 상한과 무관하게 한 라운드를 더 연다.
+   */
+  autoChainMax?: number;
+  /**
+   * 그룹 챗 — 같은 캐릭터가 연속으로 말할 수 있는 최대 횟수 (중복 발화 상한, G3).
+   * 미설정 = 1(매 발화 다른 캐릭터). 2 이상이면 한 캐릭터가 몰아 말하거나 말싸움 가능.
+   */
+  maxConsecutiveSpeaker?: number;
 }
