@@ -47,6 +47,7 @@ import {
   copyScenarioWithPrompt,
   createAndOpenSession,
   exportPromptPreset,
+  openGroupCreator,
   openSessionByPath,
   promptNewLorebook,
   promptNewScenario,
@@ -977,6 +978,9 @@ export class DashboardView extends ItemView {
     const actions = line.createDiv({ cls: "ggai-dash-home-actions" });
     this.renderToolbarButton(actions, "download", "임포트", () =>
       runImportPicker(this.plugin)
+    );
+    this.renderToolbarButton(actions, "users", "그룹 만들기", () =>
+      void openGroupCreator(this.plugin)
     );
     const add = this.renderToolbarButton(actions, "plus", "새 시나리오", () =>
       promptNewScenario(this.plugin)

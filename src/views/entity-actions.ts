@@ -51,6 +51,10 @@ import {
   type StChatImportChoice,
 } from "./modals";
 import { GroupMemberModal, type GroupMemberRow } from "./group-member-modal";
+import {
+  GroupCreateModal,
+  type GroupCreateRow,
+} from "./group-create-modal";
 
 // ─── 세션 돌입 ────────────────────────────────────────
 
@@ -694,6 +698,77 @@ export async function openGroupMemberManager(
       }
     }
   ).open();
+}
+
+/**
+ * 홈 [그룹 만들기] 진입점 (G1) — 시나리오 다중 선택 → 그룹 생성 → 새 그룹 세션 시작.
+ * 세션은 주인공(첫 멤버) 시나리오 밑에 만들어지고 meta.groupId 로 그룹에 링크된다.
+ * 시작 방식 3택: 멤버 첫 대사 / 오프닝 직접 쓰기 / 빈 시작. 모두 루트 노드로 수렴.
+ */
+export async function openGroupCreator(
+  plugin: StellaEnginePlugin
+): Promise<void> {
+  const scenarios: ScenarioListItem[] = await plugin.store
+    .getScenarios()
+    .catch(() => []);
+  const withId = scenarios.filter(
+    (i) => !!i.scenario.data?.extensions?.stella?.id
+  );
+  if (withId.length < 2) {
+    new Notice("그룹을 만들려면 시나리오가 2개 이상 필요합니다.");
+    return;
+  }
+
+  const byId = new Map<string, ScenarioListItem>();
+  const rows: GroupCreateRow[] = withId.map((i) => {
+    const id = i.scenario.data.extensions!.stella!.id;
+    byId.set(id, i);
+    return {
+      scenarioId: id,
+      name: i.scenario.data.name?.trim() || i.folderName,
+      thumbnailPath: i.thumbnailPath,
+      hasFirstMes: !!(i.scenario.data?.first_mes ?? "").trim(),
+    };
+  });
+
+  new GroupCreateModal(plugin.app, rows, async (result) => {
+    try {
+      const hostId = result.memberScenarioIds[0];
+      const host = byId.get(hostId);
+      if (!host) throw new Error("주인공 시나리오를 찾을 수 없습니다.");
+
+      let seed: SessionSeed = "";
+      if (result.opening.kind === "member") {
+        const m = byId.get(result.opening.scenarioId);
+        seed = m ? firstMessageBranches(m) : "";
+      } else if (result.opening.kind === "text") {
+        seed = result.opening.text;
+      }
+
+      const group = await plugin.store.createGroup(
+        result.groupName,
+        result.memberScenarioIds
+      );
+      const created = await plugin.store.createSession(
+        host.folder,
+        hostId,
+        result.groupName,
+        seed,
+        plugin.data.current,
+        "novel"
+      );
+      created.session.meta.groupId = group.group.id;
+      const activePersona = await plugin.resolveActiveUserProfile();
+      created.session.meta.personaFile = activePersona.userFile;
+      await plugin.store.saveSession(created.sessionFile, created.session);
+      await openSessionByPath(plugin, created.sessionFile);
+      new Notice(`그룹 세션 생성: ${result.groupName}`);
+    } catch (err) {
+      new Notice(
+        `그룹 생성 실패: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }).open();
 }
 
 /** 시나리오 stella.id → 표시 이름. 못 찾으면 "시나리오". */

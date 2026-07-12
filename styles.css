@@ -6891,3 +6891,43 @@ body.is-mobile .ggai-chat-inputbar {
 .ggai-group-member-row:has(input:disabled):hover {
   background: transparent;
 }
+
+/* 그룹 만들기 모달 (홈 진입점) */
+.ggai-group-create-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.ggai-group-create-field {
+  margin-top: 16px;
+}
+.ggai-group-create-label {
+  display: block;
+  font-size: 0.82em;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.ggai-group-create-input,
+.ggai-group-create-textarea {
+  width: 100%;
+}
+.ggai-group-create-textarea {
+  resize: vertical;
+  min-height: 72px;
+}
+.ggai-group-create-opt {
+  margin-bottom: 8px;
+}
+.ggai-group-create-radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.ggai-group-create-opt > .ggai-group-create-input,
+.ggai-group-create-opt > .ggai-group-create-textarea {
+  margin-top: 6px;
+}
