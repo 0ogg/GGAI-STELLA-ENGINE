@@ -34,6 +34,14 @@ export function createModalShell(
   modal.modalEl.addClass("ggai-modal-shell", `ggai-modal-size-${size}`);
   if (opts?.wide) modal.modalEl.addClass("ggai-modal-wide");
 
+  // 옵시디언 Modal 은 기본으로 닫힐 때 열기 전의 포커스/선택을 복원한다. 세션
+  // 본문(거대한 contenteditable)이 포커스를 가진 채 모달을 열면 — 삽화 재생성/
+  // 문단 재생성/번역 확인 등 — 닫히는 순간 그 본문에 focus() 가 돌아가며
+  // 브라우저가 요소를 화면에 보이게 스크롤해 본문 최상단으로 튄다
+  // (삽화 재생성 후 스크롤 점프의 실제 원인, 2026-07-12 수정, 회귀 금지).
+  // 파생 창은 선택 복원이 필요한 경우가 없으므로 전부 끈다.
+  modal.shouldRestoreSelection = false;
+
   const contentEl = modal.contentEl;
   contentEl.empty();
   contentEl.addClass("ggai-modal-shell-content");

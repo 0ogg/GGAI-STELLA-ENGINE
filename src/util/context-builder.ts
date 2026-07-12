@@ -83,6 +83,8 @@ export interface ContextBuilderInputV2 {
   summary?: string;
   /** 이어쓰기 모드 — 마지막 assistant 메시지에 prepend. 있으면 trigger=continue 항목만. */
   continueText?: string;
+  /** 마지막 노드 이후 경과 표현 — {{idle_duration}} 매크로 값 (P1 실시간 채팅). */
+  idleDuration?: string;
   /** 세션 단위 매크로 변수. setvar/getvar/addvar 계열이 이 객체를 갱신한다. */
   variables?: Record<string, string>;
   /** 세션 단위 Choice Block 선택값. */
@@ -212,6 +214,7 @@ export function buildContext(
     charCreatorNotes: input.scenario.creator_notes,
     charVersion: input.scenario.character_version,
     lastMessage,
+    idleDuration: input.idleDuration,
     variables: input.variables,
     choices,
   };

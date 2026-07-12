@@ -17,20 +17,10 @@
 import { Notice, Platform, requestUrl } from "obsidian";
 import type StellaEnginePlugin from "../main";
 import type { GenerationCompleteInput } from "../services/extension-registry";
-import { isSessionHostView } from "../views/session-host";
+import { isViewingSession } from "../views/session-host";
 import { openSessionByPath } from "../views/entity-actions";
 
 const PREVIEW_MAX_CHARS = 80;
-
-/** 사용자가 지금 이 세션을 보고 있는가 — 활성 탭이 그 세션이고 창도 포커스 상태. */
-function isViewingSession(
-  plugin: StellaEnginePlugin,
-  sessionFile: string
-): boolean {
-  if (!document.hasFocus()) return false;
-  const view = plugin.app.workspace.activeLeaf?.view;
-  return isSessionHostView(view) && view.getSessionFile() === sessionFile;
-}
 
 /** 알림에 쓸 세션 표시명 — 세션 제목, 없으면 세션 폴더명. */
 async function sessionDisplayName(
@@ -225,7 +215,7 @@ export function registerNotificationExtension(plugin: StellaEnginePlugin): void 
     id: "stella:notification",
     async onGenerationComplete(input: GenerationCompleteInput): Promise<void> {
       const { sessionFile, generatedText } = input;
-      if (isViewingSession(plugin, sessionFile)) return;
+      if (isViewingSession(plugin.app.workspace, sessionFile)) return;
 
       const preview = generatedText
         .trim()

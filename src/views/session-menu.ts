@@ -6,6 +6,7 @@ import {
   confirmDeleteSession,
   copySession,
   exportSessionReading,
+  openGroupMemberManager,
   openSessionByPath,
   promptRenameSession,
 } from "./entity-actions";
@@ -107,6 +108,15 @@ export function buildSessionMenu(
         )
         .setIcon("clock")
         .onClick(() => void toggleProactiveSetting(plugin, s, "realtime"))
+    );
+  }
+  // 그룹 멤버 관리 (G1) — 그룹 세션(초대로 멤버가 붙은 세션)에만.
+  if (s.session.meta.groupId) {
+    menu.addItem((mi) =>
+      mi
+        .setTitle("그룹 멤버 관리")
+        .setIcon("users")
+        .onClick(() => void openGroupMemberManager(plugin, s.sessionFile))
     );
   }
   menu.addSeparator();

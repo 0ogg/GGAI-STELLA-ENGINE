@@ -58,6 +58,16 @@ export function isSessionHostView(
   );
 }
 
+/** 사용자가 지금 이 세션을 보고 있는가 — 활성 탭이 그 세션이고 창도 포커스 상태. */
+export function isViewingSession(
+  workspace: Workspace,
+  sessionFile: string
+): boolean {
+  if (!document.hasFocus()) return false;
+  const view = workspace.activeLeaf?.view;
+  return isSessionHostView(view) && view.getSessionFile() === sessionFile;
+}
+
 /** 열려 있는 모든 세션 호스트 leaf (소설 + 챗). */
 export function getSessionHostLeaves(workspace: Workspace): WorkspaceLeaf[] {
   const leaves: WorkspaceLeaf[] = [];

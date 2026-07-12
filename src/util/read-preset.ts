@@ -18,6 +18,10 @@ export async function readPreset(
       console.warn("[GGAI Stella] preset 형식 불일치:", presetFile);
       return null;
     }
+    // 번역/삽화/요약 설정은 확장으로 분리됨 — 구버전 프리셋에 남은 잔여 값은 버린다.
+    delete (parsed as unknown as Record<string, unknown>).translation;
+    delete (parsed as unknown as Record<string, unknown>).illustration;
+    delete (parsed as unknown as Record<string, unknown>).summarize;
     return parsed;
   } catch (err) {
     console.warn("[GGAI Stella] preset 파싱 실패:", presetFile, err);

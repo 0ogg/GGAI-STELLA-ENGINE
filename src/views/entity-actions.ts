@@ -50,6 +50,7 @@ import {
   StChatImportModal,
   type StChatImportChoice,
 } from "./modals";
+import { GroupMemberModal, type GroupMemberRow } from "./group-member-modal";
 
 // ─── 세션 돌입 ────────────────────────────────────────
 
@@ -539,6 +540,174 @@ export async function copySession(
       `세션 복사 실패: ${err instanceof Error ? err.message : String(err)}`
     );
   }
+}
+
+// ─── 그룹 초대 (G1) ───────────────────────────────────
+
+/**
+ * 사이드바 시나리오 우클릭 메뉴의 "현재 세션에 초대" 항목 정보.
+ * 초대 가능하면 { label, run } — 라벨에 대상 세션(시나리오:세션명)을 박아 오초대 방지.
+ * 활성 세션이 없거나, 자기 자신이거나, 이미 멤버면 null (항목 미노출).
+ */
+export async function getInviteToActiveSession(
+  plugin: StellaEnginePlugin,
+  item: ScenarioListItem
+): Promise<{ label: string; run: () => Promise<void> } | null> {
+  const sessionFile = plugin.getActiveOrLastSessionFile();
+  if (!sessionFile) return null;
+  const session = await plugin.store.getSession(sessionFile).catch(() => null);
+  if (!session) return null;
+
+  const invitedId = item.scenario.data?.extensions?.stella?.id;
+  if (!invitedId || invitedId === session.meta.scenarioId) return null;
+  if (session.meta.groupId) {
+    const g = await plugin.store.getGroupById(session.meta.groupId);
+    if (g?.group.members.some((m) => m.scenarioId === invitedId)) return null;
+  }
+
+  const hostName = await resolveScenarioNameById(plugin, session.meta.scenarioId);
+  const label = `현재 세션에 초대: ${hostName}:${session.meta.name}`;
+  return {
+    label,
+    run: () => inviteScenarioToSession(plugin, item, sessionFile),
+  };
+}
+
+/**
+ * 시나리오를 세션에 중간 합류시킨다 (초대 = 그룹 자동 생성/확장).
+ *  - 세션에 그룹이 없으면: 호스트+초대 멤버로 새 그룹 생성 후 세션에 링크(groupId).
+ *  - 이미 그룹 세션이면: 그 그룹에 멤버 추가 (같은 그룹을 쓰는 다른 세션에도 반영).
+ * 초대 시점 이후 생성부터 멤버 프로필이 컨텍스트에 합류한다 (util/group-lorebook.ts).
+ */
+export async function inviteScenarioToSession(
+  plugin: StellaEnginePlugin,
+  item: ScenarioListItem,
+  sessionFile: string
+): Promise<void> {
+  try {
+    const session = await plugin.store.getSession(sessionFile);
+    if (!session) throw new Error("세션을 불러올 수 없습니다.");
+    const invitedId = item.scenario.data?.extensions?.stella?.id;
+    if (!invitedId) throw new Error("이 시나리오에는 고유 ID가 없습니다.");
+    if (invitedId === session.meta.scenarioId) {
+      new Notice("이 세션의 주인공은 이미 참여 중입니다.");
+      return;
+    }
+
+    const existing = session.meta.groupId
+      ? await plugin.store.getGroupById(session.meta.groupId)
+      : null;
+    if (existing) {
+      if (existing.group.members.some((m) => m.scenarioId === invitedId)) {
+        new Notice("이미 이 세션에 참여 중입니다.");
+        return;
+      }
+      existing.group.members.push({ scenarioId: invitedId });
+      await plugin.store.saveGroup(existing.groupFile, existing.group);
+    } else {
+      // 그룹이 없던(또는 삭제된) 세션 — 호스트+초대 멤버로 그룹 자동 생성.
+      const created = await plugin.store.createGroup(session.meta.name, [
+        session.meta.scenarioId,
+        invitedId,
+      ]);
+      session.meta.groupId = created.group.id;
+      await plugin.store.saveSession(sessionFile, session, {
+        kinds: ["settings"],
+      });
+    }
+    new Notice(
+      `「${item.scenario.data.name}」이(가) 「${session.meta.name}」 세션에 합류했습니다.`
+    );
+  } catch (err) {
+    new Notice(`초대 실패: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
+ * 그룹 멤버 관리 팝업 열기 (G1) — 세션 메뉴에서 호출.
+ * 그룹 세션의 멤버 목록을 모달로 띄우고, 체크 해제된 멤버를 그룹에서 뺀다.
+ * 주인공(세션 scenarioId)은 항상 남는다.
+ */
+export async function openGroupMemberManager(
+  plugin: StellaEnginePlugin,
+  sessionFile: string
+): Promise<void> {
+  const session = await plugin.store.getSession(sessionFile).catch(() => null);
+  if (!session?.meta.groupId) {
+    new Notice("그룹 세션이 아닙니다.");
+    return;
+  }
+  const groupItem = await plugin.store.getGroupById(session.meta.groupId);
+  if (!groupItem) {
+    new Notice("그룹 정보를 찾을 수 없습니다.");
+    return;
+  }
+  const scenarios: ScenarioListItem[] = await plugin.store
+    .getScenarios()
+    .catch(() => []);
+  const byId = new Map<string, ScenarioListItem>();
+  for (const i of scenarios) {
+    const id = i.scenario.data?.extensions?.stella?.id;
+    if (id) byId.set(id, i);
+  }
+  const hostId = session.meta.scenarioId;
+
+  const rows: GroupMemberRow[] = groupItem.group.members.map((m) => {
+    const sc = byId.get(m.scenarioId);
+    return {
+      scenarioId: m.scenarioId,
+      name: sc?.scenario.data.name?.trim() || "(사라진 캐릭터)",
+      thumbnailPath: sc?.thumbnailPath ?? null,
+      isHost: m.scenarioId === hostId,
+    };
+  });
+  // 안전장치 — 멤버 목록에 주인공이 없으면 맨 앞에 넣는다.
+  if (!rows.some((r) => r.isHost)) {
+    const sc = byId.get(hostId);
+    rows.unshift({
+      scenarioId: hostId,
+      name: sc?.scenario.data.name?.trim() || "주인공",
+      thumbnailPath: sc?.thumbnailPath ?? null,
+      isHost: true,
+    });
+  }
+
+  new GroupMemberModal(
+    plugin.app,
+    session.meta.name,
+    rows,
+    async (keptIds) => {
+      const kept = new Set(keptIds);
+      kept.add(hostId); // 주인공은 무조건 유지
+      const next = groupItem.group.members.filter((m) => kept.has(m.scenarioId));
+      if (!next.some((m) => m.scenarioId === hostId)) {
+        next.unshift({ scenarioId: hostId });
+      }
+      groupItem.group.members = next;
+      try {
+        await plugin.store.saveGroup(groupItem.groupFile, groupItem.group);
+        new Notice("그룹 멤버를 저장했습니다.");
+      } catch (err) {
+        new Notice(
+          `저장 실패: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
+  ).open();
+}
+
+/** 시나리오 stella.id → 표시 이름. 못 찾으면 "시나리오". */
+async function resolveScenarioNameById(
+  plugin: StellaEnginePlugin,
+  scenarioId: string
+): Promise<string> {
+  const list: ScenarioListItem[] = await plugin.store
+    .getScenarios()
+    .catch(() => []);
+  const found = list.find(
+    (i) => i.scenario.data?.extensions?.stella?.id === scenarioId
+  );
+  return found?.scenario.data.name?.trim() || "시나리오";
 }
 
 // ─── 생성 ─────────────────────────────────────────────

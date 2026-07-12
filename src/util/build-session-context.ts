@@ -1,5 +1,6 @@
 import type StellaEnginePlugin from "../main";
 import type { GenerationProfileLite } from "../services/ai-service";
+import type { StellaLorebook } from "../types/lorebook";
 import type { ActiveSettings } from "../types/preset";
 import type { StellaSession } from "../types/session";
 import {
@@ -29,6 +30,8 @@ import {
   extractAnchorSentence,
 } from "./continuation-anchor";
 import { paramsToOverride } from "./generation-params";
+import { buildGroupMemberLorebook } from "./group-lorebook";
+import { formatIdleEn } from "./idle-duration";
 import { resolveNaiFormat, resolveRoleMode } from "./model-kind-policy";
 import { normalizeMessagesForChat } from "./normalize-messages";
 import { resolveActiveLorebooks } from "./resolve-active-lorebooks";
@@ -206,7 +209,27 @@ export async function planSessionRequest(
         leafId,
       })
     : resolveActiveLorebooks(plugin.store, scenarioItem?.scenario ?? null, session)
-  ).catch(() => []);
+  ).catch((): StellaLorebook[] => []);
+
+  // 그룹 세션 (G1): 멤버 프로필(호스트 제외)을 가상 로어북으로 합류시킨다.
+  // 전송본 단일 경로라 미리보기·생성에 자동으로 동일 반영. 그룹 로드 실패는
+  // 조용히 단일 캐릭터 컨텍스트로 진행 (그룹이 삭제된 세션도 열려야 함).
+  if (session.meta.groupId) {
+    try {
+      const groupItem = await plugin.store.getGroupById(session.meta.groupId);
+      if (groupItem) {
+        const all = await plugin.store.getScenarios();
+        const memberBook = buildGroupMemberLorebook(
+          groupItem.group,
+          all.map((i) => i.scenario),
+          session.meta.scenarioId
+        );
+        if (memberBook) lorebooks.push(memberBook);
+      }
+    } catch (err) {
+      console.warn("[GGAI Stella] 그룹 멤버 컨텍스트 로드 실패:", err);
+    }
+  }
 
   const tokenBudget = settings.params?.maxContext ?? 16000;
   const novelChatRoleMode = resolveRoleMode(
@@ -248,6 +271,11 @@ export async function planSessionRequest(
     memory: session.meta.memory,
     authorNote: session.meta.authorNote,
     summary: summaryContext || undefined,
+    // {{idle_duration}} — 마지막 노드 이후 경과 (ST 호환, 실시간 채팅용).
+    idleDuration:
+      formatIdleEn(
+        Date.now() - (session.nodes[leafId]?.createdAt ?? Date.now())
+      ) || "less than a minute",
     variables,
     choiceValues: { ...(session.meta.choiceValues ?? {}) },
     timingStates: { ...(session.meta.timingStates ?? {}) },

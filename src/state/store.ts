@@ -19,6 +19,7 @@
  *       detail.origin 으로 발신 뷰 토큰 전달. 없으면 전체 변경으로 취급.
  *   "session-translations-changed" (sessionFile) - 특정 세션의 translations.json (문단 번역) 변경
  *   "session-summaries-changed" (sessionFile)    - 특정 세션의 summaries.json (노드 앵커 요약) 변경
+ *   "groups-changed"                     - 그룹 목록 또는 내용 변경 (G1)
  *
  * 주의: 자기 view 가 발화한 이벤트도 본인에게 도달한다. 본인 변경 skip 은
  * saveSession 에 `{ origin: <뷰 토큰> }` 을 넘기고 핸들러에서 detail.origin 비교가
@@ -63,9 +64,11 @@ import {
   buildReadingMarkdown,
   type ReadingExportMode,
 } from "../util/export-session";
+import { readGroup } from "../util/read-group";
 import { readLorebook } from "../util/read-lorebook";
 import { readPreset } from "../util/read-preset";
 import { readPromptPreset } from "../util/read-prompt";
+import { scanGroups, GroupListItem } from "../util/scan-groups";
 import { scanLorebooks, LorebookListItem } from "../util/scan-lorebooks";
 import { scanPresets, PresetListItem } from "../util/scan-presets";
 import { scanPrompts, PromptListItem } from "../util/scan-prompts";
@@ -79,6 +82,12 @@ import {
   scanUsers,
   UserListItem,
 } from "../util/scan-users";
+import {
+  createNewGroup as diskCreateGroup,
+  saveGroupJson as diskSaveGroup,
+  trashGroup as diskTrashGroup,
+} from "../util/group-ops";
+import type { StellaGroup } from "../types/group";
 import {
   createNewScenario as diskCreateScenario,
   saveScenarioJson as diskSaveScenario,
@@ -138,6 +147,10 @@ export class StellaStore extends Events {
   /** lorebook 캐시 — list + file 단위. */
   private lorebooksCache: LorebookListItem[] | null = null;
   private lorebookByFile = new Map<string, StellaLorebook>();
+
+  /** group 캐시 — list + file 단위 (G1). */
+  private groupsCache: GroupListItem[] | null = null;
+  private groupByFile = new Map<string, StellaGroup>();
   private defaultUserProfile: StellaUserProfile | null = null;
   private usersCache: UserListItem[] | null = null;
   private userByFile = new Map<string, StellaUserProfile>();
@@ -465,6 +478,71 @@ export class StellaStore extends Events {
     ext.lastPlayedAt = now;
     ext.playCount = (ext.playCount ?? 0) + 1;
     await this.saveScenario(scenarioFile, item.scenario);
+  }
+
+  // ─────────────────────────── groups (G1) ─────────────────────────
+
+  async getGroups(): Promise<GroupListItem[]> {
+    if (this.groupsCache) return this.groupsCache;
+    this.groupsCache = await scanGroups(this.vault);
+    for (const item of this.groupsCache) {
+      this.groupByFile.set(item.groupFile, item.group);
+    }
+    return this.groupsCache;
+  }
+
+  async refreshGroups(): Promise<GroupListItem[]> {
+    this.groupsCache = await scanGroups(this.vault);
+    this.groupByFile.clear();
+    for (const item of this.groupsCache) {
+      this.groupByFile.set(item.groupFile, item.group);
+    }
+    return this.groupsCache;
+  }
+
+  /** 단일 그룹 조회 (캐시 우선). */
+  async getGroup(groupFile: string): Promise<StellaGroup | null> {
+    const cached = this.groupByFile.get(groupFile);
+    if (cached) return cached;
+    const group = await readGroup(this.vault, groupFile);
+    if (group) this.groupByFile.set(groupFile, group);
+    return group;
+  }
+
+  /** id(StellaGroup.id) 로 그룹 목록 항목을 찾는다 — 세션 meta.groupId 해석용. */
+  async getGroupById(groupId: string): Promise<GroupListItem | null> {
+    const list = await this.getGroups();
+    return list.find((i) => i.group.id === groupId) ?? null;
+  }
+
+  async createGroup(
+    name: string,
+    memberScenarioIds: string[] = []
+  ): Promise<{ folder: string; groupFile: string; group: StellaGroup }> {
+    const result = await diskCreateGroup(this.vault, name, memberScenarioIds);
+    this.markSelfWrite(result.groupFile);
+    this.groupByFile.set(result.groupFile, result.group);
+    this.groupsCache = null;
+    this.trigger("groups-changed");
+    return result;
+  }
+
+  async saveGroup(groupFile: string, group: StellaGroup): Promise<void> {
+    this.markSelfWrite(groupFile);
+    await diskSaveGroup(this.vault, groupFile, group);
+    this.groupByFile.set(groupFile, group);
+    if (this.groupsCache) {
+      const item = this.groupsCache.find((i) => i.groupFile === groupFile);
+      if (item) item.group = group;
+    }
+    this.trigger("groups-changed");
+  }
+
+  async deleteGroup(folder: string): Promise<void> {
+    await diskTrashGroup(this.vault, folder);
+    this.groupByFile.delete(`${folder}/group.json`);
+    this.groupsCache = null;
+    this.trigger("groups-changed");
   }
 
   // ─────────────────────────── sessions ───────────────────────────
@@ -1693,6 +1771,16 @@ export class StellaStore extends Events {
       this.trigger("lorebooks-changed");
       return;
     }
+    // GROUPS/<X>/group.json 변경 (G1)
+    if (
+      path.startsWith(`${BASE_FOLDER}/GROUPS/`) &&
+      path.endsWith("/group.json")
+    ) {
+      this.groupByFile.delete(path);
+      this.groupsCache = null;
+      this.trigger("groups-changed");
+      return;
+    }
     // 폴더 create/delete (시나리오 폴더 또는 세션 폴더)
     if (
       path.startsWith(`${BASE_FOLDER}/USERS/`) &&
@@ -1720,6 +1808,15 @@ export class StellaStore extends Events {
           this.sessionsByFolder.delete(scenarioFolder);
           this.trigger("sessions-changed", scenarioFolder);
         }
+        return;
+      }
+      // GGAI/GROUPS/<group> 폴더 추가/삭제 (G1)
+      if (
+        path.startsWith(`${BASE_FOLDER}/GROUPS/`) &&
+        segments.length === 3
+      ) {
+        this.groupsCache = null;
+        this.trigger("groups-changed");
         return;
       }
       // GGAI/PROMPTS/<preset>

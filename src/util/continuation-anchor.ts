@@ -195,12 +195,25 @@ export function anchorSkipFinal(raw: string, anchor: string): number {
 function sentenceStarts(t: string): number[] {
   const starts = [0];
   let i = 0;
+  // 열린 따옴표/괄호 추적 — 닫히지 않은 「『（" 안에서는 문장 경계를 만들지
+  // 않는다. 대사 안의 。？에서 자르면 앵커가 여는 따옴표를 잃고, 따옴표 없는
+  // 조각을 받은 모델은 대사 중임을 몰라 닫지 않는다. 앵커는 「부터 통째로.
+  let depth = 0;
+  let dquote = 0;
+  const track = (c: string): void => {
+    if (c === '"') dquote ^= 1;
+    else if (BRACKET_OPEN.test(c)) depth++;
+    else if (BRACKET_CLOSE.test(c) && depth > 0) depth--;
+  };
   while (i < t.length) {
     const ch = t[i];
     if (ch === "\n") {
       let j = i + 1;
       while (j < t.length && WS.test(t[j])) j++;
       if (j < t.length) starts.push(j);
+      // 문단 경계에서 리셋 — 앞선 문단의 짝 안 맞는 따옴표가 뒤로 번지지 않게.
+      depth = 0;
+      dquote = 0;
       i = Math.max(j, i + 1);
       continue;
     }
@@ -230,7 +243,15 @@ function sentenceStarts(t: string): number[] {
         i = j;
         continue;
       }
-      while (j < t.length && CLOSERS.test(t[j])) j++;
+      while (j < t.length && CLOSERS.test(t[j])) {
+        track(t[j]);
+        j++;
+      }
+      // 따옴표/괄호가 아직 열려 있으면 경계가 아니다 (。」처럼 닫힌 뒤엔 경계).
+      if (depth > 0 || dquote === 1) {
+        i = j;
+        continue;
+      }
       // 종결 부호 뒤 공백/줄바꿈 → 그 뒤에서 새 문장.
       if (j < t.length && WS.test(t[j])) {
         let k = j;
@@ -249,6 +270,7 @@ function sentenceStarts(t: string): number[] {
       i = Math.max(j, i + 1);
       continue;
     }
+    track(ch);
     i++;
   }
   return starts;
@@ -271,13 +293,18 @@ function nonWsLength(s: string): number {
   return s.replace(/\s/g, "").length;
 }
 
-/** 너무 긴 앵커는 뒤에서 자르되 단어 경계에서 시작하게 한다. */
+/**
+ * 너무 긴 앵커는 뒤에서 자르되 단어 경계에서 시작하게 한다.
+ * 여는 따옴표/괄호로 시작하는 앵커(미종결 대사)는 잘라도 그 여는 문자를
+ * 앞에 남긴다 — 모델이 대사 중임을 알고 닫을 수 있게.
+ */
 function capAnchor(s: string): string {
   if (s.length <= ANCHOR_MAX_LEN) return s;
-  const cut = s.slice(s.length - ANCHOR_MAX_LEN);
+  const lead = OPENERS.test(s[0]) ? s[0] : "";
+  const cut = s.slice(s.length - (ANCHOR_MAX_LEN - lead.length));
   const m = cut.match(/^\S*\s+/);
-  if (m && m[0].length < cut.length) return cut.slice(m[0].length);
-  return cut;
+  if (m && m[0].length < cut.length) return lead + cut.slice(m[0].length);
+  return lead + cut;
 }
 
 /**

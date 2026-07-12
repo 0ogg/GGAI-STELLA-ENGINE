@@ -181,6 +181,28 @@ export function countGenerationsSince(
 }
 
 /**
+ * 자동 요약의 "확정된" 끝 노드 — 방금 생성된 마지막 턴은 재생성으로 버려질 수 있으니
+ * 요약 대상에서 뺀다. 경로 위 AI 생성 노드 중 **끝에서 두 번째**(직전 턴)를 돌려준다.
+ * 확정된 직전 턴이 없으면(경로에 AI 노드가 2개 미만) undefined.
+ *
+ * 한 턴 미루면 두 가지가 해결된다: (1) 방금 턴을 재생성해도 요약 끝 지점이 그대로라
+ * 매턴 재요약이 사라지고, (2) N턴까지의 요약은 N+1턴이 그 위에 쌓여 확정된 뒤에 돈다.
+ * 수동 요약(지금 요약/개별 재생성)은 실제 leaf 를 쓰므로 이 지연을 적용하지 않는다.
+ */
+export function lastConfirmedGenerationNode(
+  session: StellaSession,
+  leafId: string
+): string | undefined {
+  const path = pathToLeaf(session, leafId);
+  const aiIdx: number[] = [];
+  for (let i = 0; i < path.length; i++) {
+    if (isAINode(path[i])) aiIdx.push(i);
+  }
+  if (aiIdx.length < 2) return undefined;
+  return path[aiIdx[aiIdx.length - 2]].id;
+}
+
+/**
  * 밀린 구간을 **앵커 경계 노드들**로 나눈다. 대원칙: **경계 1개 = 요약 요청 1번 =
  * 앵커 1개** — 요청 하나가 끝날 때마다 앵커 하나가 저장·표시된다.
  *

@@ -30,6 +30,7 @@ import {
   confirmDeleteScenario,
   confirmDeleteUser,
   createAndOpenSession,
+  getInviteToActiveSession,
   openSessionByPath,
   promptNewLorebook,
   promptNewScenario,
@@ -871,11 +872,11 @@ export class SidebarView extends ItemView {
   }
 
   private showScenarioMenu(e: MouseEvent, item: ScenarioListItem): void {
-    this.makeScenarioMenu(item).showAtMouseEvent(e);
+    void this.makeScenarioMenu(item).then((menu) => menu.showAtMouseEvent(e));
   }
 
-  private makeScenarioMenu(item: ScenarioListItem): Menu {
-    return new Menu()
+  private async makeScenarioMenu(item: ScenarioListItem): Promise<Menu> {
+    const menu = new Menu()
       .addItem((menuItem) =>
         menuItem
           .setTitle(getFavorite(item) ? "즐겨찾기 해제" : "즐겨찾기")
@@ -883,11 +884,20 @@ export class SidebarView extends ItemView {
       )
       .addItem((menuItem) =>
         menuItem.setTitle("편집").onClick(() => void this.openScenarioEditor(item))
-      )
-      .addSeparator()
-      .addItem((menuItem) =>
-        menuItem.setTitle("삭제").onClick(() => this.confirmDelete(item))
       );
+    // 그룹 초대 (G1) — 활성 세션이 있고 이 시나리오가 아직 멤버가 아닐 때만.
+    const invite = await getInviteToActiveSession(this.plugin, item);
+    if (invite) {
+      menu.addItem((menuItem) =>
+        menuItem
+          .setTitle(invite.label)
+          .setIcon("user-plus")
+          .onClick(() => void invite.run())
+      );
+    }
+    return menu.addSeparator().addItem((menuItem) =>
+      menuItem.setTitle("삭제").onClick(() => this.confirmDelete(item))
+    );
   }
 
   private async toggleSessionFavorite(s: SessionListItem): Promise<void> {
@@ -920,7 +930,7 @@ export class SidebarView extends ItemView {
   }
 
   private showScenarioMenuAt(x: number, y: number, item: ScenarioListItem): void {
-    this.makeScenarioMenu(item).showAtPosition({ x, y });
+    void this.makeScenarioMenu(item).then((menu) => menu.showAtPosition({ x, y }));
   }
 
   private showSessionMenuAt(x: number, y: number, s: SessionListItem): void {

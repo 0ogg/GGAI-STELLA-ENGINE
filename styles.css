@@ -1649,6 +1649,11 @@ input.ggai-vs-slider[type="range"] {
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
+/* undo/재생성 호버 강조 — DOM 재렌더 없이 CSS Custom Highlight 로 칠한다
+   (긴 세션에서 hover 마다 본문 전체를 재구성하던 비용 제거). */
+::highlight(ggai-undo-preview) {
+  background: var(--text-highlight-bg, rgba(255, 214, 102, 0.32));
+}
 /* 번역 보기에서 undo/재생성 호버 시 사라질 문단(대략) 강조 */
 .ggai-tr-removal-preview {
   background: var(--text-highlight-bg, rgba(255, 214, 102, 0.32));
@@ -6824,4 +6829,65 @@ body.is-mobile .ggai-chat-inputbar {
 /* 챗 세션 활성 시 우측 디테일에서 소설 전용 항목 숨김 */
 .ggai-detail-chat-session .ggai-prompts-anchor-row {
   display: none;
+}
+
+/* 그룹 멤버 관리 팝업 (G1) */
+.ggai-group-member-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ggai-group-member-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.ggai-group-member-row:hover {
+  background: var(--background-modifier-hover);
+}
+.ggai-group-member-row input[type="checkbox"] {
+  flex: 0 0 auto;
+}
+.ggai-group-member-thumb {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--background-secondary);
+}
+.ggai-group-member-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.ggai-group-member-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ggai-group-member-name > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ggai-group-member-badge {
+  flex: 0 0 auto;
+  font-size: 0.72em;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+}
+/* 주인공 행 — 내보내기 불가 표시 */
+.ggai-group-member-row:has(input:disabled) {
+  cursor: default;
+}
+.ggai-group-member-row:has(input:disabled):hover {
+  background: transparent;
 }

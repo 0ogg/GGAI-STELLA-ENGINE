@@ -80,6 +80,7 @@ import {
   redoLastTranslation,
   tokenizeParagraphs,
   undoLastTranslation,
+  type ParagraphToken,
 } from "../util/translate-paragraphs";
 import type {
   TranslatePreviewResult,
@@ -138,11 +139,6 @@ const TRANSLATE_CONFIRM_PARAGRAPHS = 6;
 const TRANSLATE_CONFIRM_CHARS = 2000;
 /** "전체 번역" 선택이 이 문단 수 이상이면 한 번 더 경고. */
 const TRANSLATE_FULL_WARN_PARAGRAPHS = 20;
-type BodyHighlightRange = {
-  from: number;
-  to: number;
-  className: string;
-};
 
 /**
  * 옵시디언 커맨드 → 세션 액션 (main.ts addCommand 라우팅).
@@ -178,6 +174,12 @@ export class SessionView extends ItemView {
   private displayMacroCtx: MacroContext = { user: "User" };
 
   private pendingDiff: TextDiff | null = null;
+  /**
+   * 실제 사용자 입력으로 본문 DOM 이 바뀌었을 수 있음 표시. 순수 커서 이동
+   * (selectionchange 만 발생)에는 false 라, 본문 전체를 문자열화·diff 하는 비용을
+   * 건너뛴다. onBodyInput 이 세우고 syncPendingDiff 가 내린다.
+   */
+  private bodyDirty = false;
   private idleTimer: number | null = null;
   /** ??롫즼???紐껊굡 id ??쎄문 (??쇰뻻 ??쎈뻬??. ???뚣끇而????λ뜃由?? ?遺용뮞??肉????????? */
   private redoStack: string[] = [];
@@ -285,6 +287,13 @@ export class SessionView extends ItemView {
   private translationCommitTimer: number | null = null;
   /** 번역 실행 중 — 중복 실행 방지 + 버튼 busy 표시. */
   private translating = false;
+  /**
+   * 문단 토큰화(=문단별 해시) 캐시 — baselineText 가 안 바뀌면 재계산하지 않는다.
+   * 커서 이동/드래그 선택마다 본문 전체를 재해시하던 비용 제거(긴 세션 끊김 방지).
+   * baselineText 는 문자열이라 참조 비교(===)가 안 바뀌면 O(1).
+   */
+  private paraTokenCache: { text: string; tokens: ParagraphToken[] } | null =
+    null;
 
   // ── 삽화 (illustrations.json — 노드 기준, 인라인 표시) ──
   /** 세션 삽화 — store 에서 로드한 참조. */
@@ -293,6 +302,17 @@ export class SessionView extends ItemView {
   private illustrating = false;
   /** 인라인 삽화 위젯들 (원문 본문/번역 편집 영역 안의 원자 블록) — 재배치 시 제거용. */
   private inlineIllusEls: HTMLElement[] = [];
+  /**
+   * 인라인 삽화 위젯 풀 — key = `b\n<nodeId>`(본문) / `t\n<nodeId>`(번역 편집 영역).
+   * 재배치할 때 위젯을 **파괴하지 않고 DOM 이동으로 재사용**한다. 이미 로드된
+   * <img> 를 그대로 옮기므로 리로드로 높이가 0으로 접혔다 되돌아오는 출렁임이
+   * 없어, 재생성/삭제/자동 삽화 후 스크롤이 최상단으로 튀지 않는다. variant 가
+   * 실제로 바뀐 노드의 캐러셀만 제자리에서 다시 그린다(sig 비교).
+   */
+  private inlineWidgetPool = new Map<
+    string,
+    { el: HTMLElement; carousel: IllustrationCarousel; sig: string }
+  >();
   /** 가장 최근 AI 생성 시작 마커(다섯 잎 꽃) — 재배치 시 제거용. */
   private aiStartMarkerEl: HTMLElement | null = null;
   /** 번역 뷰의 AI 생성 시작 마커 — 원문 패널과 별개로 추적/제거. */
@@ -620,7 +640,7 @@ export class SessionView extends ItemView {
     await this.commitPending();
     await this.resolveScenario();
     await this.refreshMacroContext();
-    this.redrawBodyPreservingCaret();
+    this.redrawBodyIfDisplayChanged();
     this.refreshNativeTitle();
   }
 
@@ -804,7 +824,7 @@ export class SessionView extends ItemView {
     }
     await this.commitPending();
     await this.refreshMacroContext();
-    this.redrawBodyPreservingCaret();
+    this.redrawBodyIfDisplayChanged();
   }
 
   /** ?紐??癒?퐣 session.json ??獄쏅뗀??野껋럩????pending ?癒?┛ ??store ?????+ ?袁⑷퍥 ????? */
@@ -979,6 +999,8 @@ export class SessionView extends ItemView {
     this.translationEl = null;
     this.splitHandleEl = null;
     this.inlineIllusEls = [];
+    // root.empty() 로 옛 위젯 DOM 이 모두 파괴됐으니 풀도 비운다(죽은 참조 제거).
+    this.inlineWidgetPool.clear();
     this.paraSelectMode = false;
     this.clearTranslationBlocks();
 
@@ -1294,19 +1316,17 @@ export class SessionView extends ItemView {
     });
   }
 
-  private renderBodySpans(highlights: BodyHighlightRange[] = []): void {
+  private renderBodySpans(): void {
     const body = this.bodyEl;
     if (!body) return;
-    const ranges = highlights
-      .filter((r) => r.to > r.from)
-      .sort((a, b) => a.from - b.from);
 
     body.empty();
     // 전체 재렌더가 스트리밍 tail 컨테이너까지 지웠으니 참조를 놓는다.
     this.streamTailEl = null;
-    let offset = 0;
-    // 보기 스타일(문단 간격/들여쓰기)용 렌더 상태 — 청크(span/highlight) 경계를 넘어
-    // 문서 전체에서 이어진다. 각 줄바꿈("\n")을 문단 경계로 본다:
+    // 재렌더로 옛 텍스트 노드가 사라졌으니 hover 강조 Range 도 무효 — 정리한다.
+    this.clearBodyHighlight();
+    // 보기 스타일(문단 간격/들여쓰기)용 렌더 상태 — 스팬 경계를 넘어 문서 전체에서
+    // 이어진다. 각 줄바꿈("\n")을 문단 경계로 본다:
     //  - "\n" 문자는 ggai-para-gap span 으로 감싸 그 줄의 line-height 만 키운다 → 문단 사이
     //    간격. 문단 안 줄바꿈이 없는 산문에서 매 Enter 가 문단 구분이 되도록 매 "\n" 적용.
     //  - 줄 시작 첫 텍스트 span 에 ggai-para-indent 클래스 → 첫 줄 들여쓰기(빈 span 은
@@ -1315,50 +1335,25 @@ export class SessionView extends ItemView {
     let indentNext = true;
     for (const s of this.displaySpans) {
       if (s.text.length === 0) continue;
-      const spanStart = offset;
-      const spanEnd = spanStart + s.text.length;
-      let local = 0;
+      const cls = s.author === "ai" ? "ggai-span-ai" : "ggai-span-user";
 
-      while (local < s.text.length) {
-        const absolute = spanStart + local;
-        const activeRange = ranges.find(
-          (r) => r.from <= absolute && absolute < r.to
-        );
-        const nextRange = activeRange
-          ? null
-          : ranges.find((r) => r.from > absolute && r.from < spanEnd);
-        const nextAbsolute = activeRange
-          ? Math.min(spanEnd, activeRange.to)
-          : nextRange
-            ? nextRange.from
-            : spanEnd;
-        const text = s.text.slice(local, nextAbsolute - spanStart);
-        const authorClass = s.author === "ai" ? "ggai-span-ai" : "ggai-span-user";
-        const cls = activeRange
-          ? `${authorClass} ${activeRange.className}`
-          : authorClass;
-
-        let buf = "";
-        const flush = () => {
-          if (buf.length === 0) return;
-          this.appendMarkdownRun(body, buf, cls, indentNext);
-          indentNext = false;
-          buf = "";
-        };
-        for (const ch of text) {
-          if (ch === "\n") {
-            flush();
-            body.createEl("span", { cls: `ggai-para-gap ${cls}`, text: "\n" });
-            indentNext = true;
-          } else {
-            buf += ch;
-          }
+      let buf = "";
+      const flush = () => {
+        if (buf.length === 0) return;
+        this.appendMarkdownRun(body, buf, cls, indentNext);
+        indentNext = false;
+        buf = "";
+      };
+      for (const ch of s.text) {
+        if (ch === "\n") {
+          flush();
+          body.createEl("span", { cls: `ggai-para-gap ${cls}`, text: "\n" });
+          indentNext = true;
+        } else {
+          buf += ch;
         }
-        flush();
-        local = nextAbsolute - spanStart;
       }
-
-      offset = spanEnd;
+      flush();
     }
     // 본문을 새로 그렸으니 인라인 삽화도 다시 꽂는다.
     this.renderInlineIllustrations();
@@ -1991,6 +1986,8 @@ export class SessionView extends ItemView {
   private onBodyInput(): void {
     if (this.suppressEvents) return;
     if (!this.bodyEl || !this.session) return;
+    // 실제 입력이 들어왔다 — selectionchange 가 커밋 판정을 하도록 dirty 표시.
+    this.bodyDirty = true;
     // 조합 중에는 textContent 가 미완성 상태라 여기서 diff/커밋 예약을 하지 않는다.
     // compositionend 에서 한 번에 반영한다.
     if (this.composing) return;
@@ -2008,6 +2005,11 @@ export class SessionView extends ItemView {
     // 조합 중 selectionchange 로 커밋(=body.empty() 재구성)이 일어나면 조합·포커스가
     // 깨진다. 조합이 끝난 뒤 판정한다.
     if (this.composing) return;
+
+    // 편집이 없으면(dirty 아님 + pending 없음) 커밋 판정 자체가 불필요 — 본문
+    // 문자열화·diff 를 건너뛴다(순수 커서 이동 hot path). 실제 입력은 onBodyInput
+    // 이 dirty 를 세운다.
+    if (!this.bodyDirty && this.pendingDiff == null) return;
 
     const sel = document.getSelection();
     if (!sel || sel.rangeCount === 0) return;
@@ -2035,6 +2037,8 @@ export class SessionView extends ItemView {
     const body = this.bodyEl;
     if (!body) return;
     this.pendingDiff = diffText(this.displayText, body.textContent ?? "");
+    // 현재 DOM 상태를 pendingDiff 에 반영했으니 dirty 를 내린다.
+    this.bodyDirty = false;
   }
 
   /** selectionchange 마다 버튼 전체를 갱신하지 않게 디바운스 (원문 드래그 반영). */
@@ -2120,10 +2124,17 @@ export class SessionView extends ItemView {
     if (offset <= 0) return 0;
     if (offset >= this.baselineText.length) return this.displayText.length;
     const map = this.displayRender.displayToRaw;
-    for (let i = 0; i < map.length; i++) {
-      if ((map[i] ?? 0) >= offset) return i;
+    // map[i] = 표시 offset i 의 raw offset (단조 비감소). map[i] >= offset 인 최소 i 를
+    // 이진 탐색 — 선형 스캔이면 refreshDisplayBaseline 이 스팬마다 본문 전체를 훑어
+    // 긴 세션에서 커밋/재구성이 느려진다.
+    let lo = 0;
+    let hi = map.length; // 구간 [lo, hi)
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if ((map[mid] ?? 0) >= offset) hi = mid;
+      else lo = mid + 1;
     }
-    return this.displayText.length;
+    return lo < map.length ? lo : this.displayText.length;
   }
 
   private async commitPending(): Promise<void> {
@@ -2250,16 +2261,14 @@ export class SessionView extends ItemView {
     // 번역 보기: 사라질 구간과 겹치는 문단을 문단 단위로 강조 (대략적).
     if (this.translationViewActive) this.highlightTranslationRemoval(rawRanges);
 
-    // 원문 본문 강조 (replace+번역보기면 숨겨져 안 보이지만 split-h/원문보기에선 보임).
-    const ranges: BodyHighlightRange[] = rawRanges.map((r) => ({
-      from: this.rawOffsetToDisplayOffset(r.from),
-      to: this.rawOffsetToDisplayOffset(r.to),
-      className: "ggai-span-undo-preview",
-    }));
-    this.suppressEvents = true;
-    // 강조 표시용 전체 재렌더 — 보던 지점을 지킨다 (hover 마다 스크롤이 튀면 안 됨).
-    this.preserveReadingPosition(() => this.renderBodySpans(ranges));
-    this.suppressEvents = false;
+    // 원문 본문 강조 — DOM 재렌더 없이 CSS Custom Highlight 로 칠한다.
+    // (replace+번역보기면 원문이 숨겨져 안 보이지만 split-h/원문보기에선 보임.)
+    this.applyBodyHighlight(
+      rawRanges.map((r) => ({
+        from: this.rawOffsetToDisplayOffset(r.from),
+        to: this.rawOffsetToDisplayOffset(r.to),
+      }))
+    );
     this.undoPreviewVisible = true;
   }
 
@@ -2267,11 +2276,41 @@ export class SessionView extends ItemView {
     if (!this.undoPreviewVisible) return;
     this.undoPreviewVisible = false;
     this.clearTranslationRemovalPreview();
-    if (!this.bodyEl || this.pendingDiff) return;
+    this.clearBodyHighlight();
+  }
 
-    this.suppressEvents = true;
-    this.preserveReadingPosition(() => this.renderBodySpans());
-    this.suppressEvents = false;
+  /** CSS Custom Highlight 레지스트리 이름 (뷰 전역 공유 — 마지막 세션창 하나만 강조). */
+  private static readonly UNDO_HIGHLIGHT = "ggai-undo-preview";
+
+  /**
+   * 표시 offset 범위들을 CSS Custom Highlight 로 칠한다 — DOM 을 건드리지 않아
+   * hover 마다 본문을 재구성하지 않고 스크롤에도 개입하지 않는다. 미지원 환경
+   * (구형 웹뷰)에서는 조용히 생략한다(강조만 안 보일 뿐 기능은 정상).
+   */
+  private applyBodyHighlight(
+    ranges: Array<{ from: number; to: number }>
+  ): void {
+    const body = this.bodyEl;
+    const HighlightCtor = (window as any).Highlight;
+    const registry = (CSS as any)?.highlights;
+    if (!body || !HighlightCtor || !registry) return;
+    const hl = new HighlightCtor();
+    for (const r of ranges) {
+      if (r.to <= r.from) continue;
+      const start = this.textNodeAtDisplayOffset(r.from);
+      const end = this.textNodeAtDisplayOffset(r.to);
+      if (!start || !end) continue;
+      const range = document.createRange();
+      range.setStart(start.node, Math.min(start.local, start.node.length));
+      range.setEnd(end.node, Math.min(end.local, end.node.length));
+      hl.add(range);
+    }
+    registry.set(SessionView.UNDO_HIGHLIGHT, hl);
+  }
+
+  private clearBodyHighlight(): void {
+    const registry = (CSS as any)?.highlights;
+    registry?.delete?.(SessionView.UNDO_HIGHLIGHT);
   }
 
   /** 노드가 본문에 끼워넣은 구간 — raw(본문) 오프셋 기준. */
@@ -2296,14 +2335,6 @@ export class SessionView extends ItemView {
     }
 
     return ranges;
-  }
-
-  private getNodeInsertedRanges(node: SessionNode): BodyHighlightRange[] {
-    return this.getNodeInsertedRawRanges(node).map((r) => ({
-      from: this.rawOffsetToDisplayOffset(r.from),
-      to: this.rawOffsetToDisplayOffset(r.to),
-      className: "ggai-span-undo-preview",
-    }));
   }
 
   /** 번역 보기에서 사라질(교체될) 구간과 겹치는 문단 블록을 문단 단위로 강조. */
@@ -2417,9 +2448,11 @@ export class SessionView extends ItemView {
     const ctx = plan.output;
     const payload = plan.payload;
     const paramsOverride = plan.paramsOverride;
-    // macro setvar / 로어북 timing 갱신값을 세션에 반영(영속).
-    this.session.meta.variables = plan.updatedVariables;
-    this.session.meta.timingStates = ctx.updatedTimingStates;
+    // macro setvar / 로어북 timing 갱신값 — 생성이 실제로 결과 노드를 남겼을 때만
+    // 세션에 반영한다(finally). 생성이 실패/빈 응답/텍스트 없는 중단으로 노드가
+    // 삭제되면 로어북 쿨다운·sticky 카운트·setvar 를 소모하지 않는다.
+    const consumedVariables = plan.updatedVariables;
+    const consumedTimingStates = ctx.updatedTimingStates;
 
     // 2) ??AI ?紐껊굡 ?곕떽?
     const nodeId = uuidv4();
@@ -2606,15 +2639,12 @@ export class SessionView extends ItemView {
         node.gen.tokensIn = usage.inputTokens;
         node.gen.tokensOut = usage.outputTokens;
       }
-      if (emptyResponse && !aborted && (this.generation?.accumulatedText ?? "") === "") {
-        delete this.session.nodes[nodeId];
-        if (this.session.meta.activeLeafId === nodeId) {
-          this.session.meta.activeLeafId = parentId;
-        }
-      }
       const generatedText = this.generation?.accumulatedText ?? "";
       const blankGeneration = !hasVisibleText(generatedText);
       if (blankGeneration) {
+        // 결과 노드가 비었으면(빈 응답 / 오류 / 텍스트 없는 중단) 노드를 버린다.
+        // 이 경로에서는 아래 else 를 타지 않으므로 소모된 로어북 timing/변수도
+        // 세션에 반영되지 않아 쿨다운·sticky·setvar 가 낭비되지 않는다.
         delete this.session.nodes[nodeId];
         if (this.session.meta.activeLeafId === nodeId) {
           this.session.meta.activeLeafId = parentId;
@@ -2622,6 +2652,11 @@ export class SessionView extends ItemView {
         if (!emptyResponse && !aborted) {
           new Notice("AI response contained no visible text, so no branch was saved.");
         }
+      } else {
+        // 결과 노드가 살아남았다(정상 종료 또는 텍스트를 살린 중단) — 이때만
+        // 로어북 timing/변수 소모를 확정한다.
+        this.session.meta.variables = consumedVariables;
+        this.session.meta.timingStates = consumedTimingStates;
       }
       this.generation = null;
       this.setBodyEditable(true);
@@ -3143,10 +3178,7 @@ export class SessionView extends ItemView {
             : `선택 영역 문단 ${selHashes.length}개 재번역`
         );
       } else {
-        const untranslated = this.translations
-          ? collectUntranslatedParagraphs(this.baselineText, this.translations)
-              .length
-          : 0;
+        const untranslated = this.countUntranslated();
         this.setActionDisabled(
           this.batchTranslateBtn,
           this.generation != null ||
@@ -3483,60 +3515,100 @@ export class SessionView extends ItemView {
   }
 
   /**
-   * 현재 드래그 선택 영역과 겹치는 문단 해시 목록 (문서 순서).
-   * 원문 본문 선택 = 텍스트 offset 으로 문단 매핑, 번역 패널 선택 = 문단 블록 교차.
-   * 선택이 없거나 본문/번역 밖이면 빈 배열.
+   * 현재 드래그 선택을 baseline(raw) offset 범위로 환산한다.
+   * 원문 본문 = 표시 offset → raw offset, 번역 패널 = 교차 문단 블록의 offset 범위.
+   * 선택이 없거나 본문/번역 밖이면 null.
    */
-  private getSelectionParagraphHashes(): string[] {
+  private getSelectionRawRange(): { from: number; to: number } | null {
     const sel = document.getSelection();
-    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return [];
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
     const range = sel.getRangeAt(0);
 
-    // 번역 패널 — 렌더된 문단 블록과의 교차로 판정.
+    // 번역 패널 — 교차하는 문단 블록의 raw offset 범위(선택은 연속이라 블록도 연속).
     if (this.translationEl?.contains(range.commonAncestorContainer)) {
-      const seen = new Set<string>();
-      const out: string[] = [];
+      let from = Infinity;
+      let to = -1;
       for (const block of this.translationBlocks) {
-        if (range.intersectsNode(block.el) && !seen.has(block.hash)) {
-          seen.add(block.hash);
-          out.push(block.hash);
+        if (range.intersectsNode(block.el)) {
+          from = Math.min(from, block.offset);
+          to = Math.max(to, block.offset + block.source.length);
         }
       }
-      return out;
+      return to > from ? { from, to } : null;
     }
 
-    // 원문 본문 — 선택 구간의 표시 offset 을 원문 offset 으로 바꿔 문단 토큰에 매핑.
+    // 원문 본문 — 선택 구간의 표시 offset 을 원문 offset 으로 바꾼다.
     // (본문은 매크로가 치환된 표시 텍스트라 baselineText 와 offset 이 다를 수 있다.)
     const body = this.bodyEl;
-    if (!body || !body.contains(range.commonAncestorContainer)) return [];
+    if (!body || !body.contains(range.commonAncestorContainer)) return null;
     const pre = range.cloneRange();
     pre.selectNodeContents(body);
     pre.setEnd(range.startContainer, range.startOffset);
     const displayStart = pre.toString().length;
-    const start = this.displayToRawOffset(displayStart);
-    const end = this.displayToRawOffset(
-      displayStart + range.toString().length
-    );
+    const from = this.displayToRawOffset(displayStart);
+    const to = this.displayToRawOffset(displayStart + range.toString().length);
+    return to > from ? { from, to } : null;
+  }
+
+  /** 문단 토큰(캐시) — baselineText 가 그대로면 재해시 없이 재사용. */
+  private getParagraphTokens(): ParagraphToken[] {
+    if (this.paraTokenCache && this.paraTokenCache.text === this.baselineText) {
+      return this.paraTokenCache.tokens;
+    }
+    const tokens = tokenizeParagraphs(this.baselineText);
+    this.paraTokenCache = { text: this.baselineText, tokens };
+    return tokens;
+  }
+
+  /**
+   * 미번역 문단 수(중복 내용 문단은 1회). 해시는 캐시된 토큰에서 읽고
+   * hasTranslation 만 실시간 조회 — 커서 이동마다 전체 재해시하지 않는다.
+   */
+  private countUntranslated(): number {
+    if (!this.translations) return 0;
+    const seen = new Set<string>();
+    let count = 0;
+    for (const token of this.getParagraphTokens()) {
+      if (token.kind !== "paragraph" || seen.has(token.hash)) continue;
+      seen.add(token.hash);
+      if (!hasTranslation(this.translations, token.hash)) count++;
+    }
+    return count;
+  }
+
+  /** raw offset 범위 [from, to) 와 겹치는 문단 해시 목록 (문서 순서, 중복 제거). */
+  private paragraphHashesInRawRange(from: number, to: number): string[] {
     const seen = new Set<string>();
     const out: string[] = [];
     let offset = 0;
-    for (const token of tokenizeParagraphs(this.baselineText)) {
+    for (const token of this.getParagraphTokens()) {
       const len =
         token.kind === "separator" ? token.text.length : token.source.length;
       const tokenEnd = offset + len;
       if (
         token.kind === "paragraph" &&
-        offset < end &&
-        tokenEnd > start &&
+        offset < to &&
+        tokenEnd > from &&
         !seen.has(token.hash)
       ) {
         seen.add(token.hash);
         out.push(token.hash);
       }
       offset = tokenEnd;
-      if (offset >= end) break;
+      if (offset >= to) break;
     }
     return out;
+  }
+
+  /**
+   * 현재 드래그 선택 영역과 겹치는 문단 해시 목록 (버튼 표시 상태용 근사).
+   * 실제 번역 실행은 handleBatchTranslateClick 이 커밋 후 offset 보정을 거쳐
+   * 다시 계산한다.
+   */
+  private getSelectionParagraphHashes(): string[] {
+    const range = this.getSelectionRawRange();
+    if (!range) return [];
+    return this.paragraphHashesInRawRange(range.from, range.to);
   }
 
   /**
@@ -3547,9 +3619,32 @@ export class SessionView extends ItemView {
    */
   private async handleBatchTranslateClick(): Promise<void> {
     if (!this.session || !this.sessionFile || this.translating) return;
-    const selHashes = this.getSelectionParagraphHashes();
+    // 커밋(redraw)이 selection 을 접기 전에 선택을 raw 범위로 먼저 잡는다. 곧 커밋할
+    // 편집분(pendingDiff)의 위치/이전 길이도 기억해, 커밋으로 offset 이 밀려도
+    // 방금 고친 문단이 선택에서 빠지지 않게 한다.
+    const rawRange = this.getSelectionRawRange();
+    const patchFrom =
+      rawRange && this.pendingDiff
+        ? this.displayOffsetToRawOffset(this.pendingDiff.from)
+        : null;
+    const preLen = this.baselineText.length;
+    // 미저장 편집을 커밋 — 방금 고친 문단이 새 해시로 baseline 에 반영된다.
+    await this.commitPending();
+    if (!rawRange) {
+      // 선택 없음 — 기존 동작(미번역 문단 전부).
+      await this.runTranslate();
+      return;
+    }
+    // 커밋으로 편집 지점 뒤쪽 offset 이 밀렸으면 보정한 뒤, 최종 baseline 기준으로
+    // 그 범위의 문단 해시를 다시 계산한다.
+    const delta = this.baselineText.length - preLen;
+    const shift = (o: number) =>
+      patchFrom != null && o >= patchFrom ? o + delta : o;
+    const selHashes = this.paragraphHashesInRawRange(
+      shift(rawRange.from),
+      shift(rawRange.to)
+    );
     if (selHashes.length === 0) {
-      await this.commitPending();
       await this.runTranslate();
       return;
     }
@@ -3559,7 +3654,6 @@ export class SessionView extends ItemView {
     const untranslated = selHashes.filter(
       (h) => !hasTranslation(translations, h)
     );
-    await this.commitPending();
     await this.runTranslate({
       hashes: untranslated.length > 0 ? untranslated : selHashes,
     });
@@ -3677,7 +3771,9 @@ export class SessionView extends ItemView {
   /** 삽화 생성 (툴바 탭) — 프롬프트 생성부터. 대상 노드 생략 시 활성 노드. */
   private async runIllustrate(nodeId?: string): Promise<void> {
     await this.runIllustrationJob(() =>
-      this.plugin.illustration.generateForNode(this.sessionFile!, nodeId)
+      this.plugin.illustration.generateForNode(this.sessionFile!, nodeId, {
+        origin: this.storeOrigin,
+      })
     );
   }
 
@@ -3691,10 +3787,12 @@ export class SessionView extends ItemView {
       negativePrompt: active?.negativePrompt ?? "",
       onSubmit: (prompt, negativePrompt) =>
         void this.runIllustrationJob(() =>
-          this.plugin.illustration.regenWithPrompt(this.sessionFile!, nodeId, {
-            prompt,
-            negativePrompt,
-          })
+          this.plugin.illustration.regenWithPrompt(
+            this.sessionFile!,
+            nodeId,
+            { prompt, negativePrompt },
+            { origin: this.storeOrigin }
+          )
         ),
     }).open();
   }
@@ -3715,13 +3813,13 @@ export class SessionView extends ItemView {
       if (!result.ok) {
         new Notice("삽화 생성 실패: " + (result.errors[0] ?? "알 수 없는 오류"));
       } else {
+        // 저장은 origin 으로 자기 이벤트를 막았으니 여기서 한 번만 갱신한다.
+        // (위젯 재사용 + 읽던 위치 보존은 refreshIllustrations 안에서 처리.)
         await this.refreshIllustrations();
       }
     } finally {
       this.illustrating = false;
       this.updateToolbar();
-      // 생성 직후 삽화가 붙어도 읽던 위치가 밀리지 않게 고정한다.
-      this.preserveReadingPosition(() => this.renderInlineIllustrations());
     }
   }
 
@@ -3778,28 +3876,73 @@ export class SessionView extends ItemView {
     ) {
       return;
     }
-    for (const el of this.inlineIllusEls) el.remove();
+    // 이번 배치에 쓰인 풀 key 집합 — 끝나고 안 쓰인 위젯만 제거한다(나머지는 재사용).
+    const used = new Set<string>();
     this.inlineIllusEls = [];
-    if (!this.session || !this.sessionFile || !this.illustrations) return;
-    const ill = this.session.meta.illustration;
-    if (ill?.enabled !== true) return;
-    const output = resolveIllustrationOutput(ill.output);
-    if (output !== "inline") return;
-    const anchors = computeIllustrationAnchors(this.session, this.illustrations);
-    if (anchors.length === 0) return;
-    // 2분할(split-h)로 원문·번역 두 패널이 동시에 보일 때는 넓은 쪽에만 배치한다
-    // (좁은 쪽엔 안 넣음 — 분할바를 넓혀둔 쪽이 곧 주로 읽는 쪽). 폭이 같으면 번역 쪽.
-    // 그 외(원문 치환/번역 미사용)는 양쪽에 배치해 토글해도 항상 보이게 한다.
-    const translationEnabled = this.session.meta.translation?.enabled === true;
-    const splitMode = translationEnabled && this.outputMode === "split-h";
-    if (splitMode) {
-      // splitRatio = 좌측(원문) 너비 비율. 0.5 초과면 원문이 넓다.
-      if (this.splitRatio > 0.5) this.placeInlineInBody(anchors);
-      else this.placeInlineInTranslation(anchors);
-    } else {
-      this.placeInlineInBody(anchors);
-      if (this.translationEditEl) this.placeInlineInTranslation(anchors);
+    const anchors = this.inlineAnchorsForDisplay();
+    if (anchors.length > 0 && this.session) {
+      // 2분할(split-h)로 원문·번역 두 패널이 동시에 보일 때는 넓은 쪽에만 배치한다
+      // (좁은 쪽엔 안 넣음 — 분할바를 넓혀둔 쪽이 곧 주로 읽는 쪽). 폭이 같으면 번역 쪽.
+      // 그 외(원문 치환/번역 미사용)는 양쪽에 배치해 토글해도 항상 보이게 한다.
+      const translationEnabled = this.session.meta.translation?.enabled === true;
+      const splitMode = translationEnabled && this.outputMode === "split-h";
+      if (splitMode) {
+        // splitRatio = 좌측(원문) 너비 비율. 0.5 초과면 원문이 넓다.
+        if (this.splitRatio > 0.5) this.placeInlineInBody(anchors, used);
+        else this.placeInlineInTranslation(anchors, used);
+      } else {
+        this.placeInlineInBody(anchors, used);
+        if (this.translationEditEl) this.placeInlineInTranslation(anchors, used);
+      }
     }
+    // 이번에 재배치되지 않은 풀 위젯만 제거 (나머지는 DOM 이동으로 재사용됨).
+    for (const [key, entry] of this.inlineWidgetPool) {
+      if (!used.has(key)) {
+        entry.el.remove();
+        this.inlineWidgetPool.delete(key);
+      }
+    }
+  }
+
+  /** 인라인 삽화 앵커 계산 (인라인 표시 조건을 모두 만족할 때만, 아니면 빈 배열). */
+  private inlineAnchorsForDisplay(): IllustrationAnchor[] {
+    if (!this.session || !this.sessionFile || !this.illustrations) return [];
+    const ill = this.session.meta.illustration;
+    if (ill?.enabled !== true) return [];
+    if (resolveIllustrationOutput(ill.output) !== "inline") return [];
+    return computeIllustrationAnchors(this.session, this.illustrations);
+  }
+
+  /**
+   * 풀에서 위젯을 꺼내거나(재사용) 새로 만든다. 재사용 시 variant 가 실제로
+   * 바뀐 노드만 캐러셀을 다시 그린다(sig 비교) — 안 바뀐 위젯은 <img> 를 건드리지
+   * 않아 리로드/높이 출렁임이 없다.
+   */
+  private acquireInlineWidget(
+    key: string,
+    nodeId: string
+  ): { el: HTMLElement; carousel: IllustrationCarousel; sig: string } {
+    const sig = this.variantSig(nodeId);
+    const existing = this.inlineWidgetPool.get(key);
+    if (existing) {
+      if (existing.sig !== sig) {
+        existing.carousel.render();
+        existing.sig = sig;
+      }
+      return existing;
+    }
+    const { el, carousel } = this.createInlineIllustrationEl(nodeId);
+    const entry = { el, carousel, sig };
+    this.inlineWidgetPool.set(key, entry);
+    return entry;
+  }
+
+  /** 노드 삽화 variant 상태 시그니처 — variant id 목록 + active id. 바뀌면 다시 그린다. */
+  private variantSig(nodeId: string): string {
+    if (!this.illustrations) return "";
+    const variants = listIllustrationVariants(this.illustrations, nodeId);
+    const activeId = getActiveIllustration(this.illustrations, nodeId)?.id ?? "";
+    return variants.map((v) => v.id).join(",") + "|" + activeId;
   }
 
   /**
@@ -3870,10 +4013,16 @@ export class SessionView extends ItemView {
   }
 
   /** 원문 본문에 인라인 위젯 삽입 — raw 앵커를 표시 offset 으로 바꿔 스팬 경계에. */
-  private placeInlineInBody(anchors: IllustrationAnchor[]): void {
+  private placeInlineInBody(
+    anchors: IllustrationAnchor[],
+    used: Set<string>
+  ): void {
     const body = this.bodyEl;
     if (!body) return;
     for (const anchor of anchors) {
+      const key = "b\n" + anchor.nodeId;
+      const entry = this.acquireInlineWidget(key, anchor.nodeId);
+      used.add(key);
       const target = this.rawOffsetToDisplayOffset(anchor.offset);
       // 앵커는 항상 문단 시작이라 스팬 경계에 떨어진다. 이미 꽂힌 위젯(0글자)은
       // 누적 길이에 영향이 없고, 같은 위치에선 위젯 뒤에 이어 붙어 순서를 지킨다.
@@ -3889,35 +4038,45 @@ export class SessionView extends ItemView {
         }
         acc += child.textContent?.length ?? 0;
       }
-      const el = this.createInlineIllustrationEl(anchor.nodeId);
-      body.insertBefore(el, ref);
-      this.inlineIllusEls.push(el);
+      // 이미 body 안에 있으면 insertBefore 가 위치만 옮긴다(<img> 리로드 없음).
+      body.insertBefore(entry.el, ref);
+      this.inlineIllusEls.push(entry.el);
     }
   }
 
   /** 번역 편집 영역에 인라인 위젯 삽입 — 앵커 이후 첫 문단 블록 앞에. */
-  private placeInlineInTranslation(anchors: IllustrationAnchor[]): void {
+  private placeInlineInTranslation(
+    anchors: IllustrationAnchor[],
+    used: Set<string>
+  ): void {
     const editEl = this.translationEditEl;
     if (!editEl) return;
     for (const anchor of anchors) {
+      const key = "t\n" + anchor.nodeId;
+      const entry = this.acquireInlineWidget(key, anchor.nodeId);
+      used.add(key);
       const block = this.translationBlocks.find(
         (b) => b.offset >= anchor.offset
       );
-      const el = this.createInlineIllustrationEl(anchor.nodeId);
-      editEl.insertBefore(el, block?.el ?? null);
-      this.inlineIllusEls.push(el);
+      // 번역 블록 재구성으로 위젯이 잠시 분리됐어도 insertBefore 가 새 편집
+      // 영역으로 다시 옮겨 붙인다(로드된 <img> 보존).
+      editEl.insertBefore(entry.el, block?.el ?? null);
+      this.inlineIllusEls.push(entry.el);
     }
   }
 
   /** 인라인 삽화 위젯 — 출력 뷰와 같은 캐러셀(variant 넘김/라이트박스/재생성) 재사용. */
-  private createInlineIllustrationEl(nodeId: string): HTMLElement {
+  private createInlineIllustrationEl(nodeId: string): {
+    el: HTMLElement;
+    carousel: IllustrationCarousel;
+  } {
     const el = document.createElement("div");
     el.classList.add("ggai-inline-illustration");
     el.setAttribute("contenteditable", "false");
     el.dataset.illustNode = nodeId;
     const carouselEl = document.createElement("div");
     el.appendChild(carouselEl);
-    new IllustrationCarousel(carouselEl, {
+    const carousel = new IllustrationCarousel(carouselEl, {
       resolveSrc: (v) => this.resolveIllustrationSrc(v),
       getVariants: () =>
         this.illustrations
@@ -3935,7 +4094,7 @@ export class SessionView extends ItemView {
       onToggleFavorite: (variantId) =>
         this.toggleIllustrationFavoriteFor(nodeId, variantId),
     });
-    return el;
+    return { el, carousel };
   }
 
   /** 삽화 variant 즐겨찾기 토글 — 동기 반영 + 자기 이벤트 무시 저장. */
@@ -4378,6 +4537,24 @@ export class SessionView extends ItemView {
   }
 
   // --- caret helpers ---
+
+  /**
+   * 매크로 표시값이 실제로 바뀔 때만 본문을 다시 그린다. 다른 시나리오 변경·
+   * 페르소나 변경·요약 저장 등으로 이벤트가 와도 이 세션의 표시 텍스트가 그대로면
+   * DOM 재렌더를 건너뛴다(긴 세션에서 무관한 이벤트마다 전체 재렌더하던 비용 제거).
+   */
+  private redrawBodyIfDisplayChanged(): void {
+    const before = this.displayText;
+    this.refreshDisplayBaseline();
+    if (this.displayText === before) return;
+    const hadFocus = document.activeElement === this.bodyEl;
+    const caret = this.getCaretOffset();
+    this.suppressEvents = true;
+    this.renderBodySpans();
+    this.setCaretOffset(caret);
+    if (hadFocus) this.bodyEl?.focus({ preventScroll: true });
+    this.suppressEvents = false;
+  }
 
   private redrawBodyPreservingCaret(): void {
     const hadFocus = document.activeElement === this.bodyEl;

@@ -94,6 +94,9 @@ export class ChoiceModal extends Modal {
     private readonly onResult: (value: string | null) => void
   ) {
     super(app);
+    // 세션 본문(contenteditable)이 포커스인 채 열리는 경우(번역 확인 등) 닫힐 때
+    // 포커스/선택 복원이 본문을 최상단으로 스크롤시킨다 — 복원 끔 (modal-shell 과 동일).
+    this.shouldRestoreSelection = false;
   }
 
   onOpen(): void {
@@ -141,6 +144,8 @@ export class ConfirmModal extends Modal {
     private readonly onResult: (confirmed: boolean) => void
   ) {
     super(app);
+    // ChoiceModal 과 동일 — 닫힐 때 세션 본문 재포커스로 인한 스크롤 점프 방지.
+    this.shouldRestoreSelection = false;
   }
 
   onOpen(): void {

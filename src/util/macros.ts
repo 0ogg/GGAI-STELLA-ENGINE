@@ -31,6 +31,8 @@ export interface MacroContext {
   charCreatorNotes?: string;
   charVersion?: string;
   lastMessage?: string;
+  /** 마지막 노드 이후 경과 표현 (예: "3 hours") — ST {{idle_duration}} 호환. */
+  idleDuration?: string;
   variables?: Record<string, string>;
   choices?: Record<string, string>;
 }
@@ -74,6 +76,7 @@ const SUPPORTED_MACROS: ReadonlyArray<keyof MacroContext> = [
   "charCreatorNotes",
   "charVersion",
   "lastMessage",
+  "idleDuration",
 ];
 const SUPPORTED_SET = new Set<string>(SUPPORTED_MACROS);
 const MACRO_ALIASES: ReadonlyMap<string, keyof MacroContext> = new Map([
@@ -93,6 +96,7 @@ const MACRO_ALIASES: ReadonlyMap<string, keyof MacroContext> = new Map([
   ["charcreatornotes", "charCreatorNotes"],
   ["charversion", "charVersion"],
   ["lastmessage", "lastMessage"],
+  ["idle_duration", "idleDuration"],
 ]);
 
 function resolveMacro(match: string, key: string, ctx: MacroContext): string {

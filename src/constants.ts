@@ -32,6 +32,7 @@ export const SUBFOLDERS = [
   "PROMPTS",
   "PRESETS",
   "USERS",
+  "GROUPS",
 ] as const;
 
 export type SubFolder = (typeof SUBFOLDERS)[number];

@@ -382,8 +382,11 @@ export class BranchSection {
   // ??? 紐⑤뱶 2: ?꾩껜 ?몃━ (?ㅼ뿬?곌린 媛怨꾨룄) ???????????????
 
   private renderTreeMap(parent: HTMLElement, session: StellaSession): void {
-    const rootId = session.meta.rootId;
-    if (!rootId || !session.nodes[rootId]) {
+    // \uB300\uCCB4 \uCCAB \uBA54\uC2DC\uC9C0(alternate greetings)\uB294 \uD615\uC81C \uB8E8\uD2B8(parent==null)\uB85C \uC313\uC778\uB2E4.
+    // \uB9F5\uC740 meta.rootId \uD558\uB098\uAC00 \uC544\uB2C8\uB77C \uBAA8\uB4E0 \uB8E8\uD2B8\uC5D0\uC11C \uADF8\uB824\uC57C, \uB2E4\uB978 \uCCAB \uBA54\uC2DC\uC9C0\uB85C
+    // \uBC14\uAFD4 \uC774\uC5B4\uC4F4 \uBD84\uAE30\uB3C4 \uBCF4\uC778\uB2E4.
+    const rootIds = getRootIds(session);
+    if (rootIds.length === 0) {
       parent.createDiv({ cls: "ggai-detail-empty", text: "\uB8E8\uD2B8 \uB178\uB4DC\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4." });
       return;
     }
@@ -395,9 +398,14 @@ export class BranchSection {
     for (let i = 0; i < activePath.length - 1; i++) {
       activeChildOf.set(activePath[i].id, activePath[i + 1].id);
     }
+    // 활성 경로가 속한 루트를 맨 앞으로 (현재 라인이 왼쪽 열에 고정되도록).
+    const orderedRootIds =
+      this.mapSortMode === "active" && activePath.length > 0
+        ? orderActiveRootFirst(rootIds, activePath[0].id)
+        : rootIds;
     const layout = buildTreeMapLayout(
       session,
-      rootId,
+      orderedRootIds,
       this.mapSortMode === "active" ? activeChildOf : undefined
     );
     if (layout.items.length === 0) {
@@ -953,13 +961,16 @@ interface TreeMapItem {
 
 function buildTreeMapLayout(
   session: StellaSession,
-  rootId: string,
+  rootIds: string[],
   activeChildOf?: Map<string, string>
 ): { items: TreeMapItem[]; width: number; height: number } {
   const items: TreeMapItem[] = [];
   const rows: string[][] = [];
   const seen = new Set<string>();
-  const queue: Array<{ id: string; depth: number }> = [{ id: rootId, depth: 0 }];
+  const queue: Array<{ id: string; depth: number }> = rootIds.map((id) => ({
+    id,
+    depth: 0,
+  }));
 
   while (queue.length > 0) {
     const { id, depth } = queue.shift()!;
@@ -1003,6 +1014,24 @@ function buildTreeMapLayout(
     ),
     height: Math.max(240, rows.length * MAP_Y_GAP + MAP_NODE_H + MAP_PAD),
   };
+}
+
+/** 세션의 모든 루트(parent==null) — 생성순. 대체 첫 메시지가 형제 루트로 들어온다. */
+function getRootIds(session: StellaSession): string[] {
+  return Object.values(session.nodes)
+    .filter((n) => n.parent == null)
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map((n) => n.id);
+}
+
+/** 활성 경로가 속한 루트를 맨 앞으로 옮긴다 (맵 왼쪽 열 고정). */
+function orderActiveRootFirst(rootIds: string[], activeRootId: string): string[] {
+  const idx = rootIds.indexOf(activeRootId);
+  if (idx <= 0) return rootIds;
+  const copy = rootIds.slice();
+  const [active] = copy.splice(idx, 1);
+  copy.unshift(active);
+  return copy;
 }
 
 /** 활성 경로 자식을 맨 앞으로 — BFS 열 배치에서 현재 라인이 왼쪽 열에 고정된다. */

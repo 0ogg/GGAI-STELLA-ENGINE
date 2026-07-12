@@ -28,6 +28,7 @@ import {
   collectAnchorChain,
   composeSummaryContext,
   countGenerationsSince,
+  lastConfirmedGenerationNode,
   extractNewPassage,
   parseSummaryResponse,
   planSummaryBoundaries,
@@ -2149,6 +2150,13 @@ asyncTests.push((async () => {
   assert.equal(countGenerationsSince(session, "d", "b"), 1); // d
   assert.equal(countGenerationsSince(session, "b", "b"), 0);
 
+  // 자동 요약 지연 — 방금 생성된 마지막 턴은 빼고 직전 확정 턴을 요약 끝점으로.
+  // 경로 [root,a,b,c] 의 AI 노드는 a,b,c → 끝에서 두 번째 = b.
+  assert.equal(lastConfirmedGenerationNode(session, "c"), "b");
+  assert.equal(lastConfirmedGenerationNode(session, "d"), "b"); // 재생성 분기도 동일
+  assert.equal(lastConfirmedGenerationNode(session, "b"), "a");
+  assert.equal(lastConfirmedGenerationNode(session, "a"), undefined); // AI 노드 1개뿐
+
   // 새 패시지 추출 — 앵커 시점 본문과의 공통 접두사 이후.
   const textAtB = spansToText(buildSpans(session, "b"));
   const textAtC = spansToText(buildSpans(session, "c"));
@@ -2230,6 +2238,27 @@ asyncTests.push((async () => {
     extractAnchorSentence("一瞬で鉄になった。\n\n「…ご主人様？"),
     "「…ご主人様？"
   );
+  // 닫히지 않은 대사 안에서는 。？에서도 문장을 자르지 않는다 — 「부터 통째로
+  // 앵커에 넣어야 모델이 대사 중임을 알고 닫는다.
+  assert.equal(
+    extractAnchorSentence("彼は頷いた。\n「…ご主人様？いや、違う。何かがおかしい"),
+    "「…ご主人様？いや、違う。何かがおかしい"
+  );
+  // 닫힌 대사(。」) 뒤는 정상 경계 — 지문만 앵커.
+  assert.equal(
+    extractAnchorSentence("「もう行こう。」彼は歩き出した。"),
+    "彼は歩き出した。"
+  );
+  // 앞 문단의 짝 안 맞는 「 는 문단 경계(줄바꿈)에서 리셋 — 다음 문단에 영향 없음.
+  assert.equal(
+    extractAnchorSentence("「彼は言った\n彼女は頷いた。そして立ち上がった。"),
+    "そして立ち上がった。"
+  );
+  // 초장문 미종결 대사는 잘려도 여는 따옴표를 앞에 남긴다.
+  const longQuote = "彼は頷いた。「" + "あ".repeat(300) + "。だから待ってくれ";
+  const cappedQuote = extractAnchorSentence(longQuote)!;
+  assert.equal(cappedQuote[0], "「");
+  assert.ok(cappedQuote.length <= 240);
   // 종결 부호 + 전각 닫는 괄호(。」) 뒤에 바로 이어지는 문장.
   assert.equal(
     extractAnchorSentence("「もう行こう。」彼は歩き出した。"),

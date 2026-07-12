@@ -40,7 +40,7 @@ export class IllustrationService {
   async generateForNode(
     sessionFile: string,
     nodeId?: string,
-    opts?: { signal?: AbortSignal }
+    opts?: { signal?: AbortSignal; origin?: string }
   ): Promise<IllustrateResult> {
     if (!this.plugin.ai.isAvailable()) {
       return fail("GGAI Core 가 설치/활성화되어 있지 않습니다.");
@@ -113,6 +113,7 @@ export class IllustrationService {
       imageProfileId,
       kind: "ai-illustration",
       signal: opts?.signal,
+      origin: opts?.origin,
     });
   }
 
@@ -124,7 +125,7 @@ export class IllustrationService {
     sessionFile: string,
     nodeId: string,
     input: { prompt: string; negativePrompt?: string },
-    opts?: { signal?: AbortSignal }
+    opts?: { signal?: AbortSignal; origin?: string }
   ): Promise<IllustrateResult> {
     if (!this.plugin.ai.isAvailable()) {
       return fail("GGAI Core 가 설치/활성화되어 있지 않습니다.");
@@ -148,6 +149,7 @@ export class IllustrationService {
       promptId: active?.promptId,
       kind: "illustration-regen",
       signal: opts?.signal,
+      origin: opts?.origin,
     });
   }
 
@@ -162,6 +164,8 @@ export class IllustrationService {
       promptId?: string;
       kind: "ai-illustration" | "illustration-regen";
       signal?: AbortSignal;
+      /** 발신 뷰 토큰 — 뷰가 스스로 갱신하는 경우 자기 이벤트 에코를 skip 시킨다. */
+      origin?: string;
     }
   ): Promise<IllustrateResult> {
     let result;
@@ -198,7 +202,11 @@ export class IllustrationService {
         negativePrompt: input.negativePrompt,
         kind: input.kind,
       });
-      await this.plugin.store.saveSessionIllustrations(sessionFile, illustrations);
+      await this.plugin.store.saveSessionIllustrations(
+        sessionFile,
+        illustrations,
+        input.origin ? { origin: input.origin } : undefined
+      );
       return { ok: true, nodeId, variantId, errors: [] };
     } catch (err) {
       return fail("삽화 저장 실패: " + msgOf(err));

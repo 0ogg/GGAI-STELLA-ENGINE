@@ -104,9 +104,6 @@ export interface StellaPreset {
   params?: PromptPresetParams;
   /** 연결된 프롬프트 세트의 id (StellaPromptPreset.meta.id 참조). */
   promptSetId?: string;
-  translation?: TranslationActiveSettings;
-  illustration?: IllustrationActiveSettings;
-  summarize?: SummaryActiveSettings;
   /** NAI 형식으로 보내기 — 텍스트 컴플리션 전송 시 역할 토큰으로 감싼다. */
   naiFormat?: boolean;
   /** 이어쓰기 이음새 보정 (챗 모델) — 마지막 문장 반복을 유도한 뒤 응답에서 제거. */
@@ -158,9 +155,6 @@ export function presetToActiveSettings(preset: StellaPreset): ActiveSettings {
     modelProfileId: preset.modelProfileId,
     params: preset.params ? { ...preset.params } : undefined,
     promptSetId: preset.promptSetId,
-    translation: preset.translation ? { ...preset.translation } : undefined,
-    illustration: preset.illustration ? { ...preset.illustration } : undefined,
-    summarize: preset.summarize ? { ...preset.summarize } : undefined,
     naiFormat: preset.naiFormat,
     continueAnchor: preset.continueAnchor,
   };

@@ -24,7 +24,10 @@ import { TranslationService } from "./services/translation-service";
 import { SummaryService } from "./services/summary-service";
 import { IllustrationService } from "./services/illustration-service";
 import { ParagraphRegenService } from "./services/paragraph-regen-service";
-import { ProactiveService } from "./services/proactive-service";
+import {
+  ProactiveService,
+  type ProactiveScheduleEntry,
+} from "./services/proactive-service";
 import {
   SettingsPanelRegistry,
   type SettingsPanel,
@@ -113,6 +116,8 @@ export interface StellaPluginData {
   sessionAnchor?: Record<string, SessionScrollAnchor>;
   /** 세션별 안 읽은 AI 응답 — 보고 있지 않을 때 생성이 끝나면 쌓이고, 세션을 보면 지워진다. key = sessionFile. */
   sessionUnread?: Record<string, SessionUnread>;
+  /** 선채팅(P1) 발화 예약 — key = sessionFile, 값 = 다음 발화 예정 시각(지터). 스케줄러가 관리. */
+  proactiveSchedule?: Record<string, ProactiveScheduleEntry>;
   /** 우측 디테일 뷰 UI 상태(섹션 접힘 등) 영속. */
   detailUi?: {
     basic?: Record<string, unknown>;
@@ -262,6 +267,8 @@ export default class StellaEnginePlugin extends Plugin {
     this.illustration = new IllustrationService(this);
     this.paragraphRegen = new ParagraphRegenService(this);
     this.proactive = new ProactiveService(this);
+    // 선채팅 스케줄러 — 예약 확인 틱 + 켜기/끄기·활동 감지 + 시작 스윕.
+    this.proactive.startScheduler();
     this.settingsPanels = new SettingsPanelRegistry(() =>
       this.store.trigger("settings-panels-changed")
     );
@@ -416,6 +423,11 @@ export default class StellaEnginePlugin extends Plugin {
           delete map[file];
           patch.sessionUnread = map;
         }
+        if (this.data.proactiveSchedule?.[file] !== undefined) {
+          const map = { ...this.data.proactiveSchedule };
+          delete map[file];
+          patch.proactiveSchedule = map;
+        }
         if (Object.keys(patch).length > 0) void this.savePluginData(patch);
       })
     );
@@ -436,6 +448,13 @@ export default class StellaEnginePlugin extends Plugin {
           map[newFile] = prevUnread;
           patch.sessionUnread = map;
         }
+        const prevSchedule = this.data.proactiveSchedule?.[oldFile];
+        if (prevSchedule !== undefined) {
+          const map = { ...this.data.proactiveSchedule };
+          delete map[oldFile];
+          map[newFile] = prevSchedule;
+          patch.proactiveSchedule = map;
+        }
         if (Object.keys(patch).length > 0) void this.savePluginData(patch);
       })
     );
@@ -445,7 +464,10 @@ export default class StellaEnginePlugin extends Plugin {
       const view = this.app.workspace.activeLeaf?.view;
       if (isSessionHostView(view)) {
         const f = view.getSessionFile();
-        if (f) void this.clearSessionUnread(f);
+        if (f) {
+          void this.clearSessionUnread(f);
+          void this.proactive?.noteSessionSeen(f);
+        }
       }
     });
   }
@@ -878,8 +900,9 @@ export default class StellaEnginePlugin extends Plugin {
 
   rememberActiveSessionFile(sessionFile: string | null): void {
     if (!sessionFile) return;
-    // 세션이 활성화됐다 = 사용자가 보기 시작했다 → 안 읽음 해제.
+    // 세션이 활성화됐다 = 사용자가 보기 시작했다 → 안 읽음 해제 + 복귀 독촉 부재 시계 리셋.
     void this.clearSessionUnread(sessionFile);
+    void this.proactive?.noteSessionSeen(sessionFile);
     if (this.data.lastActiveSessionFile === sessionFile) return;
     void this.savePluginData({ lastActiveSessionFile: sessionFile });
     // 같은 세션 뷰 leaf 안에서 세션을 바꾸면 active-leaf-change 가 안 터진다.
@@ -1562,7 +1585,7 @@ class StellaSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("선채팅 빈도")
       .setDesc(
-        "캐릭터가 먼저 말을 거는 평균 빈도입니다. 세션별 켜고 끄기는 채팅 세션 하단 리모컨의 종(🔔) 버튼으로 합니다."
+        "캐릭터가 먼저 말을 거는 평균 빈도입니다 (가끔 = 3~8시간, 보통 = 1~3시간, 자주 = 15~45분 간격에서 매번 랜덤). 마지막 대화 시점부터 계산합니다. 세션별 켜고 끄기는 채팅 세션 하단 리모컨의 종(🔔) 버튼으로 합니다."
       )
       .addDropdown((drop) =>
         drop

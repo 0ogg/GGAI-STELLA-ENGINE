@@ -32,6 +32,7 @@ import {
   countGenerationsSince,
   DEFAULT_SUMMARY_THRESHOLD,
   extractNewPassage,
+  lastConfirmedGenerationNode,
   parseCompactionResponse,
   parseSummaryResponse,
   planCompaction,
@@ -104,7 +105,11 @@ export class SummaryService {
     const settings = await this.plugin.resolveActiveSettings(sessionFile);
     if (settings.summarize?.enabled !== true) return skip();
 
-    const target = leafId ?? session.meta.activeLeafId;
+    const leaf = leafId ?? session.meta.activeLeafId;
+    // 방금 생성된 마지막 턴은 재생성으로 버려질 수 있으니 요약 대상에서 뺀다 —
+    // 직전 확정 턴까지만 자동 요약한다(6턴째가 끝나야 5턴째 요약, 재생성은 대상 불변).
+    const target = lastConfirmedGenerationNode(session, leaf);
+    if (!target) return skip();
     const summaries = await this.plugin.store.getSessionSummaries(sessionFile);
     const chain = collectAnchorChain(session, summaries, target);
     const last = chain.length > 0 ? chain[chain.length - 1] : null;

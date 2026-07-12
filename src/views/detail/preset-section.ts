@@ -258,9 +258,6 @@ export class PresetSection {
         modelProfileId: active.modelProfileId,
         params: active.params ? { ...active.params } : undefined,
         promptSetId: active.promptSetId,
-        translation: active.translation ? { ...active.translation } : undefined,
-        illustration: active.illustration ? { ...active.illustration } : undefined,
-        summarize: active.summarize ? { ...active.summarize } : undefined,
         naiFormat: active.naiFormat,
         continueAnchor: active.continueAnchor,
       };
@@ -286,9 +283,6 @@ export class PresetSection {
         modelProfileId: active.modelProfileId,
         params: active.params ? { ...active.params } : undefined,
         promptSetId: active.promptSetId,
-        translation: active.translation ? { ...active.translation } : undefined,
-        illustration: active.illustration ? { ...active.illustration } : undefined,
-        summarize: active.summarize ? { ...active.summarize } : undefined,
         naiFormat: active.naiFormat,
         continueAnchor: active.continueAnchor,
       };
