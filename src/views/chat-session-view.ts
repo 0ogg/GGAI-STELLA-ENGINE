@@ -512,12 +512,20 @@ export class ChatSessionView extends ItemView {
    * 그룹 챗이 아니면 undefined (일반 단일 캐릭터 생성).
    */
   private chooseSpeakerForNext(): string | undefined {
+    if (!this.session) return undefined;
+    return this.chooseSpeaker(buildChatMessages(this.session));
+  }
+
+  /**
+   * 주어진 대화 이력을 기준으로 다음 발화자를 판결한다 (지목 > 이름 불림 > 가중 랜덤).
+   * 재생성은 갈아끼울 메시지를 뺀 이력을 넘겨 "누가 답할지"부터 다시 정한다.
+   */
+  private chooseSpeaker(msgs: ChatSessionMessage[]): string | undefined {
     if (!this.session || !this.isGroupChat()) return undefined;
     if (this.pinnedSpeakerId && this.memberOf(this.pinnedSpeakerId)) {
       return this.pinnedSpeakerId;
     }
     const hostId = this.session.meta.scenarioId;
-    const msgs = buildChatMessages(this.session);
     const last = msgs[msgs.length - 1];
     const speakerOf = (nodeId: string) =>
       this.session!.nodes[nodeId]?.speaker ?? hostId;
@@ -1746,9 +1754,10 @@ export class ChatSessionView extends ItemView {
     const last = msgs[msgs.length - 1];
     if (!last || last.role !== "assistant") return;
 
-    // 재생성은 원래 그 메시지를 말한 발화자를 유지한다 (발화자 교체는 G3).
+    // 그룹 챗 재생성 = 발화자부터 다시 판결 — 갈아끼울 메시지를 뺀 이력 기준으로
+    // "누가 답할지"를 새로 정한다(지목 중이면 그 캐릭터). 그룹이 아니면 undefined.
     this.cancelAutoChain();
-    const speakerId = this.session.nodes[last.nodeId]?.speaker;
+    const speakerId = this.chooseSpeaker(msgs.slice(0, -1));
     const leafId = this.session.meta.activeLeafId;
     if (last.nodeId === leafId) {
       const parent = this.session.nodes[leafId]?.parent;

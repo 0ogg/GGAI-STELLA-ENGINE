@@ -49,7 +49,7 @@ export class GroupMemberModal extends Modal {
   }
 
   onOpen(): void {
-    this.titleEl.setText("그룹 멤버 관리");
+    this.titleEl.setText("그룹 채팅 관리");
     const { toolbar, body, footerMain } = createModalShell(this, "l", {
       toolbar: true,
     });

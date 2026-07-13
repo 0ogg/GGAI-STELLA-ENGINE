@@ -61,7 +61,7 @@ import {
 import { paramsToOverride } from "./generation-params";
 import { buildGroupMemberLorebook } from "./group-lorebook";
 import { formatIdleEn } from "./idle-duration";
-import { resolveNaiFormat, resolveRoleMode } from "./model-kind-policy";
+import { resolveNaiFormat } from "./model-kind-policy";
 import { normalizeMessagesForChat } from "./normalize-messages";
 import { resolveActiveLorebooks } from "./resolve-active-lorebooks";
 import { scanPrompts } from "./scan-prompts";
@@ -333,10 +333,6 @@ export async function planSessionRequest(
   }
 
   const tokenBudget = settings.params?.maxContext ?? 16000;
-  const novelChatRoleMode = resolveRoleMode(
-    profile.kind,
-    session.meta.novelChatRoleMode
-  );
 
   // 세션을 변형하지 않도록 복사본으로 빌드. setvar 등은 buildContext 가
   // 이 복사본을 in-place 로 갱신하므로, 빌드 후 그 값을 돌려준다.
@@ -361,7 +357,6 @@ export async function planSessionRequest(
     persona: { name: user.name, description: user.description },
     lorebooks,
     mode: session.meta.mode,
-    novelChatRoleMode,
     // 챗 세션 로그는 span author 추측이 아니라 노드에서 직접 만든다 —
     // 연속 같은 역할 메시지가 구분 없이 붙는 문제 방지 (챗 모드 스펙.md).
     // 그룹 챗은 메시지마다 발화자 이름을 붙인다 (ST force-names 호환).
@@ -377,9 +372,7 @@ export async function planSessionRequest(
               memberNameById
             )
           : buildChatSessionLog(session, leafId, opts.excludeTailAssistant === true)
-        : buildSessionLog(parentSpans, session.meta.mode, {
-            novelChatRoleMode,
-          }),
+        : buildSessionLog(parentSpans, session.meta.mode),
     memory: session.meta.memory,
     authorNote: session.meta.authorNote,
     summary: summaryContext || undefined,

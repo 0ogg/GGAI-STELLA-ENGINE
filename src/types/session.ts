@@ -48,8 +48,6 @@ export interface SessionSeriesLink {
   prevId?: string;
 }
 
-export type NovelChatRoleMode = "merged" | "split";
-
 /** 연속 텍스트 조각 — 한 저자의 텍스트 한 덩어리. */
 export interface Span {
   author: "ai" | "user";
@@ -195,9 +193,6 @@ export interface SessionMeta {
     stickyRemaining: number;
     cooldownRemaining: number;
   }>;
-  /** Chat completion profiles can receive NovelAI-style merged story text or split assistant/user spans. */
-  novelChatRoleMode?: NovelChatRoleMode;
-
   /**
    * 시나리오에 붙은 로어북 중 "이번 세션에서만 끄고 싶은" id 목록.
    * 컨텍스트 빌드 시 시나리오의 default + extra 에서 이 id 들을 제외한다.

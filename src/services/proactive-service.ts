@@ -21,11 +21,16 @@
  */
 import type StellaEnginePlugin from "../main";
 import type { SessionChangeDetail } from "../state/store";
-import type { SessionNode } from "../types/session";
+import type { SessionNode, StellaSession } from "../types/session";
 import { planSessionRequest } from "../util/build-session-context";
 import { trimChatCompletionOutput } from "../util/text-completion-prompt";
 import { buildSpans, spansToText } from "../util/session-text";
-import { CHAT_MESSAGE_SEPARATOR } from "../util/chat-messages";
+import { buildChatMessages, CHAT_MESSAGE_SEPARATOR } from "../util/chat-messages";
+import {
+  parseTalkativeness,
+  pickNextSpeaker,
+  type GroupSpeakerCandidate,
+} from "../util/group-speaker";
 import { formatIdleEn } from "../util/idle-duration";
 import { uuidv4 } from "../util/uuid";
 import { isViewingSession } from "../views/session-host";
@@ -331,6 +336,78 @@ export class ProactiveService {
     }
   }
 
+  /**
+   * 그룹 챗 선채팅의 발화자 — 멤버 중 먼저 말 걸 1명을 뽑는다 (P1 × G2).
+   * 챗 뷰의 다음 발화자 결정과 같은 규칙(이름 불림 > 수다스러움 가중 랜덤 >
+   * 미발화 보정, 연속 발화 상한). 그룹이 아니거나 멤버가 1명 이하면 null.
+   */
+  private async resolveGroupSpeaker(
+    session: StellaSession
+  ): Promise<{ id: string; name: string } | null> {
+    if (session.meta.mode !== "chat" || !session.meta.groupId) return null;
+    const gi = await this.plugin.store
+      .getGroupById(session.meta.groupId)
+      .catch(() => null);
+    if (!gi || gi.group.members.length < 2) return null;
+
+    const scenarios = await this.plugin.store.getScenarios().catch(() => []);
+    const byId = new Map(
+      scenarios.map(
+        (i) => [i.scenario.data?.extensions?.stella?.id, i] as const
+      )
+    );
+    const candidates: GroupSpeakerCandidate[] = gi.group.members.flatMap((m) => {
+      const sc = byId.get(m.scenarioId);
+      const name = sc?.scenario.data?.name?.trim();
+      if (!name) return [];
+      return [
+        {
+          scenarioId: m.scenarioId,
+          name,
+          talkativeness: parseTalkativeness(
+            (sc?.scenario.data as any)?.extensions?.talkativeness
+          ),
+        },
+      ];
+    });
+    if (candidates.length < 2) return null;
+
+    const hostId = session.meta.scenarioId;
+    const msgs = buildChatMessages(session);
+    const last = msgs[msgs.length - 1];
+    const speakerOf = (nodeId: string) =>
+      session.nodes[nodeId]?.speaker ?? hostId;
+    const lastSpeakerId =
+      last?.role === "assistant" ? speakerOf(last.nodeId) : null;
+    let streak = 0;
+    if (lastSpeakerId) {
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].role !== "assistant") break;
+        if (speakerOf(msgs[i].nodeId) !== lastSpeakerId) break;
+        streak++;
+      }
+    }
+    const recentSpeakerIds = msgs
+      .filter((m) => m.role === "assistant")
+      .slice(-4)
+      .map((m) => speakerOf(m.nodeId));
+
+    const pickedId =
+      pickNextSpeaker({
+        candidates,
+        lastMessageText: last?.text ?? "",
+        lastSpeakerId,
+        lastSpeakerStreak: streak,
+        maxConsecutiveSame: gi.group.maxConsecutiveSpeaker,
+        recentSpeakerIds,
+      }) ?? hostId;
+    const name =
+      candidates.find((c) => c.scenarioId === pickedId)?.name ??
+      candidates.find((c) => c.scenarioId === hostId)?.name ??
+      "Character";
+    return { id: pickedId, name };
+  }
+
   private async sendInner(
     sessionFile: string,
     opts: { returnNudge?: boolean }
@@ -345,7 +422,14 @@ export class ProactiveService {
     // 열린 세션창의 미저장 편집 커밋 — 방금 친 메시지가 컨텍스트에 빠지지 않게.
     await plugin.flushSessionEdits(sessionFile);
 
-    const plan = await planSessionRequest(plugin, sessionFile, {});
+    // 그룹 챗이면 먼저 말 걸 발화자를 뽑는다 (수다스러움 가중 랜덤 · 이름 불림 등).
+    // 그 발화자 카드가 풀 카드로 조립되도록 speakerId 를 전송본에 넘긴다.
+    const groupSpeaker = await this.resolveGroupSpeaker(session);
+    const plan = await planSessionRequest(
+      plugin,
+      sessionFile,
+      groupSpeaker ? { speakerId: groupSpeaker.id } : {}
+    );
     if ("error" in plan) return { ok: false, error: plan.error };
     if (plan.payload.kind !== "chat") {
       return {
@@ -359,7 +443,9 @@ export class ProactiveService {
     // 치환이 끝난 상태라 여기서 {{char}} 를 쓰면 안 풀린다).
     const { profile: userProfile } = await plugin.resolveActiveUserProfile();
     const userName = userProfile?.name?.trim() || "User";
-    const charName = plan.meta.scenarioName?.trim() || "Character";
+    // 그룹이면 뽑힌 발화자 이름, 아니면 호스트(시나리오) 이름.
+    const charName =
+      groupSpeaker?.name ?? (plan.meta.scenarioName?.trim() || "Character");
     const now = new Date();
     const lastAt =
       session.nodes[session.meta.activeLeafId]?.createdAt ?? now.getTime();
@@ -422,6 +508,8 @@ export class ProactiveService {
         tokensOut: res.usage.outputTokens,
       },
     };
+    // 그룹 챗 — 이 선발화의 발화자 귀속 (말풍선 라벨/아바타/다음 발화자 결정 재료).
+    if (groupSpeaker) node.speaker = groupSpeaker.id;
     session.nodes[node.id] = node;
     session.meta.activeLeafId = node.id;
     session.meta.modifiedAt = Date.now();

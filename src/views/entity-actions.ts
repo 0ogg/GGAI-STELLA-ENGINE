@@ -388,7 +388,6 @@ export async function startNextEpisode(
       : undefined;
     ns.meta.variables = prev.meta.variables ? { ...prev.meta.variables } : undefined;
     ns.meta.personaFile = prev.meta.personaFile;
-    ns.meta.novelChatRoleMode = prev.meta.novelChatRoleMode;
     ns.meta.enabledAgents = prev.meta.enabledAgents
       ? [...prev.meta.enabledAgents]
       : undefined;

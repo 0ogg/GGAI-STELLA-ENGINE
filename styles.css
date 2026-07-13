@@ -737,7 +737,7 @@
 /* 인라인 삽화 — 본문/번역 편집 영역 안의 원자 블록(contenteditable=false, 텍스트 0글자).
    caret 이 안으로 들어가지 않고 선택/편집은 문단 텍스트에서만 일어난다. */
 .ggai-inline-illustration {
-  margin: 0.55em 0;
+  margin: 0.55em 0 1.6em;
   user-select: none;
   -webkit-user-select: none;
 }
@@ -1363,11 +1363,11 @@ input.ggai-vs-slider[type="range"] {
   outline: none;
 }
 /* 구분자(줄바꿈) — 편집 불가 원자 위젯이라 caret 이 문단 안에만 머문다.
-   보기 설정: 줄바꿈 자리 line-height 로 문단 사이 간격 (원문 뷰 .ggai-para-gap 과 동일). */
+   보기 설정: 기본 줄 높이(1.75em) + 추가 여백(px) — 원문 뷰 .ggai-para-gap 과 동일. */
 .ggai-tr-sep {
   user-select: text;
   white-space: pre-wrap;
-  line-height: var(--ggai-view-para-gap, 36px);
+  line-height: calc(1.75em + var(--ggai-view-para-gap, 0px));
   vertical-align: top;
 }
 /* 보기 설정: 문단 첫 줄 들여쓰기 (원문 뷰 .ggai-para-indent 와 동일). */
@@ -3619,6 +3619,51 @@ body.is-mobile.ggai-stella-panel-active .workspace-tab-header-container {
   pointer-events: none !important;
 }
 
+/* 모바일 상단 뷰어 툴바 — 뷰어 아이콘(전환/번역/되돌리기/갤러리/로비)은 세션창
+   헤더(.view-header) 안에 들어간다. 옵시디언 기본은 이 헤더가 넘쳐도 잘라버려(overflow
+   막힘) 슬라이드가 안 된다 — 그래서 넘어간 아이콘에 손이 닿지 않았다. 여기에 가로
+   스크롤을 열고(일부 테마가 .view-header 전역에 하는 그 처리를 우리 세션창에만),
+   얇은 스크롤바만 드러낸다. 세로 스크롤은 막아 헤더 높이는 그대로 둔다. */
+body.is-mobile
+  .workspace-leaf-content[data-type="ggai-stella-session"]
+  .view-header,
+body.is-mobile
+  .workspace-leaf-content[data-type="ggai-stella-chat-session"]
+  .view-header {
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--background-modifier-border) 50%, transparent)
+    transparent;
+}
+body.is-mobile
+  .workspace-leaf-content[data-type="ggai-stella-session"]
+  .view-header::-webkit-scrollbar,
+body.is-mobile
+  .workspace-leaf-content[data-type="ggai-stella-chat-session"]
+  .view-header::-webkit-scrollbar {
+  height: 1px;
+}
+body.is-mobile
+  .workspace-leaf-content[data-type="ggai-stella-session"]
+  .view-header::-webkit-scrollbar-track,
+body.is-mobile
+  .workspace-leaf-content[data-type="ggai-stella-chat-session"]
+  .view-header::-webkit-scrollbar-track {
+  background: transparent;
+}
+body.is-mobile
+  .workspace-leaf-content[data-type="ggai-stella-session"]
+  .view-header::-webkit-scrollbar-thumb,
+body.is-mobile
+  .workspace-leaf-content[data-type="ggai-stella-chat-session"]
+  .view-header::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--background-modifier-border) 50%, transparent);
+  border-radius: 1px;
+}
+
 /* 모바일 패널 모드: 위 규칙이 상단 내비/툴바를 지워 본문이 화면 맨 위(시스템 상태바·
    모바일 툴바 영역)까지 붙는다. 첫 줄이 그 영역에 가려 안 보이는 문제를 막기 위해
    스크롤 영역(body-wrap) 안쪽에 여백을 둔다 — 컨테이너 padding 이라 스크롤을 조금만
@@ -4116,14 +4161,15 @@ body.is-mobile.ggai-stella-panel-active .ggai-session-body-wrap {
   line-height: 1.75;
 }
 /* 보기 설정: 줄바꿈("\n") 자리의 줄 높이만 키워 문단 사이 간격을 만든다.
-   문단 안 줄의 기본 line-height(위 1.75)에는 영향을 주지 않는다
+   슬라이더 값은 "추가 여백" — 기본 줄 높이(위 1.75em) 위에 px 로 얹는다. 0 = 그냥
+   줄바꿈과 같은 간격(고정 px 가 아니라 폰트 크기 기준이라 PC/모바일 동일).
    (session-view.ts renderBodySpans 가 매 "\n" 을 이 span 으로 감싼다).
    vertical-align: top — 이 span 이 문단의 마지막 텍스트와 같은 줄을 공유하기 때문에,
    기본(baseline) 정렬이면 늘어난 line-height 가 그 줄 위아래로 절반씩 나뉘어 텍스트가
    샌드위치처럼 눌린다. top 정렬로 바꾸면 텍스트는 제자리에 남고 늘어난 여백은 줄
    아래쪽으로만 붙어 "문단 아래 마진"처럼 보인다. */
 .ggai-para-gap {
-  line-height: var(--ggai-view-para-gap, 36px);
+  line-height: calc(1.75em + var(--ggai-view-para-gap, 0px));
   vertical-align: top;
 }
 /* 각 줄 첫 텍스트 span 의 첫 줄 들여쓰기 (빈 span 은 contenteditable 에서 사라져 실제 텍스트에 적용). */
@@ -6736,16 +6782,14 @@ body.is-mobile .ggai-dash-page {
 .ggai-chat-para {
   margin: 0;
 }
-/* margin 은 문단 자체의 line-height 여백 위에 추가로 얹혀 두 배로 넓어 보인다
-   (소설 뷰의 .ggai-para-gap 은 line-height 자체가 간격 전체 높이라 이 문제가 없다).
-   line-height 와 무관한 고정 높이 spacer 로 대신해 슬라이더 값이 그대로 반영되게 한다. */
+/* 문단 사이 spacer — 슬라이더 값(px)만큼만 추가로 벌린다. 0 = 줄바꿈과 같은 간격. */
 .ggai-chat-para + .ggai-chat-para {
   margin-top: 0;
 }
 .ggai-chat-para + .ggai-chat-para::before {
   content: "";
   display: block;
-  height: var(--ggai-view-para-gap, 8px);
+  height: var(--ggai-view-para-gap, 0px);
 }
 .ggai-chat-bubble em {
   font-style: italic;
@@ -7101,3 +7145,22 @@ body.is-mobile .ggai-chat-inputbar {
 .ggai-chat-name.is-speaker-3 { color: var(--color-orange); }
 .ggai-chat-name.is-speaker-4 { color: var(--color-pink); }
 .ggai-chat-name.is-speaker-5 { color: var(--color-cyan); }
+
+/* 시나리오 편집 — 수다스러움 슬라이더 (그룹 채팅 talkativeness). */
+.ggai-talkativeness-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
+}
+.ggai-talkativeness-row input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ggai-talkativeness-value {
+  flex: 0 0 auto;
+  min-width: 84px;
+  text-align: right;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}

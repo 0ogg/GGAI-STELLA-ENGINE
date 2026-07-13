@@ -110,11 +110,11 @@ export function buildSessionMenu(
         .onClick(() => void toggleProactiveSetting(plugin, s, "realtime"))
     );
   }
-  // 그룹 멤버 관리 (G1) — 그룹 세션(초대로 멤버가 붙은 세션)에만.
+  // 그룹 채팅 관리 (G1/G3) — 멤버 + 대화 설정. 그룹 세션에만.
   if (s.session.meta.groupId) {
     menu.addItem((mi) =>
       mi
-        .setTitle("그룹 멤버 관리")
+        .setTitle("그룹 채팅 관리")
         .setIcon("users")
         .onClick(() => void openGroupMemberManager(plugin, s.sessionFile))
     );

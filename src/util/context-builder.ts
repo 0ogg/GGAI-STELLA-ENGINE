@@ -18,7 +18,6 @@ import type {
   StellaPromptTextItem,
 } from "../types/prompt";
 import { MARKER_MACRO_TOKENS } from "../types/prompt";
-import type { NovelChatRoleMode } from "../types/session";
 import { applyMacros, type MacroContext } from "./macros";
 import {
   matchLorebookEntries,
@@ -69,7 +68,6 @@ export interface ContextBuilderInputV2 {
   persona?: { name: string; description?: string };
   lorebooks: StellaLorebook[];
   mode?: "novel" | "textgame" | "chat";
-  novelChatRoleMode?: NovelChatRoleMode;
   /** 소설 모드: [{ role:"assistant", content: 전체 본문 }]. 챗 모드: 교대 턴 배열. */
   sessionLog: { role: "user" | "assistant"; content: string }[];
   /** chatHistory 마지막 메시지 직전에 system 으로 삽입. */
@@ -473,8 +471,7 @@ export function buildContext(
         !summaryExplicit && input.summary?.trim()
           ? applyMacros(input.summary, macroCtx)
           : "",
-    },
-    { novelChatRoleMode: input.novelChatRoleMode ?? "merged" }
+    }
   );
 
   // 5a. at_depth 로어북 — depth 내림차순으로 삽입해야 splice 위치 안 밀림
@@ -553,8 +550,7 @@ export function buildContext(
 
   const requiredTail = requiredTailForBudget(
     chatHistory,
-    input.mode ?? "novel",
-    input.novelChatRoleMode ?? "merged"
+    input.mode ?? "novel"
   );
   // 본문만 최근(끝)부터 남는 예산에 채운다. 비-본문 항목은 위치 그대로 항상 유지.
   const kept = new Array<boolean>(chatHistory.length).fill(false);
@@ -991,8 +987,7 @@ function buildNoteBlock(inserts: {
 function buildChatHistoryMessages(
   log: { role: "user" | "assistant"; content: string }[],
   mode: "novel" | "textgame" | "chat",
-  inserts: { memory?: string; authorNote?: string; summary?: string },
-  options: { novelChatRoleMode?: NovelChatRoleMode } = {}
+  inserts: { memory?: string; authorNote?: string; summary?: string }
 ): ChatMessage[] {
   const noteBlock = buildNoteBlock(inserts);
   if (mode === "chat") {
@@ -1018,20 +1013,6 @@ function buildChatHistoryMessages(
     return messages;
   }
 
-  if (options.novelChatRoleMode === "split") {
-    const messages: ChatMessage[] = [];
-    if (inserts.memory?.trim()) {
-      messages.push({
-        role: "system",
-        content: inserts.memory,
-        source: { type: "memory", label: "Session: memory" },
-        contextKind: "prompt",
-      });
-    }
-    messages.push(...splitRoleStoryToMessages(log, noteBlock));
-    return messages;
-  }
-
   const story = log
     .filter((m) => m.role === "assistant")
     .map((m) => m.content)
@@ -1046,78 +1027,6 @@ function buildChatHistoryMessages(
     });
   }
   messages.push(...storyToMessages(story, noteBlock));
-  return messages;
-}
-
-function splitRoleStoryToMessages(
-  log: { role: "user" | "assistant"; content: string }[],
-  noteBlock: ChatMessage[]
-): ChatMessage[] {
-  const storyTurns = log;
-
-  if (noteBlock.length === 0) {
-    return storyTurns.map((m, index) => ({
-      role: m.role,
-      content: m.content,
-      source: { type: "chat" as const, label: `Session body #${index + 1}` },
-      contextKind: "history" as const,
-    }));
-  }
-
-  const counts = storyTurns.map((m) => splitParagraphs(m.content).length);
-  const totalParagraphs = counts.reduce((sum, count) => sum + count, 0);
-  const insertAt = Math.max(0, totalParagraphs - 4);
-  const messages: ChatMessage[] = [];
-  let seen = 0;
-  let inserted = false;
-
-  const insertNote = () => {
-    if (inserted) return;
-    messages.push(...noteBlock);
-    inserted = true;
-  };
-
-  for (let i = 0; i < storyTurns.length; i++) {
-    const turn = storyTurns[i];
-    const parts = splitParagraphs(turn.content);
-    if (parts.length === 0) continue;
-    const beforeCount = insertAt - seen;
-
-    if (!inserted && beforeCount <= 0) {
-      insertNote();
-      messages.push({
-        role: turn.role,
-        content: turn.content,
-        source: { type: "chat", label: `Session body #${i + 1}` },
-        contextKind: "history",
-      });
-    } else if (!inserted && beforeCount > 0 && beforeCount < parts.length) {
-      messages.push({
-        role: turn.role,
-        content: parts.slice(0, beforeCount).join("\n\n"),
-        source: { type: "chat", label: `Session body #${i + 1} before author's note` },
-        contextKind: "history",
-      });
-      insertNote();
-      messages.push({
-        role: turn.role,
-        content: parts.slice(beforeCount).join("\n\n"),
-        source: { type: "chat", label: `Session body #${i + 1} after author's note` },
-        contextKind: "history",
-      });
-    } else {
-      messages.push({
-        role: turn.role,
-        content: turn.content,
-        source: { type: "chat", label: `Session body #${i + 1}` },
-        contextKind: "history",
-      });
-    }
-
-    seen += parts.length;
-  }
-
-  insertNote();
   return messages;
 }
 
@@ -1165,10 +1074,9 @@ function splitParagraphs(text: string): string[] {
 
 function requiredTailForBudget(
   messages: ChatMessage[],
-  mode: "novel" | "textgame" | "chat",
-  novelChatRoleMode: NovelChatRoleMode = "merged"
+  mode: "novel" | "textgame" | "chat"
 ): ConversationMessage[] {
-  if (mode === "chat" || novelChatRoleMode === "split") {
+  if (mode === "chat") {
     return messages
       .filter((m): m is ConversationMessage =>
         m.role === "user" || m.role === "assistant"

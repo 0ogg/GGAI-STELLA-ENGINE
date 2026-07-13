@@ -459,30 +459,6 @@ export class ScenarioSection {
     ctxBtn.title = "AI 에 보낼 최종 메시지를 미리 봅니다.";
     ctxBtn.addEventListener("click", () => void this.handleShowContext());
 
-    const roleWrap = body.createDiv({ cls: "ggai-text-field ggai-role-mode-field" });
-    roleWrap.createDiv({
-      cls: "ggai-text-field-label",
-      text: "챗컴플리션 본문 롤",
-    });
-    roleWrap.createDiv({
-      cls: "ggai-text-field-hint",
-      text: "끄면 NovelAI처럼 본문을 하나로 합치고, 켜면 assistant/user 롤을 나눠 보냅니다.",
-    });
-    const roleRow = roleWrap.createDiv({ cls: "ggai-lorebook-checklist-row" });
-    const roleCb = roleRow.createEl("input", { type: "checkbox" });
-    roleCb.checked = session.meta.novelChatRoleMode === "split";
-    const roleLabel = roleRow.createSpan({
-      cls: "ggai-lorebook-checklist-label",
-      text: "assistant/user 롤 분리",
-    });
-    const roleHandler = () =>
-      void this.handleToggleNovelChatRoleMode(roleCb.checked);
-    roleCb.addEventListener("change", roleHandler);
-    roleLabel.addEventListener("click", () => {
-      roleCb.checked = !roleCb.checked;
-      roleHandler();
-    });
-
     this.memoryEl = this.makeTextField(
       body,
       "메모리",
@@ -984,23 +960,6 @@ export class ScenarioSection {
   }
 
   // ─── session field save (memory / authorNote) ──────────────────────
-
-  private async handleToggleNovelChatRoleMode(split: boolean): Promise<void> {
-    const file = this.activeSessionFile;
-    if (!file) return;
-    this.flush();
-    try {
-      const session = await this.plugin.store.getSession(file);
-      if (!session) return;
-      if (split) session.meta.novelChatRoleMode = "split";
-      else delete session.meta.novelChatRoleMode;
-      await this.plugin.store.saveSession(file, session);
-      this.session = session;
-    } catch (err) {
-      console.warn("[GGAI Stella] chat role mode save failed:", err);
-      new Notice(`본문 롤 설정 저장 실패: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
 
   private queueSession(patch: { memory?: string; authorNote?: string }): void {
     Object.assign(this.sessionPending, patch);

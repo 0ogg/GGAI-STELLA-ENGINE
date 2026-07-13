@@ -1,4 +1,4 @@
-import type { NovelChatRoleMode, StellaSession, Span } from "../types/session";
+import type { StellaSession, Span } from "../types/session";
 import type { ContextBuilderInputV2 } from "./context-builder";
 
 /**
@@ -10,14 +10,9 @@ import type { ContextBuilderInputV2 } from "./context-builder";
  */
 export function buildSessionLog(
   spans: Span[],
-  mode: StellaSession["meta"]["mode"],
-  options: { novelChatRoleMode?: NovelChatRoleMode } = {}
+  mode: StellaSession["meta"]["mode"]
 ): ContextBuilderInputV2["sessionLog"] {
   if (mode !== "chat") {
-    if (options.novelChatRoleMode === "split") {
-      return buildSplitRoleMessages(spans);
-    }
-
     const body = spans.map((span) => span.text).join("");
     const messages: ContextBuilderInputV2["sessionLog"] = [];
     if (body.trim()) messages.push({ role: "assistant", content: body });

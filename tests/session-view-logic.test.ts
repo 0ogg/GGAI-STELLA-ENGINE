@@ -497,12 +497,6 @@ asyncTests.push((async () => {
   assert.deepEqual(buildSessionLog(spans, "novel"), [
     { role: "assistant", content: "A continuedUB" },
   ]);
-
-  assert.deepEqual(buildSessionLog(spans, "novel", { novelChatRoleMode: "split" }), [
-    { role: "assistant", content: "A continued" },
-    { role: "user", content: "U" },
-    { role: "assistant", content: "B" },
-  ]);
 }
 
 {
@@ -513,11 +507,6 @@ asyncTests.push((async () => {
 
   assert.deepEqual(buildSessionLog(spans, "novel"), [
     { role: "assistant", content: "AU\n\n" },
-  ]);
-
-  assert.deepEqual(buildSessionLog(spans, "novel", { novelChatRoleMode: "split" }), [
-    { role: "assistant", content: "A" },
-    { role: "user", content: "U\n\n" },
   ]);
 }
 
@@ -1329,48 +1318,6 @@ asyncTests.push((async () => {
       { author: "ai", text: "Assistant body." },
       { author: "user", text: "User edit." },
     ],
-    "novel",
-    { novelChatRoleMode: "split" }
-  );
-  const out = buildContext({
-    preset: {
-      meta: { id: "p", name: "Preset", favorite: false },
-      prompts: [
-        {
-          id: "chat",
-          kind: "marker",
-          identifier: "chatHistory",
-          name: "Chat History",
-          enabled: true,
-        },
-      ],
-    },
-    scenario: { name: "Char" },
-    lorebooks: [],
-    mode: "novel",
-    novelChatRoleMode: "split",
-    sessionLog,
-    tokenBudget: 10000,
-    countTokens: (s) => s.length,
-  });
-
-  assert.deepEqual(
-    out.messages
-      .filter((m) => m.source?.type === "chat")
-      .map((m) => ({ role: m.role, content: m.content })),
-    [
-      { role: "assistant", content: "Assistant body." },
-      { role: "user", content: "User edit." },
-    ]
-  );
-}
-
-{
-  const sessionLog = buildSessionLog(
-    [
-      { author: "ai", text: "Assistant body." },
-      { author: "user", text: "User edit." },
-    ],
     "novel"
   );
   const out = buildContext({
@@ -1515,79 +1462,6 @@ asyncTests.push((async () => {
   assert.equal(bodyMsg?.content.includes("OPENING-"), false);
   assert.equal(bodyMsg?.content.includes("[...truncated...]"), false);
   assert.equal(bodyMsg?.content.endsWith("c"), true);
-}
-
-{
-  // 회귀: split 모드 + 본문 끝에 오는 at_depth(depth 0) 로어북 + 예산 압박에서도
-  // 가장 최근 본문(ENDMARK)이 유실되면 안 된다. (requiredTail 재정렬이 이미 들어간
-  // 최근 턴을 제거해 버리던 버그.)
-  const depthLore: StellaLorebook = {
-    meta: {
-      id: "lb",
-      name: "LB",
-      description: "",
-      thumbnail: null,
-      scanDepth: null,
-      tokenBudget: null,
-      recursiveScanning: false,
-      _source: "sillytavern",
-    },
-    entries: [
-      {
-        uid: "e",
-        name: "AtDepth0",
-        keys: [],
-        secondaryKeys: [],
-        useRegex: false,
-        caseSensitive: null,
-        matchWholeWords: null,
-        selective: false,
-        selectiveLogic: 0,
-        content: "DEPTH0-LORE",
-        enabled: true,
-        constant: true,
-        probability: 100,
-        position: "at_depth",
-        depth: 0,
-        role: "system",
-        order: 100,
-        scanDepth: null,
-        excludeRecursion: false,
-        preventRecursion: false,
-        delayUntilRecursion: false,
-        group: "",
-        groupWeight: 100,
-        addMemo: false,
-        _source: "sillytavern",
-      },
-    ],
-  };
-  const turns: { author: "ai" | "user"; text: string }[] = [];
-  for (let i = 1; i <= 8; i++) {
-    turns.push({ author: i % 2 ? "ai" : "user", text: `TURN${i} ` + "x".repeat(200) + ".\n\n" });
-  }
-  turns.push({ author: "ai", text: "ENDMARK last generated paragraph." });
-  const log = buildSessionLog(turns, "novel", { novelChatRoleMode: "split" });
-  const out = buildContext({
-    preset: {
-      meta: { id: "p", name: "Preset", favorite: false },
-      prompts: [
-        { id: "chat", kind: "marker", identifier: "chatHistory", name: "Chat History", enabled: true },
-      ],
-    },
-    scenario: { name: "Char" },
-    lorebooks: [depthLore],
-    mode: "novel",
-    novelChatRoleMode: "split",
-    sessionLog: log,
-    authorNote: "NOTE",
-    tokenBudget: 900,
-    countTokens: (s) => s.length,
-  });
-  assert.equal(
-    out.messages.some((m) => m.content.includes("ENDMARK")),
-    true
-  );
 }
 
 {

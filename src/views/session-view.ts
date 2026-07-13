@@ -452,7 +452,7 @@ export class SessionView extends ItemView {
    * 그래야 방금 친 문단이 컨텍스트에 포함되고, 미리보기 = 전송본 불변식이 유지된다.
    */
   async flushPendingEdits(): Promise<void> {
-    await this.commitPending();
+    await this.commitPending({ force: true });
   }
 
   /**
@@ -2137,13 +2137,23 @@ export class SessionView extends ItemView {
     return lo < map.length ? lo : this.displayText.length;
   }
 
-  private async commitPending(): Promise<void> {
+  private async commitPending(opts?: { force?: boolean }): Promise<void> {
     this.clearIdleTimer();
     if (!this.session || !this.sessionFile) return;
-    // 조합 중이면 body.empty() 재구성을 미룬다 — compositionend 에서 다시 예약된다.
     if (this.composing) {
-      this.scheduleIdleCommit();
-      return;
+      // 순수 타이핑 hot-path(blur/idle/selectionchange)는 조합 중 body.empty()
+      // 재구성이 IME 를 얼리므로 미룬다 — compositionend 에서 다시 예약된다.
+      if (!opts?.force) {
+        this.scheduleIdleCommit();
+        return;
+      }
+      // 이어쓰기/재생성/undo/redo/미리보기처럼 편집을 확정하고 진행하는 명시적
+      // 액션은 조합을 강제 종결하고 커밋한다 — 안 그러면 조합 중 마지막 음절이
+      // 미커밋 상태로 남아 생성이 입력 전 노드에서 시작돼 방금 친 내용이 롤백된다.
+      // 진행 중인 조합 문자열은 DOM textContent 에 이미 있으므로 syncPendingDiff 로
+      // 잡아낸다. 직후 재렌더/편집 비활성으로 조합은 어차피 종료된다.
+      this.composing = false;
+      this.syncPendingDiff();
     }
     const diff = this.pendingDiff;
     if (!diff) return;
@@ -2179,7 +2189,7 @@ export class SessionView extends ItemView {
   private async handleUndo(): Promise<void> {
     if (!this.session || !this.sessionFile) return;
     if (this.leafNavigationBusy) return;
-    await this.commitPending();
+    await this.commitPending({ force: true });
     const curId = this.session.meta.activeLeafId;
     const cur = this.session.nodes[curId];
     if (!cur || cur.parent == null) {
@@ -2200,7 +2210,7 @@ export class SessionView extends ItemView {
   private async handleRedo(): Promise<void> {
     if (!this.session || !this.sessionFile) return;
     if (this.leafNavigationBusy) return;
-    await this.commitPending();
+    await this.commitPending({ force: true });
     // commitPending ??redoStack ????쑴???삠늺 ????곴맒 ??野???용뼄.
     let next = this.redoStack.pop();
     if (!next || !this.session.nodes[next]) {
@@ -2366,7 +2376,7 @@ export class SessionView extends ItemView {
   /** ??곷선?怨뚮┛ ??activeLeaf ??parent 嚥?AI ?紐껊굡??child 嚥??곕떽???랁?chatStream ??곗쨮 筌?쑴?. */
   private async handleContinue(): Promise<void> {
     if (!this.session || this.generation) return;
-    await this.commitPending();
+    await this.commitPending({ force: true });
     // 타이핑을 멈출 때마다 잘게 쌓인 유저 작성 노드를 생성 직전 하나로 합친다
     // (본문은 동일, 분기 트리만 정리). 합쳤으면 저장.
     if (mergeTrailingUserWrites(this.session)) {
@@ -2382,7 +2392,7 @@ export class SessionView extends ItemView {
    */
   private async handleRegen(): Promise<void> {
     if (!this.session || this.generation) return;
-    await this.commitPending();
+    await this.commitPending({ force: true });
 
     const cur = this.session.nodes[this.session.meta.activeLeafId];
     if (!cur || !isAINode(cur) || cur.parent == null) {

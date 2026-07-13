@@ -11,6 +11,7 @@ import {
 } from "./editor-cover";
 import { type FieldDef, renderForm } from "./form-renderer";
 import { ConfirmModal, ScenarioSessionCopyModal } from "./modals";
+import { parseTalkativeness } from "../util/group-speaker";
 
 const SAVE_DEBOUNCE_MS = 400;
 
@@ -191,7 +192,43 @@ export class ScenarioEditorSection {
     );
 
     this.renderAlternateGreetings(data);
+    this.renderTalkativeness(data);
     this.renderLorebookLinks();
+  }
+
+  /** 수다스러움 (그룹 채팅) — data.extensions.talkativeness (ST 호환, 0~1). */
+  private renderTalkativeness(data: Record<string, any>): void {
+    const ext = (data.extensions ??= {}) as Record<string, any>;
+    const wrap = this.root.createDiv({ cls: "ggai-text-field" });
+    wrap.createDiv({
+      cls: "ggai-text-field-label",
+      text: "수다스러움 (그룹 채팅)",
+    });
+    wrap.createDiv({
+      cls: "ggai-text-field-hint",
+      text: "그룹 채팅에서 이 캐릭터가 얼마나 자주 먼저 나서는지. 낮으면 이름을 불러야 말하고, 높으면 적극적으로 끼어듭니다. SillyTavern talkativeness와 호환됩니다.",
+    });
+    const row = wrap.createDiv({ cls: "ggai-talkativeness-row" });
+    const slider = row.createEl("input", { type: "range" });
+    slider.min = "0";
+    slider.max = "100";
+    slider.step = "5";
+    slider.value = String(Math.round(parseTalkativeness(ext.talkativeness) * 100));
+    const valEl = row.createSpan({ cls: "ggai-talkativeness-value" });
+    const label = (v: number): string => {
+      const pct = Math.round(v * 100);
+      const word =
+        v < 0.2 ? "조용함" : v < 0.4 ? "낮음" : v < 0.65 ? "보통" : v < 0.85 ? "높음" : "활발함";
+      return `${pct}% · ${word}`;
+    };
+    valEl.setText(label(parseTalkativeness(ext.talkativeness)));
+    slider.addEventListener("input", () => {
+      const v = Number(slider.value) / 100;
+      ext.talkativeness = v;
+      valEl.setText(label(v));
+      this.queueSave();
+    });
+    slider.addEventListener("change", () => void this.flushNow());
   }
 
   private renderCover(parent: HTMLElement): void {
