@@ -38,7 +38,10 @@ import {
   importFile as importVaultFile,
   type ImportResult,
 } from "../import";
-import { writeLorebook } from "../import/write-lorebook";
+import {
+  writeLorebook,
+  type LorebookThumbnailInput,
+} from "../import/write-lorebook";
 import {
   resolveUniquePromptFile,
   writePromptPresetFile,
@@ -1293,6 +1296,18 @@ export class StellaStore extends Events {
     return `assets/${filename}`;
   }
 
+  /** 폴더 기준 상대 경로의 바이너리 에셋(표지 등)을 읽는다. 없으면 null. */
+  async readAssetBytes(
+    folder: string,
+    relativePath: string
+  ): Promise<Uint8Array | null> {
+    const f = this.vault.getAbstractFileByPath(
+      normalizePath(`${folder}/${relativePath}`)
+    );
+    if (!(f instanceof TFile)) return null;
+    return new Uint8Array(await this.vault.readBinary(f));
+  }
+
   /** 세션 폴더 기준 상대 경로(assets/...)의 에셋 파일을 휴지통으로. 없으면 무시. */
   async deleteSessionAsset(sessionFile: string, relativePath: string): Promise<void> {
     const folder = sessionFolderOfSessionFilePath(sessionFile);
@@ -1602,14 +1617,15 @@ export class StellaStore extends Events {
    * 반환값으로 새 lorebookFile 경로를 주므로 호출부가 바로 편집기를 열 수 있다.
    */
   async createLorebook(
-    name: string
+    name: string,
+    thumbnail?: LorebookThumbnailInput
   ): Promise<{ lorebookFile: string; folder: string }> {
     const cleanName = (name ?? "").trim() || "새 로어북";
     const book: StellaLorebook = {
       meta: defaultLorebookMeta("sillytavern", cleanName),
       entries: [],
     };
-    const result = await writeLorebook(this.vault, book);
+    const result = await writeLorebook(this.vault, book, thumbnail);
     if (!result.ok) {
       throw new Error(result.reason);
     }

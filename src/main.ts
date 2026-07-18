@@ -22,6 +22,7 @@ import { AIService } from "./services/ai-service";
 import { installFocusForensics } from "./services/focus-forensics";
 import { TranslationService } from "./services/translation-service";
 import { LorebookPlusService } from "./services/lorebook-plus-service";
+import { LorebookGenService } from "./services/lorebook-gen-service";
 import { SummaryService } from "./services/summary-service";
 import { IllustrationService } from "./services/illustration-service";
 import { ParagraphRegenService } from "./services/paragraph-regen-service";
@@ -31,6 +32,7 @@ import {
 } from "./services/proactive-service";
 import { PhoneService } from "./services/phone-service";
 import { registerPhoneExtension } from "./extensions/phone-extension";
+import { registerLorebookGenExtension } from "./extensions/lorebook-gen-extension";
 import type { PhonePluginData } from "./types/phone";
 import { PhoneOverlayModal } from "./views/phone-view";
 import {
@@ -261,6 +263,8 @@ export default class StellaEnginePlugin extends Plugin {
   phoneOverlay: PhoneOverlayModal | null = null;
   /** 로어북 확장 AI 매칭 실행기 — planSessionRequest 가 생성 직전 호출. */
   lorebookPlus!: LorebookPlusService;
+  /** 로어북 자동 생성 실행기 — 생성 완료 훅/수동 스캔이 호출. */
+  lorebookGen!: LorebookGenService;
   /** 확장 탭 설정 패널 레지스트리. 내장/외부 패널 모두 `registerSettingsPanel()` 로 등록. */
   settingsPanels!: SettingsPanelRegistry;
   /** 확장 모듈 레지스트리 — 컨텍스트 기여 / 생성-완료 훅 / 로어북 선택 대체. */
@@ -313,6 +317,7 @@ export default class StellaEnginePlugin extends Plugin {
     // 폰 갱신 스케줄러 (PH2) — 정기/세션 중 랜덤 트리거 틱.
     this.phone.startScheduler();
     this.lorebookPlus = new LorebookPlusService(this);
+    this.lorebookGen = new LorebookGenService(this);
     this.settingsPanels = new SettingsPanelRegistry(() =>
       this.store.trigger("settings-panels-changed")
     );
@@ -323,6 +328,7 @@ export default class StellaEnginePlugin extends Plugin {
     registerSummaryExtension(this);
     registerNotificationExtension(this);
     registerPhoneExtension(this);
+    registerLorebookGenExtension(this);
     // 정규식 치환 설정 — 전송본 치환 자체는 planSessionRequest 가 직접 수행(훅 아님).
     this.registerSettingsPanel(createRegexSettingsPanel());
     // 로어북 확장 — 키워드/AI 매칭 스위치 (매칭 자체는 planSessionRequest 경유).

@@ -193,12 +193,21 @@ export class IllustrationService {
     );
     const lorebookText = buildLorebookText(books, body);
     try {
-      const prompt = await this.generateImagePrompt(
+      let prompt = await this.generateImagePrompt(
         genProfile,
         genPrompt?.prompt ?? "",
         body,
         lorebookText
       );
+      // 세션 삽화(illustrate)와 동일한 확장 결과물 정규식 후가공 —
+      // 삽화 대상 전역 스크립트(JSON 껍데기 제거 등). 세션이 없으므로 파일은
+      // 빈 문자열: 매크로 컨텍스트는 char 기본값 + 활성 페르소나로 해석된다.
+      const applyRegex = await createExtensionRegexApplier(
+        this.plugin,
+        "",
+        "illustration"
+      );
+      if (applyRegex) prompt = applyRegex(prompt);
       if (!prompt.trim()) {
         return { ok: false, error: "생성된 삽화 프롬프트가 비어 있습니다." };
       }

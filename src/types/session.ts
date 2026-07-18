@@ -206,6 +206,17 @@ export interface SessionMeta {
    * 시나리오와 무관하게 이 세션에만 추가로 적용할 로어북 id 목록.
    */
   extraLorebookIds?: string[];
+
+  /**
+   * 로어북 자동 생성이 만든 세션 전용 로어북의 id (StellaLorebookMeta.id).
+   * 켤 때 한 번 생성되고 extraLorebookIds 에도 함께 등록된다.
+   */
+  autoLorebookId?: string;
+  /**
+   * 로어북 자동 생성 스캔 앵커 — 스캔이 커버한 마지막 노드 id 목록.
+   * 활성 경로에서 가장 마지막 앵커 이후 AI 생성 수로 다음 스캔 시점을 판정한다.
+   */
+  lorebookGenAnchors?: string[];
 }
 
 export interface StellaSession {

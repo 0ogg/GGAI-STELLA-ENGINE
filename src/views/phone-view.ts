@@ -104,6 +104,8 @@ class PhoneController extends Component {
   private cameraBusy = false;
   /** 카메라 — 프롬프트 직접 입력 모드 (기본 = 삽화 프롬프트 생성 경유). */
   private cameraDirect = false;
+  /** 카메라 프롬프트 — 촬영 후에도 유지(같은 프롬프트로 재시도), 재렌더 넘어 보존. */
+  private cameraPrompt = "";
   /** SNS 계정 모아보기 필터 — null 이면 전체 피드. */
   private snsAccountFilter: { key: string; label: string } | null = null;
   /** 피드 갱신이 입력 중에 도착함 — 입력이 끝나면 다시 그린다. */
@@ -226,6 +228,40 @@ class PhoneController extends Component {
       if (this.screen === "home") this.closeHost();
       else this.navBack();
     });
+
+    // ── 모바일 소프트키보드 회피 — 폰 모달은 100dvh 고정이라 키보드가 덮으면
+    //    컴포저·카메라 입력이 가려진다. visualViewport 로 실제 가려진 높이만큼
+    //    화면을 줄인다 (styles.css 의 --ggai-phone-kb). 기준선(base)은 관측된
+    //    최소 가림값 — 키보드 없이도 남는 시스템 바 몫이 섞이지 않게 한다. ──
+    if (Platform.isMobile && window.visualViewport) {
+      const vv = window.visualViewport;
+      let base = Number.POSITIVE_INFINITY;
+      const onVv = () => {
+        const occluded = Math.max(
+          0,
+          window.innerHeight - vv.height - vv.offsetTop
+        );
+        base = Math.min(base, occluded);
+        const kb = occluded - base;
+        const active = kb > 60;
+        root.style.setProperty(
+          "--ggai-phone-kb",
+          active ? `${Math.round(kb)}px` : "0px"
+        );
+        root.toggleClass("is-kb", active);
+        // 키보드가 올라와 스레드 아래가 잘리면 마지막 말풍선이 보이게 따라간다.
+        if (active && this.composerEl.contains(document.activeElement)) {
+          this.bodyEl.scrollTop = this.bodyEl.scrollHeight;
+        }
+      };
+      vv.addEventListener("resize", onVv);
+      vv.addEventListener("scroll", onVv);
+      this.register(() => {
+        vv.removeEventListener("resize", onVv);
+        vv.removeEventListener("scroll", onVv);
+      });
+      onVv();
+    }
 
     // ── store 구독 — 전부 국소 갱신. ──
     this.registerEvent(
@@ -1973,35 +2009,93 @@ class PhoneController extends Component {
       return;
     }
 
-    const form = this.bodyEl.createDiv({ cls: "ggai-phone-camera-form" });
-    const ta = form.createEl("textarea", {
-      cls: "ggai-phone-input",
-      attr: {
-        rows: "3",
-        placeholder: this.cameraDirect
-          ? "이미지 프롬프트를 직접 입력…"
-          : "찍고 싶은 장면을 묘사하세요 (삽화 프롬프트로 자동 변환)…",
-      },
-    });
-    // 기본 = 장면 묘사를 삽화 프롬프트 생성 LLM 에 통과 (삽화 설정·로어북 적용).
-    const directRow = form.createEl("label", { cls: "ggai-phone-camera-direct" });
-    const directCb = directRow.createEl("input", { type: "checkbox" });
-    directCb.checked = this.cameraDirect;
-    directRow.createSpan({ text: " 프롬프트 직접 입력" });
-    directCb.addEventListener("change", () => {
-      this.cameraDirect = directCb.checked;
-      ta.placeholder = this.cameraDirect
+    // ── v2 §2.2 카메라 스킨: 뷰파인더 + 하단 [썸네일 | 셔터 | 모드] 바. ──
+    const shots = (this.gallery?.items ?? [])
+      .filter((i) => i.source === "camera")
+      .sort((a, b) => b.createdAt - a.createdAt);
+    const latest = shots[0] ?? null;
+    const latestSrc = latest
+      ? this.app.vault.adapter.getResourcePath(latest.file)
+      : null;
+
+    // 뷰파인더 — 최근 촬영 결과가 채운다 (탭 = 크게, 우클릭/롱프레스 = 공유, v2 §4).
+    const finder = this.bodyEl.createDiv({ cls: "ggai-phone-camera-finder" });
+    if (latest && latestSrc) {
+      const img = finder.createEl("img");
+      img.src = latestSrc;
+      img.alt = latest.caption;
+      img.addEventListener("click", () =>
+        new ImageLightboxModal(this.app, latest.file, latest.caption).open()
+      );
+      img.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        this.openShotMenu(latest, e);
+      });
+      finder.createDiv({
+        cls: "ggai-phone-camera-caption",
+        text: latest.caption,
+      });
+    } else if (!this.cameraBusy) {
+      const empty = finder.createDiv({ cls: "ggai-phone-camera-empty" });
+      setIcon(empty.createDiv(), "camera");
+      empty.createSpan({ text: "아직 찍은 사진이 없어요" });
+    }
+    if (this.cameraBusy) {
+      finder.createDiv({
+        cls: "ggai-phone-camera-developing",
+        text: "찰칵… 현상 중",
+      });
+    }
+
+    // 하단 컨트롤 — 장면 묘사 입력 + 셔터 바.
+    const controls = this.bodyEl.createDiv({ cls: "ggai-phone-camera-controls" });
+    const placeholder = () =>
+      this.cameraDirect
         ? "이미지 프롬프트를 직접 입력…"
         : "찍고 싶은 장면을 묘사하세요 (삽화 프롬프트로 자동 변환)…";
+    const ta = controls.createEl("textarea", {
+      cls: "ggai-phone-camera-prompt",
+      attr: { rows: "2", placeholder: placeholder() },
     });
-    const shootBtn = form.createEl("button", {
-      cls: "ggai-phone-sns-post-btn ggai-phone-camera-shoot",
-      text: this.cameraBusy ? "촬영 중…" : "촬영",
+    // 촬영 후에도 프롬프트 유지 — 마음에 안 들면 같은 문구로 바로 재촬영.
+    ta.value = this.cameraPrompt;
+    ta.addEventListener("input", () => {
+      this.cameraPrompt = ta.value;
     });
-    shootBtn.disabled = this.cameraBusy;
-    shootBtn.addEventListener("click", async () => {
+    const bar = controls.createDiv({ cls: "ggai-phone-camera-bar" });
+
+    // 좌 — 최근 촬영 썸네일 (탭 = 크게, 우클릭/롱프레스 = 공유).
+    const thumbBtn = bar.createEl("button", {
+      cls: "ggai-phone-camera-side is-thumb",
+      attr: { "aria-label": "최근 촬영" },
+    });
+    if (latest && latestSrc) {
+      const t = thumbBtn.createEl("img");
+      t.src = latestSrc;
+      t.alt = latest.caption;
+      thumbBtn.addEventListener("click", () =>
+        new ImageLightboxModal(this.app, latest.file, latest.caption).open()
+      );
+      thumbBtn.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        this.openShotMenu(latest, e);
+      });
+    } else {
+      setIcon(thumbBtn, "image");
+      thumbBtn.disabled = true;
+    }
+
+    // 중앙 — 셔터 원버튼.
+    const shutter = bar.createEl("button", {
+      cls: "ggai-phone-camera-shutter",
+      attr: { "aria-label": "촬영" },
+    });
+    shutter.disabled = this.cameraBusy;
+    if (this.cameraBusy) shutter.addClass("is-busy");
+    shutter.addEventListener("click", async () => {
       const prompt = ta.value.trim();
       if (!prompt || this.cameraBusy) return;
+      this.cameraPrompt = ta.value;
       this.cameraBusy = true;
       this.renderBody();
       const result = await this.plugin.phone.captureImage(prompt, {
@@ -2013,34 +2107,19 @@ class PhoneController extends Component {
       this.renderBody();
     });
 
-    // 최근 촬영 결과 미리보기 (카메라 출신 최신 1장).
-    const shots = (this.gallery?.items ?? [])
-      .filter((i) => i.source === "camera")
-      .sort((a, b) => b.createdAt - a.createdAt);
-    if (this.cameraBusy) {
-      this.bodyEl.createDiv({
-        cls: "ggai-phone-empty",
-        text: "찰칵… 현상 중입니다.",
-      });
-    } else if (shots[0]) {
-      const preview = this.bodyEl.createDiv({ cls: "ggai-phone-camera-preview" });
-      const img = preview.createEl("img", { cls: "ggai-phone-sns-photo" });
-      img.src = this.app.vault.adapter.getResourcePath(shots[0].file);
-      img.alt = shots[0].caption;
-      const shot = shots[0];
-      img.addEventListener("click", () =>
-        new ImageLightboxModal(this.app, shot.file, shot.caption).open()
-      );
-      // 우클릭(모바일 롱프레스) — 촬영 결과를 바로 게시/전송 (v2 §4).
-      img.addEventListener("contextmenu", (e) => {
-        e.preventDefault();
-        this.openShotMenu(shot, e);
-      });
-      preview.createDiv({
-        cls: "ggai-phone-camera-caption",
-        text: shots[0].caption,
-      });
-    }
+    // 우 — 프롬프트 직접 입력 모드 토글 (기본 = 삽화 프롬프트 생성 경유).
+    //    재렌더 없이 국소 갱신 — 입력 중 텍스트 보존.
+    const modeBtn = bar.createEl("button", {
+      cls: "ggai-phone-camera-side is-mode",
+      attr: { "aria-label": "프롬프트 직접 입력 모드" },
+    });
+    setIcon(modeBtn, "terminal");
+    modeBtn.toggleClass("is-active", this.cameraDirect);
+    modeBtn.addEventListener("click", () => {
+      this.cameraDirect = !this.cameraDirect;
+      modeBtn.toggleClass("is-active", this.cameraDirect);
+      ta.placeholder = placeholder();
+    });
   }
 
   /** 카메라 결과 공유 메뉴 — 스텔라 네트워크 게시 / 문자로 보내기 (v2 §4). */
@@ -2276,10 +2355,11 @@ class ImageLightboxModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.addClass("ggai-phone-lightbox");
+    // 옵시디언 기본 이미지 확대처럼 — 배경(프레임) 어디를 눌러도 닫힌다.
+    contentEl.addEventListener("click", () => this.close());
     const img = contentEl.createEl("img");
     img.src = this.app.vault.adapter.getResourcePath(this.path);
     img.alt = this.caption;
-    img.addEventListener("click", () => this.close());
     if (this.caption) {
       contentEl.createDiv({
         cls: "ggai-phone-lightbox-caption",

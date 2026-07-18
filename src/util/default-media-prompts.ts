@@ -6,6 +6,7 @@ export type MediaPromptBucket =
   | "paragraphRegen"
   | "summary"
   | "lorebookSelect"
+  | "lorebookGen"
   | "phoneText"
   | "phoneExtra"
   | "phoneSns"
@@ -98,6 +99,31 @@ export const DEFAULT_MEDIA_PROMPTS: Record<MediaPromptBucket, MediaPromptItem[]>
         "Prefer precision over recall — leave out entries that are not needed right now.\n" +
         "Respond with ONLY a JSON array of the selected entry numbers, e.g. [2, 7, 13]. If none are needed, respond with [].\n\n" +
         "Selection:",
+    },
+  ],
+
+  lorebookGen: [
+    {
+      id: "builtin:lorebookGen:1",
+      title: "Default",
+      prompt:
+        "Existing lorebook entries (title + keywords)\n" +
+        "{{lorebook}}\n\n" +
+        "New story passage\n" +
+        "{{main}}\n\n" +
+        "You are the lorebook keeper for an ongoing fiction/roleplay session.\n" +
+        "From the NEW passage above, extract things worth recording as new lorebook entries: " +
+        "newly introduced characters, proper nouns (places, items, organizations, terms), " +
+        "and significant events or reveals that future generations should remember.\n" +
+        "Rules:\n" +
+        "- Skip anything already covered by the existing entries listed above. If nothing new appeared, output an empty array.\n" +
+        "- keys: the exact words/names that appear in the story when this subject comes up — they are used for keyword matching against the story text.\n" +
+        "- content: a compact factual description (2-5 sentences) based ONLY on what the passage states. Never invent details.\n" +
+        "- The title is NOT shown to the story AI — the content must name its subject and stand alone without the title.\n" +
+        "- Write content in the same language as the passage.\n" +
+        'Respond with ONLY a JSON array like [{"title": "...", "keys": ["..."], "content": "..."}]. ' +
+        "If nothing is worth recording, respond with [].\n\n" +
+        "Entries:",
     },
   ],
 

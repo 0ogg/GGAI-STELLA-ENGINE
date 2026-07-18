@@ -25,6 +25,8 @@ export interface MediaPromptLibrary {
   paragraphRegen?: MediaPromptItem[];
   summary?: MediaPromptItem[];
   lorebookSelect?: MediaPromptItem[];
+  /** 로어북 자동 생성 — 새 인물/사건/고유명사 추출. */
+  lorebookGen?: MediaPromptItem[];
   /** 스텔라 폰 — 문자 답장/선발신 (시나리오 캐릭터). */
   phoneText?: MediaPromptItem[];
   /** 스텔라 폰 — 모르는 번호(엑스트라) 문자. */
@@ -122,6 +124,16 @@ export interface LorebookPlusActiveSettings {
   contextChars?: number;
   /** true 면 같은 지점 재생성은 직전 선별 결과를 재사용 (새 AI 호출 없음). */
   reuseOnRegen?: boolean;
+  /** 로어북 자동 생성 사용 — 세션 전용 로어북에 새 인물/사건/고유명사를 자동 기록. 생략 시 false. */
+  autoGen?: boolean;
+  /** 자동 생성 주기 — 마지막 스캔 이후 AI 생성 횟수. 생략 시 5. */
+  autoGenInterval?: number;
+  /** 자동 생성 전용 모델 프로필. 없으면 기본 프로필. */
+  autoGenModelProfileId?: string;
+  /** 자동 생성 프롬프트 id (mediaPrompts.lorebookGen). 없으면 기본 프롬프트. */
+  autoGenPromptId?: string;
+  /** 한 번에 스캔할 새 본문 상한(자) — 밀린 구간이 이보다 길면 최근 쪽만. 생략 시 16000. */
+  autoGenMaxChars?: number;
 }
 
 export interface StellaPreset {

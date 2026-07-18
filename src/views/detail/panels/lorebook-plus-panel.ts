@@ -1,6 +1,11 @@
+import { Notice, setIcon } from "obsidian";
 import type { SettingsPanel, SettingsPanelContext } from "../../../services/settings-panel-registry";
 import type { LorebookPlusActiveSettings } from "../../../types/preset";
 import { DEFAULT_LOREBOOK_SELECT_CONTEXT_CHARS } from "../../../util/lorebook-ai-select";
+import {
+  DEFAULT_LOREBOOK_GEN_INTERVAL,
+  DEFAULT_LOREBOOK_GEN_MAX_CHARS,
+} from "../../../util/lorebook-auto-gen";
 import { renderMediaModelPicker, renderMediaPromptPicker } from "../media-prompt-panel";
 import { renderEnableToggle, renderNumberRow, renderOptionGrid } from "../setting-controls";
 
@@ -87,6 +92,106 @@ export function createLorebookPlusSettingsPanel(): SettingsPanel {
           activeId: lp.reuseOnRegen === true ? "reuse" : "always",
           onSelect: (id) =>
             void patchLorebookPlus(ctx, { reuseOnRegen: id === "reuse" }),
+        });
+      }
+
+      // ── 로어북 자동 생성 — 세션 전용 로어북에 새 인물/사건/고유명사를 자동 기록.
+      renderEnableToggle({
+        parent: body,
+        label: "자동 생성 — 새 인물·사건을 세션 로어북에 기록",
+        checked: lp.autoGen === true,
+        onChange: (autoGen) => {
+          void (async () => {
+            await patchLorebookPlus(ctx, { autoGen });
+            // 켜는 순간 세션 전용 로어북(세션명 + 시나리오 표지)을 바로 만든다.
+            if (autoGen && ctx.activeSessionFile) {
+              await plugin.lorebookGen.ensureSessionLorebook(
+                ctx.activeSessionFile
+              );
+            }
+          })();
+        },
+      });
+
+      if (lp.autoGen === true) {
+        renderMediaModelPicker({
+          plugin,
+          parent: body,
+          label: "생성 모델",
+          profiles: plugin.ai.listGenerationProfiles(),
+          activeId: lp.autoGenModelProfileId,
+          onSelect: (autoGenModelProfileId) =>
+            void patchLorebookPlus(ctx, { autoGenModelProfileId }),
+          emptyText: "Core 텍스트 모델이 없습니다.",
+        });
+
+        // 생성 프롬프트 — 편집 가능. {{lorebook}} = 기존 항목 목록, {{main}} = 새 본문.
+        renderMediaPromptPicker({
+          plugin,
+          parent: body,
+          label: "생성 프롬프트",
+          bucket: "lorebookGen",
+          activeId: lp.autoGenPromptId,
+          onSelect: (autoGenPromptId) =>
+            void patchLorebookPlus(ctx, { autoGenPromptId }),
+          onChanged: () => ctx.rerender(),
+          onDeleted: (promptId) => {
+            if (lp.autoGenPromptId === promptId) {
+              void patchLorebookPlus(ctx, { autoGenPromptId: undefined });
+            } else {
+              ctx.rerender();
+            }
+          },
+        });
+
+        renderNumberRow({
+          parent: body,
+          label: "생성 주기(AI 생성 횟수)",
+          value: lp.autoGenInterval ?? DEFAULT_LOREBOOK_GEN_INTERVAL,
+          fallback: DEFAULT_LOREBOOK_GEN_INTERVAL,
+          min: 1,
+          step: 1,
+          integer: true,
+          onChange: (autoGenInterval) =>
+            void patchLorebookPlus(ctx, { autoGenInterval }),
+        });
+
+        renderNumberRow({
+          parent: body,
+          label: "스캔 본문 상한(자)",
+          value: lp.autoGenMaxChars ?? DEFAULT_LOREBOOK_GEN_MAX_CHARS,
+          fallback: DEFAULT_LOREBOOK_GEN_MAX_CHARS,
+          min: 500,
+          step: 1000,
+          integer: true,
+          onChange: (autoGenMaxChars) =>
+            void patchLorebookPlus(ctx, { autoGenMaxChars }),
+        });
+
+        // 지금 스캔 — 주기를 기다리지 않고 밀린 구간을 즉시 스캔한다.
+        const actions = body.createDiv({ cls: "ggai-summary-actions" });
+        const scanBtn = actions.createEl("button", { cls: "ggai-btn" });
+        setIcon(scanBtn.createSpan(), "book-plus");
+        scanBtn.createSpan({ text: "지금 스캔" });
+        scanBtn.addEventListener("click", () => {
+          void (async () => {
+            if (!ctx.activeSessionFile) {
+              new Notice("활성 세션이 없습니다.");
+              return;
+            }
+            scanBtn.disabled = true;
+            try {
+              const result = await plugin.lorebookGen.scan(ctx.activeSessionFile);
+              if (!result.ok) {
+                new Notice(`로어북 스캔 실패: ${result.errors[0] ?? "알 수 없는 오류"}`);
+              } else if (result.skipped || result.added === 0) {
+                new Notice("추가할 새 항목이 없습니다.");
+              }
+              // 추가 성공 Notice 는 서비스가 띄운다.
+            } finally {
+              scanBtn.disabled = false;
+            }
+          })();
         });
       }
     },

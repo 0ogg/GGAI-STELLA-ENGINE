@@ -1,7 +1,7 @@
 {
   "id": "ggai-stella-engine",
   "name": "GGAI Stella Engine",
-  "version": "0.0.12",
+  "version": "0.0.13",
   "minAppVersion": "1.5.0",
   "description": "NovelAI 스토리텔러 스타일의 소설 생성 플러그인",
   "author": "gg00",
