@@ -568,6 +568,8 @@ export interface PhonePluginData {
   snsMinNewPosts?: number;
   /** 배치당 신규 계정 발명 상한 (v2, 기본 3 — 넘치면 계정 등록 없이 익명 처리). */
   snsNewAccountCap?: number;
+  /** 답글 알림 마지막 확인 시각 — 이보다 새 답글이 안 읽음 배지로 뜬다. */
+  snsNotifSeenAt?: number;
   /** 갱신 트리거 (PH2). */
   triggers?: PhoneTriggerSettings;
   /** 미응답 수신 문자 상한 (기본 2, 0=무제한) — 답장 안 한 스레드가 이만큼 쌓이면 갱신이 쉼. */

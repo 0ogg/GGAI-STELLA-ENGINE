@@ -7550,6 +7550,8 @@ body.is-mobile .ggai-phone-root.is-kb .ggai-phone-composer {
 .ggai-phone-screen {
   flex: 1;
   min-height: 0;
+  /* 계정 전환 팝업 등 폰 화면 안 오버레이의 위치 기준. */
+  position: relative;
   /* min-width 0 필수 — flex item 기본 min-width:auto 라서 넓은 콘텐츠(이미지
      원본 폭, 줄바꿈 없는 미리보기)가 화면 폭을 밀어내던 문제. */
   min-width: 0;
@@ -7694,6 +7696,152 @@ body.is-mobile .ggai-phone-root.is-kb .ggai-phone-composer {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 답글 알림 벨 — 헤더 아이콘 위 안 읽음 배지. */
+.ggai-phone-notif-btn {
+  position: relative;
+}
+.ggai-phone-notif-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: var(--color-red, #e5484d);
+  color: #fff;
+  font-size: 0.62em;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
+/* 답글 알림 목록 한 줄. */
+.ggai-phone-notif-row {
+  display: flex;
+  gap: 9px;
+  padding: 9px 11px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  cursor: pointer;
+}
+.ggai-phone-notif-row:hover {
+  background: var(--background-modifier-hover);
+}
+.ggai-phone-notif-main {
+  flex: 1;
+  min-width: 0;
+}
+.ggai-phone-notif-head {
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+.ggai-phone-notif-reason {
+  color: var(--text-muted);
+  font-size: 0.86em;
+}
+.ggai-phone-notif-head .ggai-phone-sns-time {
+  margin-left: auto;
+}
+.ggai-phone-notif-text {
+  margin-top: 2px;
+  font-size: 0.92em;
+  word-break: break-word;
+}
+.ggai-phone-notif-context {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 0.82em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 계정 전환 팝업 — 프사가 보이는 시트 + 백드롭 (폰 화면 안에 띄운다). */
+.ggai-phone-sheet-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  background: rgba(0, 0, 0, 0.35);
+}
+.ggai-phone-persona-switcher {
+  position: absolute;
+  z-index: 21;
+  top: 44px;
+  left: 12px;
+  right: 12px;
+  max-height: 70%;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 14px;
+  background: var(--background-primary);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+}
+.ggai-phone-persona-switcher-title {
+  padding: 6px 8px 8px;
+  font-size: 0.82em;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+.ggai-phone-persona-switcher-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.ggai-phone-persona-switcher-row:hover {
+  background: var(--background-modifier-hover);
+}
+.ggai-phone-persona-switcher-row.is-active {
+  background: var(--background-modifier-active-hover, var(--background-secondary));
+}
+.ggai-phone-persona-switcher-avatar {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  overflow: hidden;
+}
+.ggai-phone-persona-switcher-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.ggai-phone-persona-switcher-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-phone-persona-switcher-check {
+  flex: 0 0 auto;
+  color: var(--interactive-accent);
+  display: flex;
+}
+
+/* 알림에서 이동한 게시글 잠깐 강조. */
+.ggai-phone-sns-post.is-flash {
+  animation: ggai-phone-flash 1.4s ease-out;
+}
+@keyframes ggai-phone-flash {
+  0%,
+  30% {
+    background: var(--background-modifier-hover);
+  }
+  100% {
+    background: transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ggai-phone-sns-post.is-flash {
+    animation: none;
+  }
 }
 
 /* 이미지 확대 뷰어 — 옵시디언 기본 이미지 확대처럼 전체 화면 어두운 배경 위에

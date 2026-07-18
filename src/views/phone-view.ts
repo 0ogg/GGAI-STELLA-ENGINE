@@ -70,6 +70,14 @@ const APP_TITLES: Record<Exclude<PhoneScreen, "home">, string> = {
   tube: "스텔라튜브",
 };
 
+/** 답글 알림 한 건 — 내 게시글/댓글에 달린 (내가 아닌) 답글. */
+interface SnsNotification {
+  post: SnsPost;
+  reply: SnsReply;
+  /** post = 내 게시글에 달린 답글, comment = 내 댓글에 달린 답글. */
+  reason: "post" | "comment";
+}
+
 /** 연락처 목록 한 줄 — 시나리오 연락처 또는 엑스트라(모르는 번호) 스레드. */
 interface PhoneListRow {
   target: PhoneSendTarget;
@@ -112,8 +120,19 @@ class PhoneController extends Component {
   private snsDirty = false;
   /** 답글 입력이 열려 있는 대상 — 게시글 id + (대댓글이면) 부모 답글 id. */
   private replyOpen: { postId: string; parentId?: string } | null = null;
-  /** 문자 스레드 번역 표시 토글 (원문↔번역) — 스레드 이동해도 유지. */
-  private showMsgTranslation = false;
+  /**
+   * 원문↔번역 표시 오버라이드 — null = 설정(자동 번역)을 따름, true = 번역 보기,
+   * false = 원문 보기. 햄버거 토글이 설정한다. 문자/SNS 각각.
+   */
+  private msgTrOverride: boolean | null = null;
+  private snsTrOverride: boolean | null = null;
+  /** SNS 답글 알림 모아보기 화면 열림 여부. */
+  private snsNotifOpen = false;
+  /** SNS 좋아요(맘찍) 한 글 모아보기 화면 열림 여부. */
+  private snsLikedOpen = false;
+  /** 계정 전환 팝업 요소 (백드롭 + 시트) — 열려 있을 때만. */
+  private personaSwitcherEls: HTMLElement[] | null = null;
+  private personaSwitcherKeyHandler: ((e: KeyboardEvent) => void) | null = null;
   /** 등급 3+ 게시글의 댓글 접기 해제 상태 (v2 §6.7). */
   private snsExpanded = new Set<string>();
   /** [더 보기] 생성 중인 게시글. */
@@ -323,6 +342,9 @@ class PhoneController extends Component {
       this.plugin.store.on("sessions-changed", refreshContactsIfListing)
     );
 
+    // 언로드 시 열려 있던 계정 전환 팝업 정리 (document keydown 리스너 포함).
+    this.register(() => this.closePersonaSwitcher());
+
     void this.reloadAll().then(() => {
       // 갱신 트리거: 폰을 켰을 때 (PH2) — 게이트/스로틀은 refresh 가 판정.
       void this.plugin.phone.refresh("open");
@@ -492,6 +514,8 @@ class PhoneController extends Component {
     this.screen = "home";
     this.snsDirty = false;
     this.snsAccountFilter = null;
+    this.snsNotifOpen = false;
+    this.snsLikedOpen = false;
     this.renderHeader();
     this.renderBody();
     this.updateComposerState();
@@ -500,6 +524,8 @@ class PhoneController extends Component {
   private openApp(screen: PhoneScreen): void {
     this.screen = screen;
     this.snsAccountFilter = null;
+    this.snsNotifOpen = false;
+    this.snsLikedOpen = false;
     this.openStreamFile = null;
     this.renderHeader();
     this.renderBody();
@@ -527,23 +553,68 @@ class PhoneController extends Component {
     });
   }
 
-  private async openPersonaMenu(e: MouseEvent): Promise<void> {
+  /**
+   * 계정 전환 — 프사(표지)가 보이는 팝업 시트. 옵시디언 Menu 는 이미지를 못
+   * 그리므로 폰 화면 안에 백드롭 + 시트를 직접 띄운다 (바깥 클릭/Esc 로 닫힘).
+   */
+  private async openPersonaMenu(_e: MouseEvent): Promise<void> {
     const users = await this.plugin.store
       .getUsers()
       .catch(
         (): Awaited<ReturnType<StellaEnginePlugin["store"]["getUsers"]>> => []
       );
     if (users.length === 0) return;
-    const menu = new Menu();
+    this.closePersonaSwitcher();
+    const backdrop = this.screenEl.createDiv({
+      cls: "ggai-phone-sheet-backdrop",
+    });
+    const sheet = this.screenEl.createDiv({
+      cls: "ggai-phone-persona-switcher",
+    });
+    sheet.createDiv({
+      cls: "ggai-phone-persona-switcher-title",
+      text: "계정 전환",
+    });
     for (const u of users) {
-      menu.addItem((item) =>
-        item
-          .setTitle(u.profile.name || u.userFile)
-          .setChecked(u.userFile === this.loginUserFile)
-          .onClick(() => void this.plugin.phone.setLoginPersona(u.userFile))
-      );
+      const active = u.userFile === this.loginUserFile;
+      const row = sheet.createDiv({
+        cls: `ggai-phone-persona-switcher-row${active ? " is-active" : ""}`,
+      });
+      const av = row.createDiv({ cls: "ggai-phone-persona-switcher-avatar" });
+      renderThumb(this.app, av, u.thumbnailPath, u.profile.name || "?", "user");
+      row.createDiv({
+        cls: "ggai-phone-persona-switcher-name",
+        text: u.profile.name || u.userFile,
+      });
+      if (active) {
+        const check = row.createSpan({
+          cls: "ggai-phone-persona-switcher-check",
+        });
+        setIcon(check, "check");
+      }
+      row.addEventListener("click", () => {
+        this.closePersonaSwitcher();
+        if (u.userFile !== this.loginUserFile) {
+          void this.plugin.phone.setLoginPersona(u.userFile);
+        }
+      });
     }
-    menu.showAtMouseEvent(e);
+    backdrop.addEventListener("click", () => this.closePersonaSwitcher());
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") this.closePersonaSwitcher();
+    };
+    document.addEventListener("keydown", onKey);
+    this.personaSwitcherEls = [backdrop, sheet];
+    this.personaSwitcherKeyHandler = onKey;
+  }
+
+  private closePersonaSwitcher(): void {
+    for (const el of this.personaSwitcherEls ?? []) el.remove();
+    this.personaSwitcherEls = null;
+    if (this.personaSwitcherKeyHandler) {
+      document.removeEventListener("keydown", this.personaSwitcherKeyHandler);
+      this.personaSwitcherKeyHandler = null;
+    }
   }
 
   private renderHeader(): void {
@@ -573,25 +644,25 @@ class PhoneController extends Component {
       text: inThread ? this.currentThreadName() : APP_TITLES[this.screen],
     });
 
-    // 번역 보기 토글 (PH5) — 첫 켜기 때 번역 안 된 문자를 일괄 번역한다.
-    // 자동 번역이 켜져 있으면 항상 번역본이 보이므로 토글은 감춘다 (설정으로 제어).
-    if (
-      inThread &&
-      this.phoneTranslationEnabled() &&
-      !this.plugin.phone.isAutoTranslateOn()
-    ) {
-      const key = this.openTarget ? PhoneService.targetKey(this.openTarget) : "";
-      const trBtn = this.headerEl.createEl("button", {
-        cls: "ggai-phone-icon-btn",
-        attr: { "aria-label": "번역 보기 (원문↔번역)" },
+    // 답글 알림 벨 (SNS) — 내 게시글/댓글에 달린 답글 모아보기. 안 읽음 배지.
+    if (this.screen === "sns") {
+      const bell = this.headerEl.createEl("button", {
+        cls: "ggai-phone-icon-btn ggai-phone-notif-btn",
+        attr: { "aria-label": "답글 알림" },
       });
-      setIcon(trBtn, "languages");
-      trBtn.toggleClass("is-active", this.showMsgTranslation);
-      trBtn.toggleClass("is-busy", this.translateBusy.has(key));
-      trBtn.addEventListener("click", () => void this.toggleThreadTranslation());
+      setIcon(bell, "bell");
+      bell.toggleClass("is-active", this.snsNotifOpen);
+      const unread = this.countUnreadNotifications();
+      if (unread > 0 && !this.snsNotifOpen) {
+        bell.createSpan({
+          cls: "ggai-phone-notif-badge",
+          text: unread > 99 ? "99+" : String(unread),
+        });
+      }
+      bell.addEventListener("click", () => this.toggleNotifications());
     }
 
-    // 햄버거 메뉴 — 초기화/삭제 (메시지·SNS 화면).
+    // 햄버거 메뉴 — 초기화/삭제 + 번역 보기 토글 (메시지·SNS 화면).
     if (this.screen === "messages" || this.screen === "sns") {
       const menuBtn = this.headerEl.createEl("button", {
         cls: "ggai-phone-icon-btn",
@@ -619,12 +690,38 @@ class PhoneController extends Component {
     }).open();
   }
 
+  /** 원문↔번역 표시 토글 메뉴 항목 (문자 스레드 / SNS 공용). */
+  private addTranslationToggleItem(
+    menu: Menu,
+    kind: "messages" | "sns"
+  ): void {
+    if (!this.phoneTranslationEnabled()) return;
+    const showingTranslated =
+      kind === "messages" ? this.showMsgTranslated() : this.snsShowTranslated();
+    menu.addItem((mi) =>
+      mi
+        .setTitle(showingTranslated ? "원문 보기" : "번역 보기")
+        .setIcon("languages")
+        .onClick(() => {
+          if (kind === "messages") void this.setMsgTranslated(!showingTranslated);
+          else this.setSnsTranslated(!showingTranslated);
+        })
+    );
+  }
+
+  /** SNS 원문↔번역 표시 전환 (햄버거). */
+  private setSnsTranslated(show: boolean): void {
+    this.snsTrOverride = show;
+    if (this.screen === "sns") this.renderBody();
+  }
+
   private openHeaderMenu(e: MouseEvent): void {
     const menu = new Menu();
     if (this.screen === "messages") {
       const inThread = this.openTarget !== null;
       if (inThread) {
         const target = this.openTarget!;
+        this.addTranslationToggleItem(menu, "messages");
         menu.addItem((mi) =>
           mi
             .setTitle("대화 내용 삭제")
@@ -688,12 +785,28 @@ class PhoneController extends Component {
     } else if (this.screen === "sns") {
       menu.addItem((mi) =>
         mi
+          .setTitle(this.snsLikedOpen ? "피드로 돌아가기" : "좋아요 한 글 모아보기")
+          .setIcon("heart")
+          .onClick(() => {
+            this.snsLikedOpen = !this.snsLikedOpen;
+            if (this.snsLikedOpen) {
+              this.snsNotifOpen = false;
+              this.snsAccountFilter = null;
+            }
+            this.renderHeader();
+            this.renderBody();
+            this.updateComposerState();
+          })
+      );
+      this.addTranslationToggleItem(menu, "sns");
+      menu.addItem((mi) =>
+        mi
           .setTitle("좋아요 글 남기고 초기화")
           .setIcon("heart")
           .onClick(() =>
             this.confirmThen(
               "피드 초기화",
-              "♥ 를 누른 게시글(댓글 포함)만 남기고 피드를 비웁니다.",
+              "♥ 를 누른 게시글(댓글 포함)만 남기고 피드를 비웁니다. 남은 글이 없는 모르는 계정은 함께 정리됩니다.",
               "초기화",
               () => this.plugin.phone.clearSnsFeed({ keepLiked: true })
             )
@@ -706,7 +819,7 @@ class PhoneController extends Component {
           .onClick(() =>
             this.confirmThen(
               "피드 전체 초기화",
-              "모든 게시글과 댓글을 삭제합니다.",
+              "모든 게시글과 댓글을 삭제합니다. 모르는 계정도 함께 정리됩니다(캐릭터·페르소나·공식 계정은 유지).",
               "초기화",
               () => this.plugin.phone.clearSnsFeed({ keepLiked: false })
             )
@@ -721,22 +834,24 @@ class PhoneController extends Component {
     return this.plugin.data.phone?.translation?.enabled !== false;
   }
 
-  /** 문자 스레드 번역 토글 — 켤 때 번역 안 된 문자가 있으면 먼저 일괄 번역. */
-  private async toggleThreadTranslation(): Promise<void> {
+  /**
+   * 문자 원문↔번역 표시 전환 (햄버거) — 번역 보기로 갈 때 번역 안 된 문자가
+   * 있으면 먼저 일괄 번역한다.
+   */
+  private async setMsgTranslated(show: boolean): Promise<void> {
     if (!this.loginProfile || !this.openTarget) return;
-    if (this.showMsgTranslation) {
-      this.showMsgTranslation = false;
+    if (!show) {
+      this.msgTrOverride = false;
       this.renderHeader();
       if (this.screen === "messages") this.renderBody();
       return;
     }
     const key = PhoneService.targetKey(this.openTarget);
-    if (this.translateBusy.has(key)) return;
     const thread = this.currentThread();
     const needs = (thread?.messages ?? []).some(
       (m) => !m.translation && m.text.trim() !== ""
     );
-    if (needs) {
+    if (needs && !this.translateBusy.has(key)) {
       this.translateBusy.add(key);
       this.renderHeader();
       const result = await this.plugin.phone.translateThread(
@@ -751,9 +866,49 @@ class PhoneController extends Component {
       }
       await this.reloadMessages();
     }
-    this.showMsgTranslation = true;
+    this.msgTrOverride = true;
     this.renderHeader();
     if (this.screen === "messages") this.renderBody();
+  }
+
+  /** 문자 1통 번역 재생성 (덮어쓰기) — 개별 문자 메뉴. */
+  private async regenerateMessageTranslation(messageId: string): Promise<void> {
+    if (!this.loginProfile || !this.openTarget) return;
+    const key = PhoneService.targetKey(this.openTarget);
+    if (this.translateBusy.has(key)) return;
+    this.translateBusy.add(key);
+    this.renderHeader();
+    const result = await this.plugin.phone.translateThread(
+      this.loginProfile.id,
+      this.openTarget,
+      { force: true, messageId }
+    );
+    this.translateBusy.delete(key);
+    if (!result.ok) {
+      new Notice(`스텔라 폰: ${result.error}`);
+      this.renderHeader();
+      return;
+    }
+    this.msgTrOverride = true; // 재생성 결과가 보이도록 번역 보기로.
+    await this.reloadMessages();
+    this.renderHeader();
+  }
+
+  /** SNS 게시글 번역 재생성 (본문+댓글 덮어쓰기) — 개별 게시물 ⋯ 메뉴. */
+  private async regenerateSnsPostTranslation(postId: string): Promise<void> {
+    if (this.translateBusy.has(postId)) return;
+    this.translateBusy.add(postId);
+    new Notice("번역을 다시 생성하는 중…");
+    const result = await this.plugin.phone.translateSnsPost(postId, {
+      force: true,
+    });
+    this.translateBusy.delete(postId);
+    if (!result.ok) {
+      new Notice(`스텔라 폰: ${result.error}`);
+      return;
+    }
+    this.snsTrOverride = true; // 재생성 결과가 보이도록 번역 보기로.
+    await this.reloadFeed();
   }
 
   // ─────────────────────────── 본문 렌더 ───────────────────────────
@@ -1105,9 +1260,8 @@ class PhoneController extends Component {
           );
         }
         // 번역 보기 — 번역이 있는 문자만 바꿔 보여준다 (원문은 불변).
-        // 자동 번역이 켜져 있으면 기본으로 번역본, 헤더 토글로 원문 전환 가능.
-        const showTr =
-          this.plugin.phone.isAutoTranslateOn() || this.showMsgTranslation;
+        // 오버라이드(햄버거 원문/번역 토글) 우선, 없으면 자동 번역 설정.
+        const showTr = this.showMsgTranslated();
         const shown = showTr && m.translation ? m.translation.text : m.text;
         if (shown.trim()) {
           const textDiv = bubble.createDiv();
@@ -1126,6 +1280,16 @@ class PhoneController extends Component {
           const target = this.openTarget;
           if (!target) return;
           const menu = new Menu();
+          if (this.phoneTranslationEnabled() && m.text.trim() !== "") {
+            menu.addItem((mi) =>
+              mi
+                .setTitle("번역 재생성")
+                .setIcon("languages")
+                .onClick(() =>
+                  void this.regenerateMessageTranslation(messageId)
+                )
+            );
+          }
           menu.addItem((mi) =>
             mi
               .setTitle("이 문자 삭제")
@@ -1202,6 +1366,18 @@ class PhoneController extends Component {
 
   private renderSnsFeed(): void {
     this.bodyEl.addClass("is-sns");
+
+    // ── 답글 알림 모아보기 — 내 게시글/댓글에 달린 답글만 (컴포저 숨김). ──
+    if (this.snsNotifOpen) {
+      this.renderSnsNotifications();
+      return;
+    }
+
+    // ── 좋아요(맘찍) 한 글 모아보기 — 내가 ♥ 누른 게시글만 (컴포저 숨김). ──
+    if (this.snsLikedOpen) {
+      this.renderSnsLiked();
+      return;
+    }
 
     // ── 계정 모아보기 모드 — 필터 바 + 그 계정 게시글만 (컴포저 숨김). ──
     if (this.snsAccountFilter) {
@@ -1326,7 +1502,10 @@ class PhoneController extends Component {
   /** 게시글 카드 — 미디어 있으면 헤더 → 사진 → 액션(♥/댓글) → 본문 → 댓글,
    *  텍스트만이면 헤더 → 본문 → 액션 → 댓글. */
   private renderSnsPost(post: SnsPost): void {
-    const card = this.bodyEl.createDiv({ cls: "ggai-phone-sns-post" });
+    const card = this.bodyEl.createDiv({
+      cls: "ggai-phone-sns-post",
+      attr: { "data-post-id": post.id },
+    });
     const showTranslated = this.snsShowTranslated();
     const postText =
       showTranslated && post.translation ? post.translation.text : post.text;
@@ -1392,6 +1571,14 @@ class PhoneController extends Component {
           .setIcon("user")
           .onClick(() => this.setSnsAccountFilter(post.author))
       );
+      if (this.phoneTranslationEnabled()) {
+        menu.addItem((mi) =>
+          mi
+            .setTitle("이 게시물 번역 재생성")
+            .setIcon("languages")
+            .onClick(() => void this.regenerateSnsPostTranslation(post.id))
+        );
+      }
       menu.addItem((mi) =>
         mi
           .setTitle("게시글 삭제")
@@ -1686,9 +1873,195 @@ class PhoneController extends Component {
     window.setTimeout(() => rta.focus(), 0);
   }
 
-  /** SNS/문자 번역본을 보여줄지 — 폰 설정의 "자동 번역"으로 일괄 제어. */
+  /**
+   * SNS 번역본을 보여줄지 — 오버라이드(햄버거 원문/번역 토글)가 있으면 그것,
+   * 없으면 폰 설정의 "자동 번역"을 따른다.
+   */
   private snsShowTranslated(): boolean {
-    return this.plugin.phone.isAutoTranslateOn();
+    return this.snsTrOverride ?? this.plugin.phone.isAutoTranslateOn();
+  }
+
+  /** 문자 번역본을 보여줄지 — 오버라이드 우선, 없으면 자동 번역 설정. */
+  private showMsgTranslated(): boolean {
+    return this.msgTrOverride ?? this.plugin.phone.isAutoTranslateOn();
+  }
+
+  // ─────────────────────────── 답글 알림 (모아보기) ───────────────────────────
+
+  /**
+   * 내 게시글/댓글에 달린 (내가 아닌) 답글을 최신순으로 모은다.
+   *  - 내 게시글에 달린 답글 = reason "post"
+   *  - 내 댓글에 달린 답글(parentId 가 내 댓글) = reason "comment"
+   * 같은 답글이 둘 다 해당하면 "comment" 를 우선한다(중복 방지).
+   */
+  private computeSnsNotifications(): SnsNotification[] {
+    const viewerId = this.loginProfile?.id;
+    if (!viewerId || !this.feed) return [];
+    const isViewer = (a: SnsAuthor) =>
+      a.kind === "persona" && a.id === viewerId;
+    const out = new Map<string, SnsNotification>();
+    for (const post of this.feed.posts) {
+      const myReplyIds = new Set(
+        post.replies.filter((r) => isViewer(r.author)).map((r) => r.id)
+      );
+      const postMine = isViewer(post.author);
+      if (!postMine && myReplyIds.size === 0) continue;
+      for (const r of post.replies) {
+        if (isViewer(r.author)) continue;
+        if (r.parentId && myReplyIds.has(r.parentId)) {
+          out.set(r.id, { post, reply: r, reason: "comment" });
+        } else if (postMine) {
+          out.set(r.id, { post, reply: r, reason: "post" });
+        }
+      }
+    }
+    return [...out.values()].sort(
+      (a, b) => b.reply.createdAt - a.reply.createdAt
+    );
+  }
+
+  /** 마지막 확인 이후 새로 달린 답글 수 (벨 배지). */
+  private countUnreadNotifications(): number {
+    const seen = this.plugin.data.phone?.snsNotifSeenAt ?? 0;
+    return this.computeSnsNotifications().filter(
+      (n) => n.reply.createdAt > seen
+    ).length;
+  }
+
+  /** 벨 토글 — 열면 안 읽음을 확인 처리(seenAt 저장). */
+  private toggleNotifications(): void {
+    this.snsNotifOpen = !this.snsNotifOpen;
+    if (this.snsNotifOpen) {
+      this.snsAccountFilter = null;
+      void this.markSnsNotificationsSeen();
+    }
+    this.renderHeader();
+    this.renderBody();
+    this.updateComposerState();
+  }
+
+  private async markSnsNotificationsSeen(): Promise<void> {
+    await this.plugin.savePluginData({
+      phone: { ...(this.plugin.data.phone ?? {}), snsNotifSeenAt: Date.now() },
+    });
+  }
+
+  private renderSnsNotifications(): void {
+    // 상단 바 — 닫기.
+    const bar = this.bodyEl.createDiv({ cls: "ggai-phone-sns-filterbar" });
+    setIcon(bar.createSpan({ cls: "ggai-phone-sns-photo-icon" }), "bell");
+    bar.createSpan({
+      cls: "ggai-phone-sns-filterbar-label",
+      text: "답글 알림",
+    });
+    const closeBtn = bar.createEl("button", {
+      cls: "ggai-phone-sns-attach-remove",
+      attr: { "aria-label": "알림 닫기" },
+    });
+    setIcon(closeBtn, "x");
+    closeBtn.addEventListener("click", () => this.toggleNotifications());
+
+    const notifs = this.computeSnsNotifications();
+    if (notifs.length === 0) {
+      const empty = this.bodyEl.createDiv({ cls: "ggai-phone-empty" });
+      empty.createDiv({ text: "아직 답글 알림이 없습니다." });
+      empty.createDiv({
+        cls: "ggai-phone-empty-sub",
+        text: "내 게시글이나 댓글에 누군가 답글을 달면 여기 모입니다.",
+      });
+      return;
+    }
+    const showTr = this.snsShowTranslated();
+    for (const n of notifs) {
+      const row = this.bodyEl.createDiv({ cls: "ggai-phone-notif-row" });
+      this.renderAuthorAvatar(row, n.reply.author);
+      const main = row.createDiv({ cls: "ggai-phone-notif-main" });
+      const head = main.createDiv({ cls: "ggai-phone-notif-head" });
+      head.createSpan({
+        cls: "ggai-phone-sns-name",
+        text: n.reply.author.name,
+      });
+      head.createSpan({
+        cls: "ggai-phone-notif-reason",
+        text:
+          n.reason === "comment"
+            ? " 님이 내 댓글에 답글"
+            : " 님이 내 게시글에 답글",
+      });
+      head.createSpan({
+        cls: "ggai-phone-sns-time",
+        text: formatTimeShort(n.reply.createdAt),
+      });
+      const body = main.createDiv({ cls: "ggai-phone-notif-text" });
+      const shown =
+        showTr && n.reply.translation ? n.reply.translation.text : n.reply.text;
+      body.innerHTML = formatChatText(shown);
+      const ctx = n.post.text.replace(/\s+/g, " ").trim().slice(0, 50);
+      if (ctx) {
+        main.createDiv({
+          cls: "ggai-phone-notif-context",
+          text: `↳ ${ctx}`,
+        });
+      }
+      row.addEventListener("click", () => this.jumpToPost(n.post.id));
+    }
+  }
+
+  /** 좋아요(맘찍) 한 글 모아보기 — 내가 ♥ 누른 게시글을 최신순으로. */
+  private renderSnsLiked(): void {
+    const bar = this.bodyEl.createDiv({ cls: "ggai-phone-sns-filterbar" });
+    setIcon(bar.createSpan({ cls: "ggai-phone-sns-photo-icon" }), "heart");
+    bar.createSpan({
+      cls: "ggai-phone-sns-filterbar-label",
+      text: "좋아요 한 글",
+    });
+    const closeBtn = bar.createEl("button", {
+      cls: "ggai-phone-sns-attach-remove",
+      attr: { "aria-label": "닫기" },
+    });
+    setIcon(closeBtn, "x");
+    closeBtn.addEventListener("click", () => {
+      this.snsLikedOpen = false;
+      this.renderHeader();
+      this.renderBody();
+      this.updateComposerState();
+    });
+
+    const viewerId = this.loginProfile?.id;
+    const posts = viewerId
+      ? [...(this.feed?.posts ?? [])]
+          .filter((p) => (p.likedBy ?? []).includes(viewerId))
+          .sort((a, b) => b.createdAt - a.createdAt)
+      : [];
+    if (posts.length === 0) {
+      const empty = this.bodyEl.createDiv({ cls: "ggai-phone-empty" });
+      empty.createDiv({ text: "아직 좋아요 한 글이 없습니다." });
+      empty.createDiv({
+        cls: "ggai-phone-empty-sub",
+        text: "게시글의 ♥ 를 누르면 여기 모입니다.",
+      });
+      return;
+    }
+    for (const post of posts) this.renderSnsPost(post);
+  }
+
+  /** 알림에서 게시글로 이동 — 피드로 돌아가 그 글로 스크롤/강조. */
+  private jumpToPost(postId: string): void {
+    this.snsNotifOpen = false;
+    this.snsAccountFilter = null;
+    this.renderHeader();
+    this.renderBody();
+    this.updateComposerState();
+    window.requestAnimationFrame(() => {
+      const el = this.bodyEl.querySelector(
+        `.ggai-phone-sns-post[data-post-id="${window.CSS.escape(postId)}"]`
+      );
+      if (el instanceof HTMLElement) {
+        el.scrollIntoView({ block: "center" });
+        el.addClass("is-flash");
+        window.setTimeout(() => el.removeClass("is-flash"), 1400);
+      }
+    });
   }
 
   /** 입력 중이라 미뤄둔 피드 재렌더를 입력이 끝난 뒤 반영. */

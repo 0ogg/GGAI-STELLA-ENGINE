@@ -31,6 +31,7 @@ import {
   type SessionStreamFile,
   type SnsAccount,
   type SnsAuthor,
+  type SnsFeedFile,
   type SnsPost,
   type StreamChatItem,
   type StreamNodeReaction,
@@ -1483,6 +1484,10 @@ export class PhoneService {
       if (added === 0) return { ok: false, error: "반영할 댓글이 없습니다." };
       await store.saveSnsFeed(freshFeed);
       if (engine.wasChanged()) await store.savePhoneAccounts(accountsFile);
+      // 자동 번역 (§4) — 켜져 있으면 방금 더 불러온 댓글도 바로 번역해 둔다.
+      if (this.isAutoTranslateOn()) {
+        await this.translateSnsPost(postId).catch(() => {});
+      }
       return { ok: true };
     } finally {
       this.snsBusy = false;
@@ -1513,6 +1518,23 @@ export class PhoneService {
       ...(resolvedParentId ? { parentId: resolvedParentId } : {}),
     });
     await store.saveSnsFeed(feed);
+    // 내 답글에 대한 답글이 와야 한다 — 게시 직후 반응(reactToPostId)과 같은 경로로
+    // 그 글에 반응 배치 1회를 바로 시도한다(스로틀 무관). 캐릭터들이 방금 단 내
+    // 댓글에 되받아 답글을 달 기회.
+    const profile = this.resolvePhoneProfile();
+    if (profile && this.plugin.ai.isAvailable()) {
+      const userFile =
+        this.plugin.data.phone?.loginPersonaFile ??
+        this.plugin.data.activeUserProfileFile ??
+        "";
+      void this.generateSnsActivity(persona, userFile, profile, {
+        notify: true,
+        reactToPostId: postId,
+        reactedToReply: true,
+      }).catch((err) =>
+        console.warn("[GGAI Stella] SNS 답글 반응 생성 실패:", err)
+      );
+    }
   }
 
   /** 게시글 좋아요 토글 — 페르소나별 1회 (likedBy 목록). */
@@ -1579,6 +1601,10 @@ export class PhoneService {
   /**
    * SNS 피드 초기화. keepLiked = 좋아요(♥)가 있는 게시글은 댓글째 남긴다
    * (기본 likes 말고 사용자가 직접 누른 likedBy 기준).
+   *
+   * 남는 게시글이 하나도 없는 엑스트라(모르는 사람) 계정은 accounts.json 에서도
+   * 함께 지운다 — 캐릭터/페르소나/공식(verified) 계정은 게시글이 없어도 유지.
+   * 전체 초기화면 모든 엑스트라가, 좋아요만 남기면 그 글의 작성자만 살아남는다.
    */
   async clearSnsFeed(opts: { keepLiked: boolean }): Promise<void> {
     const store = this.plugin.store;
@@ -1587,6 +1613,29 @@ export class PhoneService {
       ? feed.posts.filter((p) => (p.likedBy?.length ?? 0) > 0)
       : [];
     await store.saveSnsFeed(feed);
+    await this.pruneOrphanExtraAccounts(feed);
+  }
+
+  /**
+   * 살아남은 게시글/댓글의 작성자에 해당하지 않는 엑스트라 계정을 accounts.json
+   * 에서 제거한다. 캐릭터·페르소나·공식(verified) 계정은 항상 남긴다.
+   */
+  private async pruneOrphanExtraAccounts(feed: SnsFeedFile): Promise<void> {
+    const store = this.plugin.store;
+    const accountsFile = await store.getPhoneAccounts();
+    const alive = new Set<string>();
+    for (const p of feed.posts) {
+      alive.add(snsAuthorKey(p.author));
+      for (const r of p.replies) alive.add(snsAuthorKey(r.author));
+    }
+    const kept = accountsFile.accounts.filter((acc) => {
+      if (acc.kind !== "extra" || acc.verified) return true;
+      return alive.has(snsAccountKey(acc));
+    });
+    if (kept.length !== accountsFile.accounts.length) {
+      accountsFile.accounts = kept;
+      await store.savePhoneAccounts(accountsFile);
+    }
   }
 
   /** 게시글 삭제 (댓글 포함). */
@@ -1642,7 +1691,8 @@ export class PhoneService {
    */
   async translateThread(
     personaId: string,
-    target: PhoneSendTarget
+    target: PhoneSendTarget,
+    opts?: { force?: boolean; messageId?: string }
   ): Promise<PhoneSendResult> {
     const key = `tr:${personaId}:${PhoneService.targetKey(target)}`;
     if (this.translatingKeys.has(key)) {
@@ -1653,8 +1703,12 @@ export class PhoneService {
       const store = this.plugin.store;
       const data = await store.getPhoneMessages(personaId);
       const thread = findTargetThread(data, target);
+      // force = 이미 번역된 것도 다시 번역(덮어쓰기), messageId = 그 한 통만.
       const targets = (thread?.messages ?? []).filter(
-        (m) => !m.translation && m.text.trim() !== ""
+        (m) =>
+          m.text.trim() !== "" &&
+          (opts?.force || !m.translation) &&
+          (!opts?.messageId || m.id === opts.messageId)
       );
       if (targets.length === 0) return { ok: true };
       const r = await this.plugin.translation.translateItems(
@@ -1673,7 +1727,7 @@ export class PhoneService {
         for (const th of fresh.threads) {
           for (const m of th.messages) {
             const t = byMessageId.get(m.id);
-            if (t && !m.translation) {
+            if (t && (opts?.force || !m.translation)) {
               m.translation = { text: t };
               changed = true;
             }
@@ -1687,8 +1741,14 @@ export class PhoneService {
     }
   }
 
-  /** 게시글 본문 + 답글의 번역 안 된 항목을 일괄 번역해 저장한다. */
-  async translateSnsPost(postId: string): Promise<PhoneSendResult> {
+  /**
+   * 게시글 본문 + 답글의 번역 안 된 항목을 일괄 번역해 저장한다.
+   * force = 이미 번역된 것도 다시 번역(재생성 — 덮어쓰기).
+   */
+  async translateSnsPost(
+    postId: string,
+    opts?: { force?: boolean }
+  ): Promise<PhoneSendResult> {
     const key = `tr:sns:${postId}`;
     if (this.translatingKeys.has(key)) {
       return { ok: false, error: "이미 번역 중입니다." };
@@ -1702,12 +1762,12 @@ export class PhoneService {
       const items: { id: string; source: string }[] = [];
       /** 짧은 요청 id → 반영 대상 ("post" 또는 답글 id). */
       const applyTo = new Map<string, string>();
-      if (!post.translation && post.text.trim()) {
+      if ((opts?.force || !post.translation) && post.text.trim()) {
         items.push({ id: "p0", source: post.text });
         applyTo.set("p0", "post");
       }
       post.replies.forEach((rp, i) => {
-        if (!rp.translation && rp.text.trim()) {
+        if ((opts?.force || !rp.translation) && rp.text.trim()) {
           items.push({ id: `r${i}`, source: rp.text });
           applyTo.set(`r${i}`, rp.id);
         }
@@ -1725,13 +1785,13 @@ export class PhoneService {
           for (const [reqId, translated] of r.results) {
             const dest = applyTo.get(reqId);
             if (dest === "post") {
-              if (!fp.translation) {
+              if (opts?.force || !fp.translation) {
                 fp.translation = { text: translated };
                 changed = true;
               }
             } else if (dest) {
               const reply = fp.replies.find((rp) => rp.id === dest);
-              if (reply && !reply.translation) {
+              if (reply && (opts?.force || !reply.translation)) {
                 reply.translation = { text: translated };
                 changed = true;
               }
@@ -1933,7 +1993,7 @@ export class PhoneService {
     persona: StellaUserProfile,
     userFile: string,
     profile: GenerationProfileLite,
-    opts: { notify: boolean; reactToPostId?: string }
+    opts: { notify: boolean; reactToPostId?: string; reactedToReply?: boolean }
   ): Promise<void> {
     if (this.snsBusy) return;
     this.snsBusy = true;
@@ -2011,13 +2071,25 @@ export class PhoneService {
         viewerLatest && viewerLatest.id !== boomPost?.id
           ? viewerLatest
           : undefined;
+      // 사용자가 방금 반응(게시/답글)한 글 — 이 글은 최상단/뷰어 글이 아니어도
+      // 댓글을 받을 수 있게 연다(그래야 내 답글에 되받아 답글이 달린다).
+      const reactedPost = opts.reactToPostId
+        ? feed.posts.find((p) => p.id === opts.reactToPostId)
+        : undefined;
       const commentableIds = new Set(
-        [boomPost?.id, viewerPost?.id].filter((v): v is string => !!v)
+        [boomPost?.id, viewerPost?.id, reactedPost?.id].filter(
+          (v): v is string => !!v
+        )
       );
       const recent = [...feed.posts]
         .sort((a, b) => snsEffectiveAt(b) - snsEffectiveAt(a))
-        .slice(0, SNS_FEED_EXCERPT)
-        .sort((a, b) => a.createdAt - b.createdAt);
+        .slice(0, SNS_FEED_EXCERPT);
+      // 사용자가 방금 반응한 글은 오래됐어도 발췌에 반드시 넣는다 — 그래야
+      // 모델이 내 댓글을 보고 되받아 답글을 달 수 있다.
+      if (reactedPost && !recent.some((p) => p.id === reactedPost.id)) {
+        recent.push(reactedPost);
+      }
+      recent.sort((a, b) => a.createdAt - b.createdAt);
       const feedLines =
         recent.length === 0
           ? "The feed is currently empty."
@@ -2050,9 +2122,11 @@ export class PhoneService {
                 const open =
                   p.id === boomPost?.id
                     ? ` [TOP ISSUE — open for comments, top for ${boomTurns} batch(es)]`
-                    : p.id === viewerPost?.id
-                      ? ` [viewer's latest — open for comments]`
-                      : "";
+                    : opts.reactedToReply && p.id === reactedPost?.id
+                      ? ` [${personaName} just commented here — open, reply back to them]`
+                      : p.id === viewerPost?.id
+                        ? ` [viewer's latest — open for comments]`
+                        : "";
                 return (
                   `- id=${p.id.slice(0, 8)}${scale}${open} by ${p.author.name}${world}${viewer}${live}: ` +
                   bodyText +
@@ -2152,13 +2226,21 @@ export class PhoneService {
           : "") +
         `\n[BEGIN JSON]`;
 
-      const userMsg = opts.reactToPostId
-        ? `[${personaName} just posted id=${opts.reactToPostId.slice(0, 8)} ` +
-          `moments ago. Generate the feed activity now, including first ` +
-          `reactions to that post AT THE LEVEL ITS ISSUE SCALE DESERVES — an ` +
-          `everyday post gets 1-3 replies, not a crowd. The rest of the batch ` +
-          `is normal new posts about the worlds' events.]`
-        : "[Generate the feed activity now.]";
+      const userMsg = opts.reactedToReply
+        ? `[${personaName} (the viewer) just left a comment on post ` +
+          `id=${opts.reactToPostId?.slice(0, 8)}. Generate the feed activity now, ` +
+          `including a few natural replies that respond to ${personaName}'s ` +
+          `comment (set "kind":"comment","on":"${opts.reactToPostId?.slice(0, 8)}",` +
+          `"to":"${personaName}") — the people already in that thread talk back ` +
+          `to them. Keep it proportional to the issue (not a crowd). The rest of ` +
+          `the batch is normal new posts about the worlds' events.]`
+        : opts.reactToPostId
+          ? `[${personaName} just posted id=${opts.reactToPostId.slice(0, 8)} ` +
+            `moments ago. Generate the feed activity now, including first ` +
+            `reactions to that post AT THE LEVEL ITS ISSUE SCALE DESERVES — an ` +
+            `everyday post gets 1-3 replies, not a crowd. The rest of the batch ` +
+            `is normal new posts about the worlds' events.]`
+          : "[Generate the feed activity now.]";
       const callOnce = async (extra?: string): Promise<SnsActivityDraft[]> => {
         try {
           const res = await plugin.ai.chat({
@@ -3245,6 +3327,16 @@ function effectiveRegisteredIds(data: PhoneMessagesFile): Set<string> {
 // snsAuthorKey 는 v2 에서 types/phone.ts 로 이동 (accounts.json 백필과 공용) —
 // 기존 사용처 호환을 위해 재수출.
 export { snsAuthorKey };
+
+/** 계정 → 게시글 작성자와 같은 동일성 키 (accounts.json ↔ 피드 매칭). */
+function snsAccountKey(acc: SnsAccount): string {
+  return snsAuthorKey({
+    kind: acc.kind === "press" ? "extra" : acc.kind,
+    ...(acc.scenarioId ? { id: acc.scenarioId } : {}),
+    name: acc.name,
+    ...(acc.handle ? { handle: acc.handle } : {}),
+  });
+}
 
 /** 대상 스레드를 찾기만 한다 (없으면 null — resolveTargetThread 와 달리 생성하지 않음). */
 function findTargetThread(
