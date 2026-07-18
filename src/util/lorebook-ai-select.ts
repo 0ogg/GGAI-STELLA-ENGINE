@@ -8,6 +8,7 @@
  */
 
 import type { StellaLorebook } from "../types/lorebook";
+import { composeMediaPrompt } from "./media-prompt-body";
 
 /** 선별 모델에 첨부할 최근 본문 길이(자) 기본값 — 설정("본문 첨부량")으로 변경 가능. */
 export const DEFAULT_LOREBOOK_SELECT_CONTEXT_CHARS = 4000;
@@ -51,6 +52,24 @@ export function buildLorebookCatalog(
 /** 엔트리 번호 목록 텍스트 — 프롬프트의 `{{lorebook}}` 자리에 들어간다. */
 export function renderLorebookCatalogText(catalog: LorebookCatalogItem[]): string {
   return catalog.map((item, i) => `${i + 1}. ${item.label}`).join("\n");
+}
+
+/**
+ * 확장 작업용 선별 프롬프트 결합 — `{{lorebook}}`/`{{main}}` 에 더해 `{{task}}` 자리에
+ * "이 로어북이 함께 쓰일 작업 프롬프트 전문"(그 확장의 편집 가능한 프롬프트)을 치환한다.
+ * task 본문 안의 {{main}}/{{lorebook}} 매크로가 다시 치환되지 않게 task 를 마지막에
+ * 넣는다. 지침에 `{{task}}` 가 없으면 composeMediaPrompt 관례대로 맨 앞에 붙인다.
+ */
+export function composeLorebookSelectTaskPrompt(
+  instruction: string,
+  body: string,
+  catalogText: string,
+  taskText: string
+): string {
+  const hasTask = /\{\{\s*task\s*\}\}/i.test(instruction);
+  const text = composeMediaPrompt(instruction, body, catalogText);
+  if (hasTask) return text.replace(/\{\{\s*task\s*\}\}/gi, () => taskText);
+  return taskText ? `${taskText}\n\n${text}` : text;
 }
 
 /**

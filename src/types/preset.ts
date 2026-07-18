@@ -124,6 +124,10 @@ export interface LorebookPlusActiveSettings {
   contextChars?: number;
   /** true 면 같은 지점 재생성은 직전 선별 결과를 재사용 (새 AI 호출 없음). */
   reuseOnRegen?: boolean;
+  /** AI 매칭을 로어북을 쓰는 다른 확장(번역/삽화 등)에도 적용. 생략 시 false. */
+  applyToExtensions?: boolean;
+  /** 확장용 선별 프롬프트 id (mediaPrompts.lorebookSelect). 없으면 확장 작업 기본 프롬프트. */
+  taskPromptId?: string;
   /** 로어북 자동 생성 사용 — 세션 전용 로어북에 새 인물/사건/고유명사를 자동 기록. 생략 시 false. */
   autoGen?: boolean;
   /** 자동 생성 주기 — 마지막 스캔 이후 AI 생성 횟수. 생략 시 5. */

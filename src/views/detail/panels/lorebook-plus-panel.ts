@@ -1,6 +1,7 @@
 import { Notice, setIcon } from "obsidian";
 import type { SettingsPanel, SettingsPanelContext } from "../../../services/settings-panel-registry";
 import type { LorebookPlusActiveSettings } from "../../../types/preset";
+import { LOREBOOK_SELECT_TASK_DEFAULT_PROMPT_ID } from "../../../util/default-media-prompts";
 import { DEFAULT_LOREBOOK_SELECT_CONTEXT_CHARS } from "../../../util/lorebook-ai-select";
 import {
   DEFAULT_LOREBOOK_GEN_INTERVAL,
@@ -93,6 +94,37 @@ export function createLorebookPlusSettingsPanel(): SettingsPanel {
           onSelect: (id) =>
             void patchLorebookPlus(ctx, { reuseOnRegen: id === "reuse" }),
         });
+
+        // 다른 확장에도 적용 — 번역/삽화 등 로어북을 쓰는 확장의 로어북 텍스트도
+        // AI 선별 합집합으로 만든다 (허브: LorebookPlusService.buildTaskLorebookText).
+        renderEnableToggle({
+          parent: body,
+          label: "다른 확장에도 적용 — 번역·삽화 등",
+          checked: lp.applyToExtensions === true,
+          onChange: (applyToExtensions) =>
+            void patchLorebookPlus(ctx, { applyToExtensions }),
+        });
+
+        if (lp.applyToExtensions === true) {
+          // 확장용 선별 프롬프트 — {{task}} = 그 확장의 프롬프트 전문, {{main}} = 대상 본문.
+          renderMediaPromptPicker({
+            plugin,
+            parent: body,
+            label: "확장 선별 프롬프트",
+            bucket: "lorebookSelect",
+            activeId: lp.taskPromptId ?? LOREBOOK_SELECT_TASK_DEFAULT_PROMPT_ID,
+            onSelect: (taskPromptId) =>
+              void patchLorebookPlus(ctx, { taskPromptId }),
+            onChanged: () => ctx.rerender(),
+            onDeleted: (promptId) => {
+              if (lp.taskPromptId === promptId) {
+                void patchLorebookPlus(ctx, { taskPromptId: undefined });
+              } else {
+                ctx.rerender();
+              }
+            },
+          });
+        }
       }
 
       // ── 로어북 자동 생성 — 세션 전용 로어북에 새 인물/사건/고유명사를 자동 기록.

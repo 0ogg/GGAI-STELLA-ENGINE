@@ -18,7 +18,6 @@ import { buildSpans, spansToText } from "../util/session-text";
 import { resolveMediaPrompt } from "../util/default-media-prompts";
 import { composeMediaPrompt } from "../util/media-prompt-body";
 import {
-  buildLorebookText,
   getScenarioMediaLorebookIds,
   loadMediaLorebooks,
   mergeLorebookIds,
@@ -150,7 +149,14 @@ export class TranslationService {
     if (!setup.ok) return { ok: false, text: "", error: setup.error };
     const { prompt, profile, books } = setup;
     const segments = [{ id: "1", role: "translate" as const, source: text }];
-    const lorebookText = buildLorebookText(books, text);
+    // 로어북 허브 경유 — AI 선별 "다른 확장에도 적용"이 켜져 있으면 자동 반영.
+    const lorebookText = await this.plugin.lorebookPlus.buildTaskLorebookText({
+      sessionFile,
+      books,
+      scanText: text,
+      taskPrompt: prompt.prompt,
+      taskLabel: "번역",
+    });
     try {
       const responseText = await this.callModel(
         profile,
@@ -228,10 +234,14 @@ export class TranslationService {
         role: "translate" as const,
         source: c.source,
       }));
-      const lorebookText = buildLorebookText(
+      // 세션 무관 실행 — 로어북 허브는 전역 설정(sessionFile "")으로 판단한다.
+      const lorebookText = await this.plugin.lorebookPlus.buildTaskLorebookText({
+        sessionFile: "",
         books,
-        segments.map((s) => s.source).join("\n")
-      );
+        scanText: segments.map((s) => s.source).join("\n"),
+        taskPrompt: prompt.prompt,
+        taskLabel: "번역",
+      });
       try {
         const responseText = await this.callModel(
           profile,
@@ -271,6 +281,7 @@ export class TranslationService {
    * translateParagraphs / previewTranslateRange 공용.
    */
   private async translateChunk(
+    sessionFile: string,
     profile: { id: string; kind: "chat" | "text" },
     promptText: string,
     text: string,
@@ -289,10 +300,14 @@ export class TranslationService {
   }> {
     const segments = buildTranslationRequest(text, chunk);
     const sourceById = new Map(segments.map((s) => [s.id, s.source]));
-    const lorebookText = buildLorebookText(
+    // 로어북 허브 경유 — AI 선별 "다른 확장에도 적용"이 켜져 있으면 청크별 본문으로 선별.
+    const lorebookText = await this.plugin.lorebookPlus.buildTaskLorebookText({
+      sessionFile,
       books,
-      segments.map((s) => s.source).join("\n")
-    );
+      scanText: segments.map((s) => s.source).join("\n"),
+      taskPrompt: promptText,
+      taskLabel: "번역",
+    });
     let results: ReturnType<typeof parseTranslationResponse> = null;
     let lastError = "";
     let stoppedByLimit = false;
@@ -376,6 +391,7 @@ export class TranslationService {
 
     for (const chunk of chunks) {
       const { results, sourceById, reason, cancelled } = await this.translateChunk(
+        sessionFile,
         profile,
         prompt.prompt,
         text,
@@ -483,6 +499,7 @@ export class TranslationService {
 
     for (const chunk of chunks) {
       const { results, sourceById, reason, cancelled } = await this.translateChunk(
+        sessionFile,
         profile,
         prompt.prompt,
         text,

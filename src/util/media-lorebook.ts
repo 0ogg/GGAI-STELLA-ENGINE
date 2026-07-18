@@ -59,15 +59,23 @@ export async function loadMediaLorebooks(
   return out;
 }
 
-/** 본문(scanText)에 매칭되는 로어북 엔트리 content 를 이어붙인다. 없으면 빈 문자열. */
+/**
+ * 본문(scanText)에 매칭되는 로어북 엔트리 content 를 이어붙인다. 없으면 빈 문자열.
+ * forcedEntryKeys(AI 선별 결과)가 있으면 키워드 매칭과 합집합으로 강제 포함된다.
+ *
+ * 확장(번역/삽화 등)에서 직접 부르지 말 것 — `plugin.lorebookPlus.buildTaskLorebookText`
+ * 허브를 지나가야 AI 선별 옵션이 자동 적용된다.
+ */
 export function buildLorebookText(
   books: StellaLorebook[],
-  scanText: string
+  scanText: string,
+  forcedEntryKeys?: Set<string>
 ): string {
   if (books.length === 0) return "";
   const matched = matchLorebookEntries(books, {
     recentMessages: [scanText],
     activeText: scanText,
+    forcedEntryKeys,
   });
   return matched
     .map((m) => m.entry.content.trim())

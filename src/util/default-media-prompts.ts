@@ -1,5 +1,11 @@
 import type { MediaPromptItem } from "../types/preset";
 
+/**
+ * 확장 작업용 로어북 선별 기본 프롬프트 id — 확장(번역/삽화 등)용 선별은
+ * taskPromptId 미지정 시 이 프롬프트로 폴백한다 (본편 선별의 Default 와 별개).
+ */
+export const LOREBOOK_SELECT_TASK_DEFAULT_PROMPT_ID = "builtin:lorebookSelect:2";
+
 export type MediaPromptBucket =
   | "translation"
   | "illustrationPromptGen"
@@ -97,6 +103,23 @@ export const DEFAULT_MEDIA_PROMPTS: Record<MediaPromptBucket, MediaPromptItem[]>
         "From the numbered lorebook entries above, choose only the entries whose full content should be injected into the AI's context for the NEXT generation: " +
         "entries directly relevant to the current scene, the characters present, ongoing plot threads, or imminent events.\n" +
         "Prefer precision over recall — leave out entries that are not needed right now.\n" +
+        "Respond with ONLY a JSON array of the selected entry numbers, e.g. [2, 7, 13]. If none are needed, respond with [].\n\n" +
+        "Selection:",
+    },
+    {
+      id: LOREBOOK_SELECT_TASK_DEFAULT_PROMPT_ID,
+      title: "Default (확장 작업)",
+      prompt:
+        "Lorebook entries\n" +
+        "{{lorebook}}\n\n" +
+        "Upcoming task — the selected entries will be attached to this prompt as reference:\n" +
+        "{{task}}\n\n" +
+        "Target text\n" +
+        "{{main}}\n\n" +
+        "You are the lorebook selector for an AI task.\n" +
+        "The task prompt above is about to run on the target text. From the numbered lorebook entries, choose only the entries whose full content would genuinely help that task: " +
+        "entries about the characters, places, items, or terms that actually appear in the target text.\n" +
+        "Prefer precision over recall — leave out entries that are not needed.\n" +
         "Respond with ONLY a JSON array of the selected entry numbers, e.g. [2, 7, 13]. If none are needed, respond with [].\n\n" +
         "Selection:",
     },

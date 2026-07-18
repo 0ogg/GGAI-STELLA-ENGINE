@@ -13,12 +13,19 @@
 import type StellaEnginePlugin from "../main";
 import type { StellaLorebook } from "../types/lorebook";
 import type { LorebookPlusActiveSettings } from "../types/preset";
-import { resolveMediaPrompt } from "../util/default-media-prompts";
+import {
+  LOREBOOK_SELECT_TASK_DEFAULT_PROMPT_ID,
+  resolveMediaPrompt,
+} from "../util/default-media-prompts";
 import {
   buildLorebookCatalog,
+  composeLorebookSelectTaskPrompt,
+  DEFAULT_LOREBOOK_SELECT_CONTEXT_CHARS,
   parseLorebookSelectionResponse,
   renderLorebookCatalogText,
+  type LorebookCatalogItem,
 } from "../util/lorebook-ai-select";
+import { buildLorebookText } from "../util/media-lorebook";
 import { composeMediaPrompt } from "../util/media-prompt-body";
 
 export interface LorebookPlusSelectInput {
@@ -79,27 +86,7 @@ export class LorebookPlusService {
         input.recentText,
         renderLorebookCatalogText(catalog)
       );
-      const responseText =
-        profile.kind === "text"
-          ? (
-              await this.plugin.ai.generate({
-                profileId: profile.id,
-                prompt,
-                label: "로어북 선별",
-              })
-            ).text
-          : (
-              await this.plugin.ai.chat({
-                profileId: profile.id,
-                messages: [{ role: "user", content: prompt }],
-                label: "로어북 선별",
-              })
-            ).text;
-      const indices = parseLorebookSelectionResponse(responseText, catalog.length);
-      if (!indices) {
-        throw new Error("응답이 JSON 번호 배열 형식이 아닙니다.");
-      }
-      const keys = indices.map((i) => catalog[i - 1].key);
+      const keys = await this.callSelectModel(profile, prompt, catalog);
       this.cache.set(input.sessionFile, { leafId: input.leafId, keys });
       return keys;
     } catch (err) {
@@ -109,5 +96,100 @@ export class LorebookPlusService {
       );
       return cached?.keys ?? [];
     }
+  }
+
+  /**
+   * 로어북을 쓰는 확장(번역/삽화 등)의 단일 허브 — 본문(scanText)에 대한 키워드
+   * 매칭 텍스트를 만들되, "다른 확장에도 적용"이 켜져 있으면 AI 선별 결과를
+   * 합집합으로 강제 포함한다. 선별 모델에게는 로어북 목록 + 본문에 더해 "이
+   * 로어북이 함께 쓰일 작업 프롬프트 전문"(taskPrompt, `{{task}}`)을 보여준다.
+   *
+   * 새 확장이 로어북 텍스트가 필요하면 buildLorebookText 직접 호출 대신 반드시
+   * 이 허브를 지나가야 한다 — 앞으로의 로어북 강화 옵션이 자동 적용된다.
+   * 실패 시 확장 실행을 막지 않는다 — 키워드 매칭 결과로 조용히 진행.
+   */
+  async buildTaskLorebookText(input: {
+    /** 세션 파일 경로. 세션 무관 실행(스텔라 폰 등)은 "" — 전역 설정 사용. */
+    sessionFile: string;
+    books: StellaLorebook[];
+    /** 매칭/선별 대상 본문 (번역 원문, 삽화 장면 발췌 등). */
+    scanText: string;
+    /** 결과가 함께 쓰일 확장의 프롬프트 전문 — 선별 모델의 {{task}} 자리. */
+    taskPrompt: string;
+    /** AI 호출 라벨용 작업 이름 (예: "번역"). */
+    taskLabel: string;
+  }): Promise<string> {
+    if (input.books.length === 0) return "";
+
+    const lp =
+      (await this.plugin.resolveActiveSettings(input.sessionFile || null))
+        .lorebookPlus ?? {};
+    let forcedEntryKeys: Set<string> | undefined;
+    if (lp.aiMatching === true && lp.applyToExtensions === true) {
+      const catalog = buildLorebookCatalog(input.books);
+      if (catalog.length > 0) {
+        try {
+          const profile =
+            this.plugin.ai.getProfileById(lp.modelProfileId) ??
+            this.plugin.ai.getDefaultGenerationProfile();
+          const promptItem = resolveMediaPrompt(
+            "lorebookSelect",
+            lp.taskPromptId ?? LOREBOOK_SELECT_TASK_DEFAULT_PROMPT_ID,
+            this.plugin.data.mediaPrompts
+          );
+          if (profile && promptItem) {
+            const contextChars =
+              lp.contextChars ?? DEFAULT_LOREBOOK_SELECT_CONTEXT_CHARS;
+            const prompt = composeLorebookSelectTaskPrompt(
+              promptItem.prompt,
+              input.scanText.slice(-contextChars),
+              renderLorebookCatalogText(catalog),
+              input.taskPrompt
+            );
+            forcedEntryKeys = new Set(
+              await this.callSelectModel(profile, prompt, catalog, input.taskLabel)
+            );
+          }
+        } catch (err) {
+          console.warn(
+            "[GGAI Stella] 확장 로어북 AI 선별 실패 — 키워드 매칭으로 진행:",
+            err
+          );
+        }
+      }
+    }
+
+    return buildLorebookText(input.books, input.scanText, forcedEntryKeys);
+  }
+
+  /** 선별 모델 호출 + 응답 파싱 — 형식이 깨지면 throw. */
+  private async callSelectModel(
+    profile: { id: string; kind: "chat" | "text" },
+    prompt: string,
+    catalog: LorebookCatalogItem[],
+    taskLabel?: string
+  ): Promise<string[]> {
+    const label = taskLabel ? `로어북 선별 (${taskLabel})` : "로어북 선별";
+    const responseText =
+      profile.kind === "text"
+        ? (
+            await this.plugin.ai.generate({
+              profileId: profile.id,
+              prompt,
+              label,
+            })
+          ).text
+        : (
+            await this.plugin.ai.chat({
+              profileId: profile.id,
+              messages: [{ role: "user", content: prompt }],
+              label,
+            })
+          ).text;
+    const indices = parseLorebookSelectionResponse(responseText, catalog.length);
+    if (!indices) {
+      throw new Error("응답이 JSON 번호 배열 형식이 아닙니다.");
+    }
+    return indices.map((i) => catalog[i - 1].key);
   }
 }

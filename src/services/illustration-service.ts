@@ -16,7 +16,6 @@ import type StellaEnginePlugin from "../main";
 import { resolveMediaPrompt } from "../util/default-media-prompts";
 import { composeMediaPrompt } from "../util/media-prompt-body";
 import {
-  buildLorebookText,
   getScenarioMediaLorebookIds,
   loadMediaLorebooks,
   mergeLorebookIds,
@@ -90,7 +89,14 @@ export class IllustrationService {
       this.plugin.store,
       mergeLorebookIds(ill.lorebookIds, scenarioIds)
     );
-    const lorebookText = buildLorebookText(books, context);
+    // 로어북 허브 경유 — AI 선별 "다른 확장에도 적용"이 켜져 있으면 자동 반영.
+    const lorebookText = await this.plugin.lorebookPlus.buildTaskLorebookText({
+      sessionFile,
+      books,
+      scanText: context,
+      taskPrompt: genPrompt?.prompt ?? "",
+      taskLabel: "삽화 프롬프트",
+    });
 
     // 1) 이미지 프롬프트 생성 (LLM)
     let imagePrompt: string;
@@ -191,7 +197,14 @@ export class IllustrationService {
       this.plugin.store,
       ill.lorebookIds ?? []
     );
-    const lorebookText = buildLorebookText(books, body);
+    // 세션 무관 실행(스텔라 폰 카메라) — 로어북 허브는 전역 설정으로 판단한다.
+    const lorebookText = await this.plugin.lorebookPlus.buildTaskLorebookText({
+      sessionFile: "",
+      books,
+      scanText: body,
+      taskPrompt: genPrompt?.prompt ?? "",
+      taskLabel: "삽화 프롬프트",
+    });
     try {
       let prompt = await this.generateImagePrompt(
         genProfile,
