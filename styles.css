@@ -7485,16 +7485,23 @@ textarea.ggai-regex-mono {
 .ggai-phone-modal .ggai-phone-frame-wrap {
   padding: 0;
 }
-/* 모바일 오버레이 — 프레임 없이 버튼만 보이는 풀 화면 (창은 띄우되 프레임 감춤). */
+/* 모바일 오버레이 — 프레임 없이 버튼만 보이는 풀 화면 (창은 띄우되 프레임 감춤).
+   모달 센터링에 밀려 하단이 홈 바 밑으로 넘어가지 않게 화면에 직접 고정하고
+   뷰포트 단위 대신 모달 높이를 그대로 채운다. */
 .ggai-phone-modal.is-mobile {
+  position: fixed;
+  inset: 0;
   width: 100%;
   height: 100%;
   max-height: none;
+  margin: 0;
 }
 .ggai-phone-modal.is-mobile .ggai-phone-root {
-  width: 100vw;
-  height: 100vh;
-  height: 100dvh;
+  width: 100%;
+  height: 100%;
+  /* 상단 상태바(시계·옵시디언 영역)와 겹치면 페르소나 전환 버튼을 못 누르므로
+     그만큼만 위를 비운다. 하단 홈 바는 .ggai-phone-homebar 가 처리. */
+  padding-top: env(safe-area-inset-top, 0px);
 }
 .ggai-phone-modal.is-mobile .ggai-phone-screen.is-bare {
   border-radius: 0;
