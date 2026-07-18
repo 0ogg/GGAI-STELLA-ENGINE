@@ -8059,8 +8059,13 @@ body.is-mobile .ggai-phone-composer {
   padding: 6px 12px 8px;
   border-top: 1px solid var(--background-modifier-border);
 }
+/* 홈 바 여백 — env(safe-area-inset-bottom) 을 0 으로 두는 안드로이드 옵시디언 기기가
+   있어(회귀 금지) --ggai-home-inset(키보드 없는 순간에 측정한 순수 홈바 높이)와 큰 값을
+   쓴다. 세션 툴바와 같은 방식. */
 body.is-mobile .ggai-phone-homebar {
-  padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+  padding-bottom: calc(
+    8px + max(env(safe-area-inset-bottom, 0px), var(--ggai-home-inset, 0px))
+  );
 }
 .ggai-phone-homebar.is-hidden {
   visibility: hidden;
