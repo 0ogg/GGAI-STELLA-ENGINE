@@ -15,7 +15,6 @@ import {
   VIEW_TYPE_DASHBOARD,
   VIEW_TYPE_DETAIL,
   VIEW_TYPE_ILLUSTRATION_OUTPUT,
-  VIEW_TYPE_PHONE,
   VIEW_TYPE_SESSION,
   VIEW_TYPE_SIDEBAR,
 } from "./constants";
@@ -33,7 +32,7 @@ import {
 import { PhoneService } from "./services/phone-service";
 import { registerPhoneExtension } from "./extensions/phone-extension";
 import type { PhonePluginData } from "./types/phone";
-import { PhoneOverlayModal, PhoneView } from "./views/phone-view";
+import { PhoneOverlayModal } from "./views/phone-view";
 import {
   SettingsPanelRegistry,
   type SettingsPanel,
@@ -237,6 +236,8 @@ const DEPRECATED_STELLA_VIEW_TYPES = [
   "ggai-stella-lorebook-editor",
   "ggai-stella-user-editor",
   "ggai-stella-prompts-editor",
+  // 폰은 탭 뷰에서 모달(PhoneOverlayModal)로 전환됨 — 저장된 옛 탭은 정리한다.
+  "ggai-stella-phone",
 ] as const;
 
 export default class StellaEnginePlugin extends Plugin {
@@ -352,10 +353,6 @@ export default class StellaEnginePlugin extends Plugin {
     this.registerView(
       VIEW_TYPE_ILLUSTRATION_OUTPUT,
       (leaf: WorkspaceLeaf) => new IllustrationOutputView(leaf, this)
-    );
-    this.registerView(
-      VIEW_TYPE_PHONE,
-      (leaf: WorkspaceLeaf) => new PhoneView(leaf, this)
     );
 
     // 5. 명령 — 전역(어디서나) 열기 커맨드

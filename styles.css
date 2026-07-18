@@ -7541,11 +7541,6 @@ textarea.ggai-regex-mono {
 .ggai-phone-body {
   overflow-x: hidden;
 }
-/* 모바일 탭 뷰 — view-content 기본 패딩이 홈 바/하단을 화면 밖으로 밀어내지 않게. */
-.workspace-leaf-content[data-type="ggai-stella-phone"] .view-content {
-  padding: 0;
-  overflow: hidden;
-}
 
 /* 헤더 */
 .ggai-phone-header {

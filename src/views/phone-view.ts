@@ -15,15 +15,12 @@
 import {
   type App,
   Component,
-  ItemView,
   Menu,
   Modal,
   Notice,
   Platform,
   setIcon,
-  WorkspaceLeaf,
 } from "obsidian";
-import { VIEW_TYPE_PHONE } from "../constants";
 import type StellaEnginePlugin from "../main";
 import {
   PhoneService,
@@ -2234,34 +2231,6 @@ class PhoneController extends Component {
 }
 
 /** 스텔라 폰 탭 뷰 — 모바일(풀 화면) 호스트. */
-export class PhoneView extends ItemView {
-  constructor(
-    leaf: WorkspaceLeaf,
-    private plugin: StellaEnginePlugin
-  ) {
-    super(leaf);
-  }
-
-  getViewType(): string {
-    return VIEW_TYPE_PHONE;
-  }
-
-  getDisplayText(): string {
-    return "스텔라 폰";
-  }
-
-  getIcon(): string {
-    return "smartphone";
-  }
-
-  async onOpen(): Promise<void> {
-    const root = this.containerEl.children[1] as HTMLElement;
-    this.addChild(
-      new PhoneController(this.plugin, root, () => this.leaf.detach())
-    );
-  }
-}
-
 /**
  * 폰 오버레이 — 화면 위에 창처럼 뜨고 바깥 클릭/Esc 로 닫힌다. PC 는 폰 프레임,
  * 모바일은 프레임 없이 버튼만 보이는 풀 화면(창은 띄우되 프레임은 감춤).
