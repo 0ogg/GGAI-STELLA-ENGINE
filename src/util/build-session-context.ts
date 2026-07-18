@@ -1,6 +1,11 @@
 import type StellaEnginePlugin from "../main";
 import type { GenerationProfileLite } from "../services/ai-service";
-import type { StellaLorebook } from "../types/lorebook";
+import type { CustomContextContribution } from "../services/extension-registry";
+import {
+  defaultLorebookEntry,
+  defaultLorebookMeta,
+  type StellaLorebook,
+} from "../types/lorebook";
 import type { ActiveSettings } from "../types/preset";
 import type { StellaSession } from "../types/session";
 import {
@@ -12,6 +17,10 @@ import {
 } from "./context-builder";
 import { buildChatLog, buildChatMessages } from "./chat-messages";
 import type { StellaGroup } from "../types/group";
+import { applyMacros } from "./macros";
+import { REGEX_PLACEMENT } from "../types/regex";
+import { getRegexedString } from "./regex-engine";
+import { collectRegexScripts } from "./regex-scripts";
 
 /** 챗 세션 로그 — excludeTail 이면 끝의 assistant 메시지 1개 제외 (챗 재생성 전용). */
 function buildChatSessionLog(
@@ -37,7 +46,9 @@ function buildGroupChatSessionLog(
   excludeTail: boolean,
   userName: string,
   hostName: string,
-  nameById: Map<string, string>
+  nameById: Map<string, string>,
+  // 정규식 치환 — `이름: ` 프리픽스가 붙기 전 원문에 적용한다 (ST 동일).
+  transform?: (text: string, role: "user" | "assistant", depth: number) => string
 ): { role: "user" | "assistant"; content: string }[] {
   const msgs = buildChatMessages(session, leafId).filter(
     (m) => m.text.trim().length > 0
@@ -45,12 +56,15 @@ function buildGroupChatSessionLog(
   if (excludeTail && msgs.length > 0 && msgs[msgs.length - 1].role === "assistant") {
     msgs.pop();
   }
-  return msgs.map((m) => {
+  return msgs.map((m, i) => {
     const speaker =
       m.role === "user"
         ? userName
         : nameById.get(session.nodes[m.nodeId]?.speaker ?? "") ?? hostName;
-    return { role: m.role, content: `${speaker}: ${m.text.trim()}` };
+    const text = transform
+      ? transform(m.text.trim(), m.role, msgs.length - 1 - i)
+      : m.text.trim();
+    return { role: m.role, content: `${speaker}: ${text}` };
   });
 }
 import {
@@ -63,6 +77,7 @@ import { buildGroupMemberLorebook } from "./group-lorebook";
 import { formatIdleEn } from "./idle-duration";
 import { resolveNaiFormat } from "./model-kind-policy";
 import { normalizeMessagesForChat } from "./normalize-messages";
+import { DEFAULT_LOREBOOK_SELECT_CONTEXT_CHARS } from "./lorebook-ai-select";
 import { resolveActiveLorebooks } from "./resolve-active-lorebooks";
 import { scanPrompts } from "./scan-prompts";
 import { buildSessionLog } from "./session-view-logic";
@@ -170,6 +185,11 @@ export interface PlanSessionRequestOptions {
    * 포함)는 프로필 로어북으로 합류한다. 없거나 멤버가 아니면 호스트가 발화자.
    */
   speakerId?: string;
+  /**
+   * 미리보기 전용 — 로어북 AI 매칭을 새로 돌리지 않고 마지막 선별 결과를 재사용한다.
+   * (선별은 실제 생성 직전에만 실행 — 미리보기가 AI 호출/비용을 유발하지 않게.)
+   */
+  dryRun?: boolean;
 }
 
 /**
@@ -214,6 +234,7 @@ export async function planSessionRequest(
     settings,
   });
   const summaryContext = plugin.extensions.pickSlot(contributions, "summary");
+  const phoneContext = plugin.extensions.pickSlot(contributions, "phone");
 
   const scenarioFile = scenarioFileOfSessionFile(sessionFile);
   const scenarios = await plugin.store.getScenarios();
@@ -332,11 +353,119 @@ export async function planSessionRequest(
     }
   }
 
+  // 스텔라 폰 문자 기억 (PH1) — 확장이 채운 phone 슬롯을 가상 로어북 상시
+  // 엔트리로 감싸 히스토리 근처(at_depth)에 삽입한다. 그룹 멤버 프로필과 같은
+  // 방식이라 미리보기·생성·토큰 예산에 자동으로 동일 반영된다.
+  if (phoneContext) {
+    lorebooks.push({
+      meta: defaultLorebookMeta("sillytavern", "스텔라 폰", "stella-phone"),
+      entries: [
+        {
+          ...defaultLorebookEntry("sillytavern"),
+          uid: "stella-phone-context",
+          name: "스텔라 폰",
+          keys: [],
+          content: phoneContext,
+          constant: true,
+          position: "at_depth",
+          depth: 4,
+          role: "system",
+          order: 100,
+        },
+      ],
+    });
+  }
+
+  // 확장 custom 슬롯 — 외부 확장이 배치 규칙과 함께 기여한 텍스트를 폰/그룹
+  // 멤버와 같은 가상 로어북 상시 엔트리로 감싸 지정 위치에 삽입한다. 외부
+  // 확장의 컨텍스트 삽입 진입점은 이 한 곳뿐(확장별 별도 배선 금지) —
+  // 미리보기·생성·토큰 예산이 자동으로 동일 반영된다.
+  const customContribs = contributions.filter(
+    (c): c is CustomContextContribution & { sourceId: string } => c.slot === "custom"
+  );
+  if (customContribs.length) {
+    lorebooks.push({
+      meta: defaultLorebookMeta("sillytavern", "확장 컨텍스트", "stella-extension-context"),
+      entries: customContribs.map((c, i) => ({
+        ...defaultLorebookEntry("sillytavern"),
+        uid: `ext-${c.sourceId}-${i}`,
+        name: c.name ?? c.sourceId,
+        keys: [],
+        content: c.text,
+        constant: true,
+        position: c.position ?? "after_char",
+        depth: c.depth ?? 4,
+        role: c.role ?? "system",
+        order: c.order ?? 100,
+      })),
+    });
+  }
+
+  // ── 로어북 확장 — AI 매칭 (생성 전 선별 모델이 필요한 엔트리를 고른다).
+  // 미리보기(dryRun)는 새 AI 호출 없이 마지막 선별 결과를 재사용 — 직전 생성에
+  // 실제로 쓰인 값이므로 전송본과 같은 경로/같은 결과가 유지된다.
+  const lorebookPlus = settings.lorebookPlus ?? {};
+  let forcedEntryKeys: string[] | undefined;
+  if (lorebookPlus.aiMatching === true) {
+    if (opts.dryRun) {
+      forcedEntryKeys = plugin.lorebookPlus.getCachedKeys(sessionFile) ?? [];
+    } else {
+      // 본문 첨부량(자) — 설정으로 조절, 끝(최신)에서부터 자른다.
+      const contextChars =
+        lorebookPlus.contextChars ?? DEFAULT_LOREBOOK_SELECT_CONTEXT_CHARS;
+      const recentText =
+        session.meta.mode === "chat"
+          ? buildChatLog(session, leafId)
+              .map((m) => m.content)
+              .join("\n")
+          : spansToText(parentSpans);
+      forcedEntryKeys = await plugin.lorebookPlus.selectEntries({
+        sessionFile,
+        leafId,
+        books: lorebooks,
+        recentText: recentText.slice(-contextChars),
+        settings: lorebookPlus,
+      });
+    }
+  }
+
   const tokenBudget = settings.params?.maxContext ?? 16000;
 
   // 세션을 변형하지 않도록 복사본으로 빌드. setvar 등은 buildContext 가
   // 이 복사본을 in-place 로 갱신하므로, 빌드 후 그 값을 돌려준다.
   const variables = { ...(session.meta.variables ?? {}) };
+
+  // ── 정규식 스크립트 (전송본 시점) — 전역 + (허용된) 시나리오별을 히스토리
+  // 메시지에 적용한다. ST 와 같은 의미: USER_INPUT = 유저 메시지, AI_OUTPUT = AI
+  // 메시지, depth = 끝에서 몇 번째(0 = 마지막). 전송본 단일 경로라 미리보기에도
+  // 자동으로 동일 반영된다. 저장 원문(raw)·표시(display) 시점 스크립트는 여기서
+  // isPrompt 필터에 걸러져 원문을 건드리지 않는다.
+  const scenarioStellaId = scenarioItem?.scenario.data?.extensions?.stella?.id;
+  const regexScripts = collectRegexScripts({
+    global: plugin.data.regexScripts,
+    scenario: scenarioItem?.scenario,
+    scenarioAllowed:
+      !!scenarioStellaId &&
+      (plugin.data.regexScriptsAllowedScenarios ?? []).includes(scenarioStellaId),
+  });
+  const regexSubstitute = (s: string) =>
+    applyMacros(s, { char: speakerName, user: userName, variables });
+  const regexMessage = (text: string, role: "user" | "assistant", depth: number) =>
+    getRegexedString(
+      text,
+      role === "user" ? REGEX_PLACEMENT.USER_INPUT : REGEX_PLACEMENT.AI_OUTPUT,
+      regexScripts,
+      { isPrompt: true, depth, substitute: regexSubstitute }
+    );
+  const applyPromptRegex = (
+    log: { role: "user" | "assistant"; content: string }[]
+  ): { role: "user" | "assistant"; content: string }[] =>
+    regexScripts.length === 0
+      ? log
+      : log.map((m, i) => ({
+          ...m,
+          content: regexMessage(m.content, m.role, log.length - 1 - i),
+        }));
 
   const v2input: ContextBuilderInputV2 = {
     preset,
@@ -369,10 +498,13 @@ export async function planSessionRequest(
               opts.excludeTailAssistant === true,
               userName,
               scenarioData.name?.trim() || "(unknown)",
-              memberNameById
+              memberNameById,
+              regexScripts.length > 0 ? regexMessage : undefined
             )
-          : buildChatSessionLog(session, leafId, opts.excludeTailAssistant === true)
-        : buildSessionLog(parentSpans, session.meta.mode),
+          : applyPromptRegex(
+              buildChatSessionLog(session, leafId, opts.excludeTailAssistant === true)
+            )
+        : applyPromptRegex(buildSessionLog(parentSpans, session.meta.mode)),
     memory: session.meta.memory,
     authorNote: session.meta.authorNote,
     summary: summaryContext || undefined,
@@ -384,6 +516,10 @@ export async function planSessionRequest(
     variables,
     choiceValues: { ...(session.meta.choiceValues ?? {}) },
     timingStates: { ...(session.meta.timingStates ?? {}) },
+    lorebookControl: {
+      keywordMatching: lorebookPlus.keywordMatching,
+      forcedEntryKeys,
+    },
     turnNumber: Object.keys(session.nodes).length,
     maxOutputTokens: settings.params?.maxOutputTokens,
     tokenBudget,
@@ -503,7 +639,7 @@ export async function buildSessionContextDryRun(
   plugin: StellaEnginePlugin,
   sessionFile: string
 ): Promise<SessionContextDryRun | { error: string }> {
-  const plan = await planSessionRequest(plugin, sessionFile);
+  const plan = await planSessionRequest(plugin, sessionFile, { dryRun: true });
   if ("error" in plan) return plan;
 
   const { profile, output, payload, meta } = plan;

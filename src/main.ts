@@ -15,12 +15,14 @@ import {
   VIEW_TYPE_DASHBOARD,
   VIEW_TYPE_DETAIL,
   VIEW_TYPE_ILLUSTRATION_OUTPUT,
+  VIEW_TYPE_PHONE,
   VIEW_TYPE_SESSION,
   VIEW_TYPE_SIDEBAR,
 } from "./constants";
 import { AIService } from "./services/ai-service";
 import { installFocusForensics } from "./services/focus-forensics";
 import { TranslationService } from "./services/translation-service";
+import { LorebookPlusService } from "./services/lorebook-plus-service";
 import { SummaryService } from "./services/summary-service";
 import { IllustrationService } from "./services/illustration-service";
 import { ParagraphRegenService } from "./services/paragraph-regen-service";
@@ -28,6 +30,10 @@ import {
   ProactiveService,
   type ProactiveScheduleEntry,
 } from "./services/proactive-service";
+import { PhoneService } from "./services/phone-service";
+import { registerPhoneExtension } from "./extensions/phone-extension";
+import type { PhonePluginData } from "./types/phone";
+import { PhoneOverlayModal, PhoneView } from "./views/phone-view";
 import {
   SettingsPanelRegistry,
   type SettingsPanel,
@@ -47,7 +53,10 @@ import {
   type OsNotificationStatus,
 } from "./extensions/notification-extension";
 import { StellaStore } from "./state/store";
+import { createRegexSettingsPanel } from "./views/detail/panels/regex-panel";
+import { createLorebookPlusSettingsPanel } from "./views/detail/panels/lorebook-plus-panel";
 import type { ActiveSettings, MediaPromptLibrary, StellaPreset } from "./types/preset";
+import type { RegexExtensionTarget, RegexScript } from "./types/regex";
 import type { StellaUserProfile } from "./types/user";
 import { presetToActiveSettings } from "./types/preset";
 import {
@@ -60,6 +69,10 @@ import { MODEL_KIND_DEFAULTS } from "./util/model-kind-policy";
 import type { SessionScrollAnchor } from "./util/session-anchor";
 import { clampSessionViewStyle, type SessionViewStyle } from "./util/view-style";
 import { ensureBaseFolders } from "./util/ensure-folders";
+import {
+  buildDefaultIllustrationRegexScript,
+  DEFAULT_ILLUSTRATION_REGEX_ID,
+} from "./util/regex-scripts";
 import {
   DashboardView,
   type DashboardTab,
@@ -97,6 +110,8 @@ export interface StellaPluginData {
   presetRotationEnabled?: boolean;
   /** "Default (NovelAI)" 기본 세트를 기존 vault 에 1회 시드했는지 (재생성 방지). */
   novelaiDefaultSeeded?: boolean;
+  /** 삽화 프롬프트 후가공 기본 정규식(sceneInfo 접두 제거)을 1회 시드했는지 (재생성 방지). */
+  illustrationRegexSeeded?: boolean;
   /** @deprecated R4e 이전 의미. */
   lastActivePromptPresetId?: string;
   lastDetailTab?: "basic" | "scenario" | "branch" | "expand";
@@ -135,6 +150,24 @@ export interface StellaPluginData {
   translationScrollChain?: boolean;
   /** 세션창 본문 보기 스타일(문단 간격/들여쓰기/최대폭/폰트 배율) — 전역, 모든 세션 공통. */
   viewStyle?: SessionViewStyle;
+  /**
+   * 전역 정규식 스크립트 — 모든 세션에 적용(ST GLOBAL 대응). 시나리오별 스크립트는
+   * `scenario.data.extensions.regex_scripts` 에 따로 저장되고, 실행은 전역 → 시나리오별 순서.
+   */
+  regexScripts?: RegexScript[];
+  /**
+   * 시나리오별 정규식 실행을 허용한 시나리오 id 목록(ST character_allowed_regex 대응).
+   * 임포트한 카드에 몰래 심긴 치환이 무단 실행되지 않도록, 사용자가 켠 시나리오만 통과.
+   */
+  regexScriptsAllowedScenarios?: string[];
+  /**
+   * 확장별 "받은 결과 후가공" 정규식 목록 — LLM 생성물을 받자마자 순서대로 적용
+   * (번역문은 저장 전, 삽화 프롬프트는 이미지 생성 전). Stella 전용, 전역(모든 세션 공통).
+   * 후가공 스크립트는 placement/timing 을 쓰지 않는다(disabled 만 존중).
+   */
+  extensionRegex?: Partial<Record<RegexExtensionTarget, RegexScript[]>>;
+  /** 스텔라 폰 전역 설정 (PH1) — 로그인 페르소나/모델/언어/기억 연동. */
+  phone?: PhonePluginData;
   settings?: StellaPluginSettings;
   /** 최초 설치 온보딩(좌우 사이드바 배치 + 대시보드 자동 오픈)을 이미 보여줬는지. */
   installOnboardingShown?: boolean;
@@ -221,6 +254,12 @@ export default class StellaEnginePlugin extends Plugin {
   paragraphRegen!: ParagraphRegenService;
   /** 선채팅 실행기 (P1) — 캐릭터가 먼저 말 거는 메시지를 뷰 없이 생성. */
   proactive!: ProactiveService;
+  /** 스텔라 폰 실행기 (PH1) — 문자 전송/답장 생성 + 폰 로그인 페르소나. */
+  phone!: PhoneService;
+  /** PC 폰 오버레이 싱글턴 — 닫힐 때 모달이 스스로 null 로 되돌린다. */
+  phoneOverlay: PhoneOverlayModal | null = null;
+  /** 로어북 확장 AI 매칭 실행기 — planSessionRequest 가 생성 직전 호출. */
+  lorebookPlus!: LorebookPlusService;
   /** 확장 탭 설정 패널 레지스트리. 내장/외부 패널 모두 `registerSettingsPanel()` 로 등록. */
   settingsPanels!: SettingsPanelRegistry;
   /** 확장 모듈 레지스트리 — 컨텍스트 기여 / 생성-완료 훅 / 로어북 선택 대체. */
@@ -269,6 +308,10 @@ export default class StellaEnginePlugin extends Plugin {
     this.proactive = new ProactiveService(this);
     // 선채팅 스케줄러 — 예약 확인 틱 + 켜기/끄기·활동 감지 + 시작 스윕.
     this.proactive.startScheduler();
+    this.phone = new PhoneService(this);
+    // 폰 갱신 스케줄러 (PH2) — 정기/세션 중 랜덤 트리거 틱.
+    this.phone.startScheduler();
+    this.lorebookPlus = new LorebookPlusService(this);
     this.settingsPanels = new SettingsPanelRegistry(() =>
       this.store.trigger("settings-panels-changed")
     );
@@ -278,6 +321,11 @@ export default class StellaEnginePlugin extends Plugin {
     registerIllustrationExtension(this);
     registerSummaryExtension(this);
     registerNotificationExtension(this);
+    registerPhoneExtension(this);
+    // 정규식 치환 설정 — 전송본 치환 자체는 planSessionRequest 가 직접 수행(훅 아님).
+    this.registerSettingsPanel(createRegexSettingsPanel());
+    // 로어북 확장 — 키워드/AI 매칭 스위치 (매칭 자체는 planSessionRequest 경유).
+    this.registerSettingsPanel(createLorebookPlusSettingsPanel());
     this.addSettingTab(new StellaSettingTab(this.app, this));
 
     // 4. View 등록 (plugin 인스턴스 주입 — view 가 store/ai 접근)
@@ -305,6 +353,10 @@ export default class StellaEnginePlugin extends Plugin {
       VIEW_TYPE_ILLUSTRATION_OUTPUT,
       (leaf: WorkspaceLeaf) => new IllustrationOutputView(leaf, this)
     );
+    this.registerView(
+      VIEW_TYPE_PHONE,
+      (leaf: WorkspaceLeaf) => new PhoneView(leaf, this)
+    );
 
     // 5. 명령 — 전역(어디서나) 열기 커맨드
     this.addCommand({
@@ -326,6 +378,34 @@ export default class StellaEnginePlugin extends Plugin {
       id: "open-stella-illustration-output",
       name: "삽화 출력 창 열기",
       callback: () => void this.revealIllustrationOutput(),
+    });
+    this.addCommand({
+      id: "open-stella-phone",
+      name: "스텔라 폰 열기",
+      callback: () => void this.openStellaPhone(),
+    });
+    // 스텔라튜브 방송 토글 (v2 §7.2) — 켜짐↔꺼짐 커맨드 1개. 대상 = 현재 세션.
+    this.addCommand({
+      id: "toggle-stellatube-stream",
+      name: "스텔라튜브 방송 토글",
+      checkCallback: (checking: boolean) => {
+        const sessionFile = this.getActiveOrLastSessionFile();
+        if (!sessionFile) return false;
+        if (!checking) {
+          void (async () => {
+            const result = await this.phone.toggleStream(sessionFile);
+            if (!result.ok) new Notice(`방송 실패: ${result.error}`);
+            else {
+              new Notice(
+                result.live
+                  ? "🔴 스텔라튜브 방송 시작 — 이 세션의 장면이 생중계됩니다."
+                  : "방송 종료 — 스텔라튜브에 다시보기가 남았습니다."
+              );
+            }
+          })();
+        }
+        return true;
+      },
     });
     // 최근에 하던 세션으로 바로 복귀 (로비를 거치지 않는 단축키).
     this.addCommand({
@@ -380,6 +460,7 @@ export default class StellaEnginePlugin extends Plugin {
         window.setTimeout(() => this.reconcileStellaLeaves(), 1200)
       );
       void this.ensureDefaultPromptPreset();
+      void this.ensureDefaultIllustrationRegex();
       this.updateStellaPanelActiveClass(this.app.workspace.activeLeaf);
       if (isFreshInstall) {
         void this.savePluginData({ installOnboardingShown: true });
@@ -525,6 +606,29 @@ export default class StellaEnginePlugin extends Plugin {
       }
     })();
     return this.defaultEnsuringPromise;
+  }
+
+  /**
+   * 삽화 프롬프트 후가공 기본 정규식(sceneInfo 접두 제거)을 최초 1회 시드한다.
+   * 사용자가 끄거나 지우면 다시 만들지 않는다(illustrationRegexSeeded 플래그).
+   */
+  async ensureDefaultIllustrationRegex(): Promise<void> {
+    if (this.data.illustrationRegexSeeded) return;
+    try {
+      const existing = this.data.extensionRegex?.illustration ?? [];
+      const already = existing.some((s) => s.id === DEFAULT_ILLUSTRATION_REGEX_ID);
+      await this.savePluginData({
+        extensionRegex: {
+          ...this.data.extensionRegex,
+          illustration: already
+            ? existing
+            : [buildDefaultIllustrationRegexScript(), ...existing],
+        },
+        illustrationRegexSeeded: true,
+      });
+    } catch (err) {
+      console.warn("[GGAI Stella] 삽화 프롬프트 후가공 기본 정규식 시드 실패:", err);
+    }
   }
 
   /**
@@ -674,6 +778,7 @@ export default class StellaEnginePlugin extends Plugin {
           translation: session.meta.translation ? { ...session.meta.translation } : undefined,
           illustration: session.meta.illustration ? { ...session.meta.illustration } : undefined,
           summarize: session.meta.summarize ? { ...session.meta.summarize } : undefined,
+          lorebookPlus: session.meta.lorebookPlus ? { ...session.meta.lorebookPlus } : undefined,
           naiFormat: session.meta.naiFormat,
           continueAnchor: session.meta.continueAnchor,
         };
@@ -1363,6 +1468,17 @@ export default class StellaEnginePlugin extends Plugin {
     this.app.workspace.revealLeaf(leaf);
   }
 
+  /**
+   * 스텔라 폰 열기 — PC·모바일 모두 오버레이(창처럼 뜨고 바깥 클릭/Esc 로 닫힘,
+   * 싱글턴). 모바일은 프레임 없이 버튼만 보이는 풀 화면으로 렌더된다.
+   */
+  async openStellaPhone(): Promise<void> {
+    if (this.phoneOverlay) return;
+    this.phoneOverlay = new PhoneOverlayModal(this);
+    this.phoneOverlay.open();
+    return;
+  }
+
   async toggleDetail(): Promise<void> {
     const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_DETAIL);
     if (existing.length > 0) {
@@ -1393,6 +1509,7 @@ function applyActiveSettingsPatch(
   if (patch.translation !== undefined) target.translation = { ...patch.translation };
   if (patch.illustration !== undefined) target.illustration = { ...patch.illustration };
   if (patch.summarize !== undefined) target.summarize = { ...patch.summarize };
+  if (patch.lorebookPlus !== undefined) target.lorebookPlus = { ...patch.lorebookPlus };
   if (patch.naiFormat !== undefined) target.naiFormat = patch.naiFormat;
   if (patch.continueAnchor !== undefined) target.continueAnchor = patch.continueAnchor;
 }

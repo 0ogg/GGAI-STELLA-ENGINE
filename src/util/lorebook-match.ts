@@ -19,6 +19,10 @@ export interface LorebookMatchContext {
   turnNumber?: number;
   /** 엔트리별 sticky/cooldown 상태. 호출 후 in-place 로 갱신된다. */
   timingStates?: Map<string, EntryTimingState>;
+  /** false 면 키워드 매칭을 끈다 — constant/sticky/강제 활성만 들어간다. 생략 시 true. */
+  keywordMatching?: boolean;
+  /** AI 선별 등으로 강제 활성화할 엔트리 키(`${lorebookId}:${uid}`). 키워드 없이 활성. */
+  forcedEntryKeys?: Set<string>;
 }
 
 export interface EntryTimingState {
@@ -43,6 +47,7 @@ export function matchLorebookEntries(
 ): MatchedLorebookEntry[] {
   const defaultDepth = ctx.defaultScanDepth ?? 4;
   const turnNumber = ctx.turnNumber ?? ctx.recentMessages.length;
+  const keywordOn = ctx.keywordMatching !== false;
   const matched: InternalMatch[] = [];
   const matchedIds = new Set<string>();
   let recursiveText = "";
@@ -65,9 +70,16 @@ export function matchLorebookEntries(
 
         const depth = entry.scanDepth ?? bookDefaultDepth;
         const haystack = buildHaystack(ctx, depth, recursiveText);
-        if (!timing.isSticky && !passesProbability(entry, haystack)) continue;
+        // AI 선별 등으로 강제 활성화된 엔트리 — 확률/키워드 게이트 없이 포함.
+        const forced = ctx.forcedEntryKeys?.has(entryKey) === true;
+        if (!timing.isSticky && !forced && !passesProbability(entry, haystack)) continue;
 
-        if (timing.isSticky || entry.constant || haystackMatchesEntry(entry, haystack)) {
+        if (
+          timing.isSticky ||
+          entry.constant ||
+          forced ||
+          (keywordOn && haystackMatchesEntry(entry, haystack))
+        ) {
           matchedIds.add(entryKey);
           passMatched.push({
             entry,

@@ -22,6 +22,7 @@ import {
   type MacroRender,
 } from "../util/macros";
 import { planSessionRequest } from "../util/build-session-context";
+import { applyRawRegexToGeneration } from "../util/session-regex";
 import {
   isDefaultDatedSessionName,
   requestSessionTitle,
@@ -55,6 +56,8 @@ import { isImeComposing, runWhenImeIdle } from "./edit-guard";
 import { IllustrationCarousel } from "./illustration-carousel";
 import {
   IllustrationGalleryModal,
+  illustrationCaption,
+  shareGalleryImageToNetwork,
   type GalleryItem,
 } from "./gallery-modal";
 import { IllustrationRegenModal } from "./illustration-regen-modal";
@@ -71,6 +74,10 @@ import {
   type SessionScrollAnchor,
 } from "../util/session-anchor";
 import { attachLongPress } from "../util/long-press";
+import {
+  openExtensionActionsMenu,
+  renderHeaderCommandBar,
+} from "./session-command-bar";
 import { composeSummaryContextForPath } from "../util/summarize-session";
 import {
   collectUntranslatedParagraphs,
@@ -1023,6 +1030,9 @@ export class SessionView extends ItemView {
     // 모바일 = 뷰 헤더 액션(본문 위 우측 상단, setupViewerToolActions) /
     // PC = 같은 위치·모양의 플로팅 줄(renderViewerBar, 0높이 레이어).
     if (!Platform.isMobile) this.renderViewerBar(root);
+    // PC(제목줄 꺼짐): Commander 페이지 헤더 버튼을 상단 좌측에 대신 그린다
+    // — 모바일 제목줄에서 보이는 버튼과 동기.
+    renderHeaderCommandBar(this.app, root);
     this.bodyWrapEl = root.createEl("div", { cls: "ggai-session-body-wrap" });
     this.viewStyle = this.plugin.getViewStyle();
     this.applyViewStyle();
@@ -1233,6 +1243,17 @@ export class SessionView extends ItemView {
       "Details panel",
       () => this.handleSidePanel()
     );
+    // 확장 조작 트레이 — 탭하면 이 버튼에서 확장 액션 모음이 열린다.
+    const extBtn = rightBottom.createEl("button", {
+      cls: "ggai-btn ggai-icon-btn",
+    });
+    setIcon(extBtn, "puzzle");
+    extBtn.setAttr("aria-label", "확장 기능");
+    extBtn.setAttr("data-tooltip-position", "top");
+    extBtn.addEventListener("click", (e) => {
+      if (this.sessionFile)
+        openExtensionActionsMenu(this.plugin, this.sessionFile, e);
+    });
   }
 
   /** ?袁⑹뵠??甕곌쑵?????? setIcon ?紐꾪뀱 + aria-label + click ?紐껊굶?? */
@@ -2649,7 +2670,24 @@ export class SessionView extends ItemView {
         node.gen.tokensIn = usage.inputTokens;
         node.gen.tokensOut = usage.outputTokens;
       }
-      const generatedText = this.generation?.accumulatedText ?? "";
+      let generatedText = this.generation?.accumulatedText ?? "";
+      // 저장 원문(raw) 시점 정규식 — 살아남을 텍스트를 저장 전에 치환한다
+      // (전송본/표시 시점 스크립트는 안 돎). 중단으로 살린 부분 텍스트도 동일.
+      if (hasVisibleText(generatedText) && this.sessionFile) {
+        const regexed = await applyRawRegexToGeneration(
+          this.plugin,
+          this.sessionFile,
+          generatedText
+        );
+        if (regexed !== generatedText) {
+          generatedText = regexed;
+          const append = node.patches[0];
+          if (append.op === "append" && append.spans[0]) {
+            append.spans[0].text = regexed;
+          }
+          if (this.generation) this.generation.accumulatedText = regexed;
+        }
+      }
       const blankGeneration = !hasVisibleText(generatedText);
       if (blankGeneration) {
         // 결과 노드가 비었으면(빈 응답 / 오류 / 텍스트 없는 중단) 노드를 버린다.
@@ -4103,6 +4141,17 @@ export class SessionView extends ItemView {
       isFavorite: (v) => !!v.favorite,
       onToggleFavorite: (variantId) =>
         this.toggleIllustrationFavoriteFor(nodeId, variantId),
+      onDelete: (variantId) => void this.deleteIllustration(nodeId, variantId),
+      ...(this.plugin.phone.isPhoneInUse()
+        ? {
+            onShare: (v: IllustrationVariant) =>
+              shareGalleryImageToNetwork(
+                this.plugin,
+                `${this.sessionFolderPath()}/${v.path}`,
+                illustrationCaption(v.prompt)
+              ),
+          }
+        : {}),
     });
     return { el, carousel };
   }
@@ -4134,6 +4183,8 @@ export class SessionView extends ItemView {
             variantId: v.id,
             createdAt: v.createdAt,
             favorite: v.favorite,
+            path: `${this.sessionFolderPath()}/${v.path}`,
+            caption: illustrationCaption(v.prompt),
           });
       }
     }
@@ -4143,6 +4194,12 @@ export class SessionView extends ItemView {
       onDelete: (nodeId, variantId) => this.deleteIllustration(nodeId, variantId),
       onToggleFavorite: (nodeId, variantId) =>
         this.toggleIllustrationFavoriteFor(nodeId, variantId),
+      ...(this.plugin.phone.isPhoneInUse()
+        ? {
+            onShareToNetwork: (item: GalleryItem) =>
+              shareGalleryImageToNetwork(this.plugin, item.path!, item.caption),
+          }
+        : {}),
     }).open();
   }
 

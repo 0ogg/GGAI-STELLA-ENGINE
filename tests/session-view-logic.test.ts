@@ -11,6 +11,11 @@ import {
 } from "../src/services/agent-runner";
 import { parseNovelAILorebook } from "../src/import/parse-novelai";
 import { buildContext, buildFallbackPreset } from "../src/util/context-builder";
+import { matchLorebookEntries } from "../src/util/lorebook-match";
+import {
+  buildLorebookCatalog,
+  parseLorebookSelectionResponse,
+} from "../src/util/lorebook-ai-select";
 import { paramsToOverride } from "../src/util/generation-params";
 import { buildSummaryPrompt } from "../src/util/generate-summary";
 import { applyMacros } from "../src/util/macros";
@@ -92,6 +97,26 @@ import {
   setActiveTranslationVariant,
   tokenizeParagraphs,
 } from "../src/util/translate-paragraphs";
+import {
+  getRegexedString,
+  regexFromString,
+  runRegexScript,
+  sanitizeRegexMacro,
+} from "../src/util/regex-engine";
+import {
+  createBlankRegexScript,
+  normalizeRegexScript,
+  REGEX_PLACEMENT,
+  SUBSTITUTE_FIND_REGEX,
+  timingFlags,
+  timingOf,
+  type RegexScript,
+} from "../src/types/regex";
+import {
+  collectRegexScripts,
+  readScenarioRegexScripts,
+} from "../src/util/regex-scripts";
+import type { StellaScenario } from "../src/types/scenario";
 
 function makeSession(): StellaSession {
   return {
@@ -2902,4 +2927,362 @@ void Promise.all(asyncTests)
     trimChatCompletionOutput("응답이다.\n철수: 질문", solo),
     "응답이다."
   );
+}
+
+// ── 정규식 스크립트 엔진 (ST 호환) — regex-engine.ts / regex.ts / regex-scripts.ts ──
+function regexScript(overrides: Partial<RegexScript>): RegexScript {
+  return { ...createBlankRegexScript("s"), ...overrides };
+}
+
+{
+  // regexFromString — /pattern/flags 파싱 + 순수 패턴 + 잘못된 정규식.
+  const withFlags = regexFromString("/foo/gi");
+  assert.ok(withFlags, "flags 파싱 성공");
+  assert.equal(withFlags!.source, "foo");
+  assert.equal(withFlags!.flags, "gi");
+  const plain = regexFromString("bar");
+  assert.ok(plain, "순수 패턴도 정규식");
+  assert.equal(plain!.source, "bar");
+  assert.equal(regexFromString("/(/"), null, "짝 안 맞는 괄호 → null");
+}
+
+{
+  // 기본 치환 + placement 필터 — AI_OUTPUT 스크립트는 AI 출력 경로에서만.
+  const script = regexScript({
+    findRegex: "/badword/g",
+    replaceString: "***",
+    placement: [REGEX_PLACEMENT.AI_OUTPUT],
+    promptOnly: false,
+  });
+  assert.equal(
+    getRegexedString("a badword b badword", REGEX_PLACEMENT.AI_OUTPUT, [script]),
+    "a *** b ***"
+  );
+  // 유저 입력 경로에서는 미적용(placement 불일치).
+  assert.equal(
+    getRegexedString("a badword", REGEX_PLACEMENT.USER_INPUT, [script]),
+    "a badword"
+  );
+}
+
+{
+  // 캡처 그룹: $1, {{match}}(=$0), $<name>.
+  const numbered = regexScript({
+    findRegex: "/(\\w+)@(\\w+)/g",
+    replaceString: "$1 at $2",
+    promptOnly: false,
+  });
+  assert.equal(
+    getRegexedString("user@host", REGEX_PLACEMENT.AI_OUTPUT, [numbered]),
+    "user at host"
+  );
+  const whole = regexScript({
+    findRegex: "/\\d+/g",
+    replaceString: "[{{match}}]",
+    promptOnly: false,
+  });
+  assert.equal(
+    getRegexedString("call 42 now", REGEX_PLACEMENT.AI_OUTPUT, [whole]),
+    "call [42] now"
+  );
+  const named = regexScript({
+    findRegex: "/(?<who>[^:]+):/g",
+    replaceString: "$<who>>>",
+    promptOnly: false,
+  });
+  assert.equal(
+    getRegexedString("리나:", REGEX_PLACEMENT.AI_OUTPUT, [named]),
+    "리나>>"
+  );
+}
+
+{
+  // 적용 시점(timing) 필터 — promptOnly / markdownOnly / raw(둘 다 false).
+  const prompt = regexScript({ findRegex: "/x/g", replaceString: "P", promptOnly: true, markdownOnly: false });
+  const display = regexScript({ findRegex: "/x/g", replaceString: "D", promptOnly: false, markdownOnly: true });
+  const raw = regexScript({ findRegex: "/x/g", replaceString: "R", promptOnly: false, markdownOnly: false });
+
+  // 전송본 경로(isPrompt): promptOnly 만.
+  assert.equal(getRegexedString("x", REGEX_PLACEMENT.AI_OUTPUT, [prompt], { isPrompt: true }), "P");
+  assert.equal(getRegexedString("x", REGEX_PLACEMENT.AI_OUTPUT, [display], { isPrompt: true }), "x");
+  assert.equal(getRegexedString("x", REGEX_PLACEMENT.AI_OUTPUT, [raw], { isPrompt: true }), "x");
+
+  // 표시 경로(isMarkdown): markdownOnly 만.
+  assert.equal(getRegexedString("x", REGEX_PLACEMENT.AI_OUTPUT, [display], { isMarkdown: true }), "D");
+  assert.equal(getRegexedString("x", REGEX_PLACEMENT.AI_OUTPUT, [prompt], { isMarkdown: true }), "x");
+
+  // 저장 원문 경로(둘 다 아님): raw 만.
+  assert.equal(getRegexedString("x", REGEX_PLACEMENT.AI_OUTPUT, [raw]), "R");
+  assert.equal(getRegexedString("x", REGEX_PLACEMENT.AI_OUTPUT, [prompt]), "x");
+}
+
+{
+  // disabled 스킵.
+  const off = regexScript({ findRegex: "/x/g", replaceString: "Y", disabled: true, promptOnly: false });
+  assert.equal(getRegexedString("x", REGEX_PLACEMENT.AI_OUTPUT, [off]), "x");
+}
+
+{
+  // depth min/max 필터.
+  const deep = regexScript({
+    findRegex: "/x/g",
+    replaceString: "Y",
+    promptOnly: false,
+    minDepth: 2,
+    maxDepth: 5,
+  });
+  assert.equal(getRegexedString("x", REGEX_PLACEMENT.AI_OUTPUT, [deep], { depth: 1 }), "x", "depth<min 스킵");
+  assert.equal(getRegexedString("x", REGEX_PLACEMENT.AI_OUTPUT, [deep], { depth: 3 }), "Y", "범위 내 적용");
+  assert.equal(getRegexedString("x", REGEX_PLACEMENT.AI_OUTPUT, [deep], { depth: 6 }), "x", "depth>max 스킵");
+  // depth 정보 없으면 필터 무시(항상 적용).
+  assert.equal(getRegexedString("x", REGEX_PLACEMENT.AI_OUTPUT, [deep]), "Y");
+}
+
+{
+  // runOnEdit / isEdit — 편집 경로는 runOnEdit 스크립트만.
+  const noEdit = regexScript({ findRegex: "/x/g", replaceString: "Y", promptOnly: false, runOnEdit: false });
+  const onEdit = regexScript({ findRegex: "/x/g", replaceString: "Y", promptOnly: false, runOnEdit: true });
+  assert.equal(getRegexedString("x", REGEX_PLACEMENT.AI_OUTPUT, [noEdit], { isEdit: true }), "x");
+  assert.equal(getRegexedString("x", REGEX_PLACEMENT.AI_OUTPUT, [onEdit], { isEdit: true }), "Y");
+}
+
+{
+  // replaceString 매크로 치환 — substitute 콜백이 $ 치환 후 최종 적용.
+  const macro = regexScript({
+    findRegex: "/NAME/g",
+    replaceString: "{{char}}",
+    promptOnly: false,
+  });
+  assert.equal(
+    getRegexedString("NAME 등장", REGEX_PLACEMENT.AI_OUTPUT, [macro], {
+      substitute: (s) => s.split("{{char}}").join("스텔라"),
+    }),
+    "스텔라 등장"
+  );
+}
+
+{
+  // substituteRegex RAW/ESCAPED — find 정규식에 매크로.
+  const rawFind = regexScript({
+    findRegex: "{{target}}",
+    replaceString: "HIT",
+    promptOnly: false,
+    substituteRegex: SUBSTITUTE_FIND_REGEX.RAW,
+  });
+  assert.equal(
+    getRegexedString("foo bar", REGEX_PLACEMENT.AI_OUTPUT, [rawFind], {
+      substitute: (s) => s.split("{{target}}").join("bar"),
+    }),
+    "foo HIT"
+  );
+  // ESCAPED — 매크로 값의 정규식 특수문자가 리터럴로 매칭.
+  const escFind = regexScript({
+    findRegex: "{{target}}",
+    replaceString: "HIT",
+    promptOnly: false,
+    substituteRegex: SUBSTITUTE_FIND_REGEX.ESCAPED,
+  });
+  assert.equal(
+    getRegexedString("a.b axb", REGEX_PLACEMENT.AI_OUTPUT, [escFind], {
+      substituteEscaped: (s) => sanitizeRegexMacro(s.split("{{target}}").join("a.b")),
+    }),
+    "HIT axb",
+    "ESCAPED: a.b 는 리터럴로만 매칭(axb 는 안 걸림)"
+  );
+}
+
+{
+  // trimStrings — 매치에서 지정 문자열 제거 후 치환.
+  const trim = regexScript({
+    findRegex: "/<b>(.+?)<\\/b>/gs",
+    replaceString: "$1",
+    trimStrings: ["\n"],
+    promptOnly: false,
+  });
+  assert.equal(
+    getRegexedString("<b>강\n조</b>", REGEX_PLACEMENT.AI_OUTPUT, [trim]),
+    "강조"
+  );
+}
+
+{
+  // 스크립트 순서 = 우선순위(체이닝). 앞 결과가 뒤 입력.
+  const first = regexScript({ findRegex: "/a/g", replaceString: "b", promptOnly: false });
+  const second = regexScript({ findRegex: "/b/g", replaceString: "c", promptOnly: false });
+  assert.equal(getRegexedString("a", REGEX_PLACEMENT.AI_OUTPUT, [first, second]), "c");
+}
+
+{
+  // timingOf / timingFlags 왕복.
+  assert.equal(timingOf({ markdownOnly: false, promptOnly: true }), "prompt");
+  assert.equal(timingOf({ markdownOnly: true, promptOnly: false }), "display");
+  assert.equal(timingOf({ markdownOnly: false, promptOnly: false }), "raw");
+  assert.deepEqual(timingFlags("prompt"), { markdownOnly: false, promptOnly: true });
+  assert.deepEqual(timingFlags("display"), { markdownOnly: true, promptOnly: false });
+  assert.deepEqual(timingFlags("raw"), { markdownOnly: false, promptOnly: false });
+}
+
+{
+  // normalizeRegexScript — 느슨한 임포트 데이터 보존/기본값.
+  assert.equal(normalizeRegexScript({}, "x"), null, "findRegex 없으면 null");
+  const full = normalizeRegexScript(
+    {
+      id: "abc",
+      scriptName: "s",
+      findRegex: "/x/",
+      replaceString: "y",
+      trimStrings: ["z"],
+      placement: [1, 2],
+      disabled: true,
+      markdownOnly: true,
+      promptOnly: false,
+      runOnEdit: true,
+      substituteRegex: 2,
+      minDepth: 3,
+      maxDepth: 9,
+    },
+    "fallback"
+  );
+  assert.ok(full);
+  assert.equal(full!.id, "abc");
+  assert.deepEqual(full!.placement, [1, 2]);
+  assert.equal(full!.substituteRegex, 2);
+  assert.equal(full!.maxDepth, 9);
+  // id 빠지면 fallback, minDepth 기본 -1.
+  const partial = normalizeRegexScript({ findRegex: "/x/" }, "fb");
+  assert.ok(partial);
+  assert.equal(partial!.id, "fb");
+  assert.equal(partial!.minDepth, -1);
+  assert.ok(Number.isNaN(partial!.maxDepth));
+}
+
+{
+  // collectRegexScripts — 전역 → 시나리오별 순서 + 허용 게이트.
+  const g = regexScript({ id: "g", findRegex: "/x/", replaceString: "G" });
+  const scoped = regexScript({ id: "sc", findRegex: "/y/", replaceString: "S" });
+  const scenario = {
+    data: { extensions: { regex_scripts: [scoped] } },
+  } as unknown as StellaScenario;
+
+  assert.deepEqual(readScenarioRegexScripts(scenario).map((s) => s.id), ["sc"]);
+
+  // 허용 안 하면 시나리오별 제외.
+  assert.deepEqual(
+    collectRegexScripts({ global: [g], scenario, scenarioAllowed: false }).map((s) => s.id),
+    ["g"]
+  );
+  // 허용하면 전역 뒤에 붙음.
+  assert.deepEqual(
+    collectRegexScripts({ global: [g], scenario, scenarioAllowed: true }).map((s) => s.id),
+    ["g", "sc"]
+  );
+  // 시나리오 없으면 전역만.
+  assert.deepEqual(
+    collectRegexScripts({ global: [g] }).map((s) => s.id),
+    ["g"]
+  );
+}
+
+{
+  // 확장 후가공 스크립트 — placement/timing 무시, 순서 체이닝 + disabled 스킵
+  // (createExtensionRegexApplier 가 runRegexScript 를 직접 순서대로 돌리는 규약).
+  const first = regexScript({
+    id: "p1", findRegex: "/^```json\\s*|\\s*```$/g", replaceString: "",
+    promptOnly: true, // 후가공 경로는 timing 을 보지 않는다
+  });
+  const second = regexScript({ id: "p2", findRegex: "/silver/g", replaceString: "gold" });
+  const off = regexScript({ id: "p3", findRegex: "/gold/g", replaceString: "X", disabled: true });
+  let out = "```json\n1girl, silver hair\n```";
+  for (const s of [first, second, off]) out = runRegexScript(s, out);
+  assert.equal(out, "1girl, gold hair", "후가공 체이닝: 껍데기 제거 → 치환, disabled 스킵");
+}
+
+{
+  // 로어북 확장 — 키워드 매칭 끄기: constant/강제 활성만 들어간다.
+  const book = makeLorebook([
+    { uid: "kw", keys: ["dragon"], content: "keyword entry" },
+    { uid: "always", constant: true, content: "constant entry" },
+    { uid: "picked", keys: ["nowhere"], content: "ai picked entry" },
+  ]);
+  const ctx = { recentMessages: ["a dragon appears"] };
+  const defaultMatch = matchLorebookEntries([book], { ...ctx });
+  assert.deepEqual(
+    defaultMatch.map((m) => m.entry.uid).sort(),
+    ["always", "kw"],
+    "기본: 키워드 + constant"
+  );
+  const noKeyword = matchLorebookEntries([book], {
+    ...ctx,
+    keywordMatching: false,
+  });
+  assert.deepEqual(
+    noKeyword.map((m) => m.entry.uid),
+    ["always"],
+    "키워드 매칭 off: constant 만"
+  );
+  const forced = matchLorebookEntries([book], {
+    ...ctx,
+    keywordMatching: false,
+    forcedEntryKeys: new Set(["lb:picked"]),
+  });
+  assert.deepEqual(
+    forced.map((m) => m.entry.uid).sort(),
+    ["always", "picked"],
+    "AI 선별 강제 활성: 키워드 없이 포함"
+  );
+  // 둘 다 켬 = 합집합 (중복 없이).
+  const union = matchLorebookEntries([book], {
+    ...ctx,
+    forcedEntryKeys: new Set(["lb:picked", "lb:kw"]),
+  });
+  assert.deepEqual(
+    union.map((m) => m.entry.uid).sort(),
+    ["always", "kw", "picked"],
+    "키워드 + AI 합집합, kw 중복 없음"
+  );
+}
+
+{
+  // 로어북 확장 — 강제 활성은 확률 게이트도 우회한다 (선별 결과는 결정적).
+  const book = makeLorebook([
+    { uid: "unlucky", keys: ["nowhere"], content: "x", probability: 0 },
+  ]);
+  const matched = matchLorebookEntries([book], {
+    recentMessages: ["hello"],
+    forcedEntryKeys: new Set(["lb:unlucky"]),
+  });
+  assert.deepEqual(matched.map((m) => m.entry.uid), ["unlucky"]);
+}
+
+{
+  // AI 선별 후보 목록 — constant/비활성 제외, 이름+키워드+발췌 라벨.
+  const book = makeLorebook([
+    { uid: "a", name: "왕국의 비밀", keys: ["secret", "king"], content: "The king hides a truth.  Deep\nbelow." },
+    { uid: "b", constant: true, content: "always in" },
+    { uid: "c", enabled: false, content: "off" },
+    { uid: "d", name: "", keys: [], content: "" },
+  ]);
+  const catalog = buildLorebookCatalog([book]);
+  assert.deepEqual(catalog.map((i) => i.key), ["lb:a", "lb:d"]);
+  assert.equal(
+    catalog[0].label,
+    "왕국의 비밀 (secret, king) — The king hides a truth. Deep below."
+  );
+  assert.equal(catalog[1].label, "(untitled)");
+}
+
+{
+  // AI 선별 응답 파싱 — 잡설 속 마지막 JSON 배열, 범위 밖/중복/비정수 제거.
+  assert.deepEqual(parseLorebookSelectionResponse("[1, 3]", 5), [1, 3]);
+  assert.deepEqual(
+    parseLorebookSelectionResponse("Sure! The relevant entries are: [2,2,9,0,4]", 5),
+    [2, 4],
+    "중복/범위 밖 제거"
+  );
+  assert.deepEqual(parseLorebookSelectionResponse("none needed: []", 5), []);
+  assert.equal(parseLorebookSelectionResponse("entries 1 and 3", 5), null);
+  assert.equal(parseLorebookSelectionResponse("", 5), null);
+  // 오프너 완성형 — 텍스트 모델이 "Selection:" 을 이어 써서 여는 대괄호 없이 답한 경우.
+  assert.deepEqual(parseLorebookSelectionResponse(" 2, 5]", 5), [2, 5]);
+  assert.deepEqual(parseLorebookSelectionResponse("3", 5), [3]);
 }

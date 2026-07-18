@@ -8,9 +8,10 @@
  *  - active variant 의 프롬프트를 caption 으로 (hover 시) 보여준다.
  */
 
-import { setIcon } from "obsidian";
+import { Menu, setIcon } from "obsidian";
 import type { IllustrationVariant } from "../types/media";
 import { openImageLightbox } from "./image-lightbox";
+import { PressMenuController } from "../util/press-menu";
 
 export interface IllustrationCarouselConfig {
   /** variant → vault 리소스 URL (없으면 null). */
@@ -26,6 +27,10 @@ export interface IllustrationCarouselConfig {
   isFavorite?: (v: IllustrationVariant) => boolean;
   /** 즐겨찾기 토글 — 동기적으로 새 상태를 반환(illustrations 객체를 즉시 변경하는 호출자 기준). */
   onToggleFavorite?: (variantId: string) => boolean | void;
+  /** 우클릭/롱프레스 메뉴 — 보이는 variant 삭제 (없으면 메뉴에 미노출). */
+  onDelete?: (variantId: string) => void;
+  /** 우클릭/롱프레스 메뉴 — 스텔라 네트워크에 공유 (폰 사용중일 때만 넘긴다). */
+  onShare?: (v: IllustrationVariant) => void;
 }
 
 export class IllustrationCarousel {
@@ -34,6 +39,7 @@ export class IllustrationCarousel {
   private favBtnEl: HTMLElement | null = null;
   private variants: IllustrationVariant[] = [];
   private activeIndex = 0;
+  private pressMenu = new PressMenuController();
 
   constructor(
     private container: HTMLElement,
@@ -71,14 +77,15 @@ export class IllustrationCarousel {
       if (src) {
         const img = slide.createEl("img", { cls: "ggai-illus-img" });
         img.src = src;
-        img.addEventListener("click", () =>
+        img.addEventListener("click", (e) => {
+          if (this.pressMenu.consumeSuppressedClick(e)) return;
           openImageLightbox(
             variants
               .map((_vv, j) => ({ src: srcs[j] ?? "" }))
               .filter((it) => it.src),
             this.activeIndex
-          )
-        );
+          );
+        });
       }
     });
 
@@ -125,7 +132,57 @@ export class IllustrationCarousel {
       this.favBtnEl = fav;
     }
 
+    // 우클릭/롱프레스 메뉴 — 보이는 variant 기준 (즐겨찾기/공유/삭제).
+    if (this.hasMenu()) {
+      this.pressMenu.attachContextMenu(
+        viewport,
+        (e) => this.buildMenu()?.showAtMouseEvent(e),
+        (x, y) => this.buildMenu()?.showAtPosition({ x, y })
+      );
+    }
+
     this.layout();
+  }
+
+  /** onDelete/onShare 를 넘긴 호출자(세션창)만 메뉴를 얻는다 — 출력 뷰는 기존 그대로. */
+  private hasMenu(): boolean {
+    return !!(this.cfg.onShare || this.cfg.onDelete);
+  }
+
+  private buildMenu(): Menu | null {
+    const v = this.variants[this.activeIndex];
+    if (!v) return null;
+    const menu = new Menu();
+    if (this.cfg.isFavorite && this.cfg.onToggleFavorite) {
+      menu.addItem((mi) =>
+        mi
+          .setTitle(this.cfg.isFavorite!(v) ? "즐겨찾기 해제" : "즐겨찾기")
+          .setIcon("star")
+          .onClick(() => {
+            const next = this.cfg.onToggleFavorite!(v.id);
+            if (typeof next === "boolean") {
+              this.favBtnEl?.toggleClass("is-favorited", next);
+            }
+          })
+      );
+    }
+    if (this.cfg.onShare) {
+      menu.addItem((mi) =>
+        mi
+          .setTitle("스텔라 네트워크에 공유")
+          .setIcon("share-2")
+          .onClick(() => this.cfg.onShare!(v))
+      );
+    }
+    if (this.cfg.onDelete) {
+      menu.addSeparator().addItem((mi) =>
+        mi
+          .setTitle("이 삽화 삭제")
+          .setIcon("trash-2")
+          .onClick(() => this.cfg.onDelete!(v.id))
+      );
+    }
+    return menu;
   }
 
   /** active 슬라이드가 중앙에 오도록 트랙 이동 (트랙 폭 = viewport 폭, 100% = 한 칸). */

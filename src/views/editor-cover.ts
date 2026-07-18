@@ -1,7 +1,11 @@
 import { App, TFile, setIcon } from "obsidian";
+import { openImageCrop } from "./image-crop-modal";
+
+/** 표지가 실제로 보이는 비율 — 자르기 창이 이 비율로 열린다. */
+const COVER_RATIO = 3 / 4;
 
 /**
- * 편집기 헤더용 공용 표지 — 클릭하면 바로 이미지 선택창이 뜬다.
+ * 편집기 헤더용 공용 표지 — 클릭하면 이미지 선택창, 고르면 자르기 창이 뜬다.
  * 시나리오/로어북/페르소나 편집기가 동일한 크기·동작을 공유한다.
  */
 export function renderEditorCover(
@@ -40,7 +44,9 @@ export function renderEditorCover(
       const file = input.files?.[0];
       input.remove();
       if (!file) return;
-      await opts.onPick(await file.arrayBuffer(), imageExt(file));
+      const cropped = await openImageCrop(app, file, COVER_RATIO);
+      if (!cropped) return;
+      await opts.onPick(cropped.bytes, cropped.ext);
     });
     document.body.appendChild(input);
     input.click();
@@ -122,10 +128,4 @@ export function renderIconActionButton(
   btn.setAttr("aria-label", opts.label);
   btn.addEventListener("click", opts.onClick);
   return btn;
-}
-
-function imageExt(file: File): string {
-  const byType = file.type.split("/")[1];
-  const byName = file.name.split(".").pop();
-  return (byType || byName || "png").replace("jpeg", "jpg");
 }

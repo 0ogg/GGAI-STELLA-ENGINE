@@ -23,6 +23,7 @@ import type StellaEnginePlugin from "../main";
 import type { SessionChangeDetail } from "../state/store";
 import type { SessionNode, StellaSession } from "../types/session";
 import { planSessionRequest } from "../util/build-session-context";
+import { applyRawRegexToGeneration } from "../util/session-regex";
 import { trimChatCompletionOutput } from "../util/text-completion-prompt";
 import { buildSpans, spansToText } from "../util/session-text";
 import { buildChatMessages, CHAT_MESSAGE_SEPARATOR } from "../util/chat-messages";
@@ -489,6 +490,11 @@ export class ProactiveService {
       });
     }
     if (!text) return { ok: false, error: "모델이 빈 응답을 보냈습니다." };
+    // 저장 원문(raw) 시점 정규식 — 저장 전에 치환 (챗 뷰의 생성과 동일 경로).
+    text = await applyRawRegexToGeneration(plugin, sessionFile, text);
+    if (!text.trim()) {
+      return { ok: false, error: "정규식 치환 후 남은 내용이 없습니다." };
+    }
 
     // 일반 ai 노드로 저장 — 챗 뷰의 이어쓰기와 같은 형태 (구분자 + ai span).
     const parentId = session.meta.activeLeafId;

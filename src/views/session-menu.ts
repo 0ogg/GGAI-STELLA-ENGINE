@@ -110,6 +110,18 @@ export function buildSessionMenu(
         .onClick(() => void toggleProactiveSetting(plugin, s, "realtime"))
     );
   }
+  // 스텔라튜브 방송 (v2) — 이 세션의 장면을 생중계 + 실시간 채팅.
+  {
+    const live = plugin.phone.isSessionLive(s.sessionFile);
+    menu.addItem((mi) =>
+      mi
+        .setTitle(
+          live ? "방송 종료 (스텔라튜브)" : "이 장면 방송하기 (스텔라튜브)"
+        )
+        .setIcon("radio-tower")
+        .onClick(() => void toggleStream(plugin, s))
+    );
+  }
   // 그룹 채팅 관리 (G1/G3) — 멤버 + 대화 설정. 그룹 세션에만.
   if (s.session.meta.groupId) {
     menu.addItem((mi) =>
@@ -155,6 +167,23 @@ async function toggleProactiveSetting(
       `선채팅 설정 저장 실패: ${err instanceof Error ? err.message : String(err)}`
     );
   }
+}
+
+/** 스텔라튜브 방송 토글 (v2) — 시작/종료 모두 여기서. */
+async function toggleStream(
+  plugin: StellaEnginePlugin,
+  s: SessionListItem
+): Promise<void> {
+  const result = await plugin.phone.toggleStream(s.sessionFile);
+  if (!result.ok) {
+    new Notice(`방송 실패: ${result.error}`);
+    return;
+  }
+  new Notice(
+    result.live
+      ? "🔴 스텔라튜브 방송 시작 — 이 세션의 장면이 생중계됩니다."
+      : "방송 종료 — 스텔라튜브에 다시보기가 남았습니다."
+  );
 }
 
 async function toggleFavorite(

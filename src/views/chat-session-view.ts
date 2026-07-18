@@ -39,6 +39,7 @@ import {
   type GroupSpeakerCandidate,
 } from "../util/group-speaker";
 import { planSessionRequest } from "../util/build-session-context";
+import { applyRawRegexToGeneration } from "../util/session-regex";
 import {
   buildChatMessages,
   CHAT_MESSAGE_SEPARATOR,
@@ -52,8 +53,15 @@ import {
 } from "../util/illustrations";
 import { formatChatText } from "../util/chat-format";
 import { applyMacros, type MacroContext } from "../util/macros";
+import { REGEX_PLACEMENT, type RegexScript } from "../types/regex";
+import { getRegexedString } from "../util/regex-engine";
+import { readScenarioRegexScripts } from "../util/regex-scripts";
 import { listParagraphRanges } from "../util/paragraph-regen";
 import { attachLongPress } from "../util/long-press";
+import {
+  openExtensionActionsMenu,
+  renderHeaderCommandBar,
+} from "./session-command-bar";
 import { buildSpans, spansToText } from "../util/session-text";
 import { trimChatCompletionOutput } from "../util/text-completion-prompt";
 import {
@@ -72,7 +80,12 @@ import { clampSessionViewStyle, type SessionViewStyle } from "../util/view-style
 import { removeIllustrationVariant } from "../util/illustrations";
 import { renderThumb } from "../util/render-thumb";
 import { EditGuard, isImeComposing, runWhenImeIdle } from "./edit-guard";
-import { IllustrationGalleryModal, type GalleryItem } from "./gallery-modal";
+import {
+  IllustrationGalleryModal,
+  illustrationCaption,
+  shareGalleryImageToNetwork,
+  type GalleryItem,
+} from "./gallery-modal";
 import { IllustrationCarousel } from "./illustration-carousel";
 import { IllustrationRegenModal } from "./illustration-regen-modal";
 import { ParagraphRegenModal } from "./paragraph-regen-modal";
@@ -139,6 +152,9 @@ export class ChatSessionView extends ItemView {
   /** 아바타 재료 — refreshMacroContext 에서 함께 갱신. */
   private scenarioThumbPath: string | null = null;
   private personaThumbPath: string | null = null;
+  /** 표시 시점 정규식 재료 — refreshMacroContext 에서 함께 갱신. */
+  private scopedRegexScripts: RegexScript[] = [];
+  private scenarioStellaId: string | null = null;
 
   // ── 그룹 챗 (G2) — 발화자 시스템 ──
   /** 세션의 그룹 (meta.groupId) — refreshMacroContext 에서 갱신. */
@@ -376,6 +392,8 @@ export class ChatSessionView extends ItemView {
     this.personaThumbPath = null;
     this.group = null;
     this.groupMembers = [];
+    this.scopedRegexScripts = [];
+    this.scenarioStellaId = null;
     if (this.sessionFile) {
       const scenarios = await this.store.getScenarios().catch(() => []);
       const scenarioFile = scenarioFileOfSessionFile(this.sessionFile);
@@ -383,6 +401,9 @@ export class ChatSessionView extends ItemView {
         const item = scenarios.find((i) => i.scenarioFile === scenarioFile);
         scenarioData = item?.scenario.data ?? null;
         this.scenarioThumbPath = item?.thumbnailPath ?? null;
+        // 표시 시점 정규식 재료 — 시나리오 전용 스크립트 + 허용 판정용 id.
+        this.scopedRegexScripts = readScenarioRegexScripts(item?.scenario);
+        this.scenarioStellaId = item?.scenario.data?.extensions?.stella?.id ?? null;
       }
       // 그룹 챗 (G2) — 멤버 이름/표지/수다스러움(ST talkativeness) 재료.
       const groupId = this.session?.meta.groupId;
@@ -443,6 +464,37 @@ export class ChatSessionView extends ItemView {
       ...this.displayMacroCtx,
       variables: { ...(this.session?.meta.variables ?? {}) },
     });
+  }
+
+  /** 표시 시점 정규식 재료 — 전역(라이브) + 허용된 시나리오 전용(캐시). */
+  private displayRegexScripts(): RegexScript[] {
+    const global = this.plugin.data.regexScripts ?? [];
+    const allowed =
+      this.scenarioStellaId != null &&
+      (this.plugin.data.regexScriptsAllowedScenarios ?? []).includes(
+        this.scenarioStellaId
+      );
+    return allowed ? [...global, ...this.scopedRegexScripts] : global;
+  }
+
+  /**
+   * 표시 시점(markdownOnly) 정규식 — 말풍선에 보일 때만 치환한다. 저장 원문과
+   * 전송본은 불변(편집 진입 시 raw 로 스왑되는 구조라 편집에도 안전).
+   */
+  private displayRegexText(text: string, index: number): string {
+    const scripts = this.displayRegexScripts();
+    const msg = this.messages[index];
+    if (scripts.length === 0 || !msg || !text) return text;
+    return getRegexedString(
+      text,
+      msg.role === "user" ? REGEX_PLACEMENT.USER_INPUT : REGEX_PLACEMENT.AI_OUTPUT,
+      scripts,
+      {
+        isMarkdown: true,
+        depth: this.messages.length - 1 - index,
+        substitute: (s) => this.macroText(s),
+      }
+    );
   }
 
   private async reloadFromStore(): Promise<void> {
@@ -668,6 +720,9 @@ export class ChatSessionView extends ItemView {
 
     // 상단 뷰어 옵션 줄 — 소설과 같은 자리·모양 (모바일은 뷰 헤더 액션이 대신).
     if (!Platform.isMobile) this.renderViewerBar(root);
+    // PC(제목줄 꺼짐): Commander 페이지 헤더 버튼을 상단 좌측에 대신 그린다
+    // — 모바일 제목줄에서 보이는 버튼과 동기.
+    renderHeaderCommandBar(this.app, root);
 
     this.messagesEl = root.createDiv({ cls: "ggai-chat-messages" });
     this.guard.attach(this.messagesEl);
@@ -802,6 +857,9 @@ export class ChatSessionView extends ItemView {
   private openGallery(): void {
     const items: GalleryItem[] = [];
     const nodes = this.illustrations?.nodes ?? {};
+    const folder = this.sessionFile
+      ? this.sessionFile.slice(0, -"/session.json".length)
+      : "";
     for (const [nodeId, entry] of Object.entries(nodes)) {
       for (const v of Object.values(entry.variants)) {
         const src = this.resolveIllustrationSrc(v);
@@ -812,6 +870,8 @@ export class ChatSessionView extends ItemView {
             variantId: v.id,
             createdAt: v.createdAt,
             favorite: v.favorite,
+            path: `${folder}/${v.path}`,
+            caption: illustrationCaption(v.prompt),
           });
       }
     }
@@ -825,6 +885,12 @@ export class ChatSessionView extends ItemView {
       onDelete: (nodeId, variantId) => this.deleteIllustration(nodeId, variantId),
       onToggleFavorite: (nodeId, variantId) =>
         this.toggleIllustrationFavorite(nodeId, variantId),
+      ...(this.plugin.phone.isPhoneInUse()
+        ? {
+            onShareToNetwork: (item: GalleryItem) =>
+              shareGalleryImageToNetwork(this.plugin, item.path!, item.caption),
+          }
+        : {}),
     }).open();
   }
 
@@ -951,14 +1017,20 @@ export class ChatSessionView extends ItemView {
         // translations.json 에만 저장 — 본문(원문)은 절대 건드리지 않는다).
         this.setBubbleDisplay(
           bubble,
-          this.macroText(this.translatedTextOf(this.displayTextOf(msg)))
+          this.displayRegexText(
+            this.macroText(this.translatedTextOf(this.displayTextOf(msg))),
+            index
+          )
         );
         row.addClass("is-translated");
         if (!this.paraSelectMode) this.makeTranslationBubbleEditable(bubble);
       } else {
         // 표시 = 매크로 적용본에 표기(기울임/대사/문단) 반영, 편집 진입(focus)
         // 시 raw 로 스왑.
-        this.setBubbleDisplay(bubble, this.macroText(this.displayTextOf(msg)));
+        this.setBubbleDisplay(
+          bubble,
+          this.displayRegexText(this.macroText(this.displayTextOf(msg)), index)
+        );
         // 선택 모드에서는 편집 대신 탭 = 재생성 대상 지정.
         if (!this.paraSelectMode) this.makeBubbleEditable(bubble);
       }
@@ -1033,6 +1105,17 @@ export class ChatSessionView extends ItemView {
       isFavorite: (v) => !!v.favorite,
       onToggleFavorite: (variantId) =>
         this.toggleIllustrationFavorite(nodeId, variantId),
+      onDelete: (variantId) => void this.deleteIllustration(nodeId, variantId),
+      ...(this.plugin.phone.isPhoneInUse()
+        ? {
+            onShare: (v: IllustrationVariant) =>
+              shareGalleryImageToNetwork(
+                this.plugin,
+                `${this.sessionFile?.slice(0, -"/session.json".length) ?? ""}/${v.path}`,
+                illustrationCaption(v.prompt)
+              ),
+          }
+        : {}),
     });
   }
 
@@ -1221,6 +1304,17 @@ export class ChatSessionView extends ItemView {
     mkIconBtn(rightBottom, "panel-right", "우측 패널 열기", () =>
       void this.plugin.revealDetail()
     );
+    // 확장 조작 트레이 — 탭하면 이 버튼에서 확장 액션 모음이 열린다.
+    const extBtn = rightBottom.createEl("button", {
+      cls: "ggai-btn ggai-icon-btn",
+    });
+    setIcon(extBtn, "puzzle");
+    extBtn.setAttr("aria-label", "확장 기능");
+    extBtn.setAttr("data-tooltip-position", "top");
+    extBtn.addEventListener("click", (e) => {
+      if (this.sessionFile)
+        openExtensionActionsMenu(this.plugin, this.sessionFile, e);
+    });
 
     this.updateToolbar();
   }
@@ -1844,10 +1938,15 @@ export class ChatSessionView extends ItemView {
           await this.reloadFromStore();
           return;
         }
-        // 편집 종료 — 매크로 표시본(표기 반영)으로 복귀.
+        // 편집 종료 — 매크로+표시 정규식 적용본(표기 반영)으로 복귀.
         const idx = Number(bubble.dataset.index);
         const msg = this.messages[idx];
-        if (msg) this.setBubbleDisplay(bubble, this.macroText(this.displayTextOf(msg)));
+        if (msg) {
+          this.setBubbleDisplay(
+            bubble,
+            this.displayRegexText(this.macroText(this.displayTextOf(msg)), idx)
+          );
+        }
       })();
     });
   }
@@ -1999,7 +2098,10 @@ export class ChatSessionView extends ItemView {
     if (!msg) return;
     this.setBubbleDisplay(
       bubble,
-      this.macroText(this.translatedTextOf(this.displayTextOf(msg)))
+      this.displayRegexText(
+        this.macroText(this.translatedTextOf(this.displayTextOf(msg))),
+        idx
+      )
     );
   }
 
@@ -2273,7 +2375,21 @@ export class ChatSessionView extends ItemView {
           );
         }
       }
-      const generatedText = this.generation?.accumulatedText ?? "";
+      let generatedText = this.generation?.accumulatedText ?? "";
+      // 저장 원문(raw) 시점 정규식 — 저장 전에 치환 (전송본/표시 시점은 안 돎).
+      if (generatedText.trim()) {
+        const regexed = await applyRawRegexToGeneration(
+          this.plugin,
+          sessionFile,
+          generatedText
+        );
+        if (regexed !== generatedText) {
+          generatedText = regexed;
+          if (appendPatch.spans[0]) {
+            appendPatch.spans[0].text = sep + regexed;
+          }
+        }
+      }
       if (node.gen) {
         node.gen.tokensIn = usage.inputTokens;
         node.gen.tokensOut = usage.outputTokens;

@@ -33,6 +33,7 @@ import {
   recordTranslationVariant,
   TRANSLATION_IO_INSTRUCTIONS,
 } from "../util/translate-paragraphs";
+import { createExtensionRegexApplier } from "../util/session-regex";
 import type { MediaPromptItem } from "../types/preset";
 import type { TranslationUndoItem } from "../types/media";
 
@@ -162,7 +163,13 @@ export class TranslationService {
       if (!item) {
         return { ok: false, text: "", error: "번역 응답이 올바른 형식이 아닙니다." };
       }
-      return { ok: true, text: item.translation };
+      // 확장 결과물 정규식 — 받은 번역문을 표시 전에 가공(일괄 번역과 동일 규칙).
+      const applyRegex = await createExtensionRegexApplier(
+        this.plugin,
+        sessionFile,
+        "translation"
+      );
+      return { ok: true, text: applyRegex ? applyRegex(item.translation) : item.translation };
     } catch (err) {
       return {
         ok: false,
@@ -170,6 +177,93 @@ export class TranslationService {
         error: `번역 호출 실패: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
+  }
+
+  /**
+   * 세션과 무관한 항목 배열(스텔라 폰의 문자/SNS 글) 일괄 번역.
+   * 프롬프트/모델은 전역 번역 설정(`PluginData.current`), 로어북은 호출자 지정
+   * (폰 설정의 폰 전용 로어북). translations.json 에 반영하지 않는다 — 결과
+   * 저장은 호출자 몫. 항목은 청크로 끊어 순차 호출하고, 중간 실패 시 이미 받은
+   * 번역은 results 에 남는다 (부분 성공).
+   */
+  async translateItems(
+    items: { id: string; source: string }[],
+    lorebookIds: string[] | undefined
+  ): Promise<{ ok: boolean; results: Map<string, string>; error?: string }> {
+    const results = new Map<string, string>();
+    const targets = items.filter((i) => i.source.trim() !== "");
+    if (targets.length === 0) return { ok: true, results };
+    if (!this.plugin.ai.isAvailable()) {
+      return {
+        ok: false,
+        results,
+        error: "GGAI Core 가 설치/활성화되어 있지 않습니다.",
+      };
+    }
+    const current = this.plugin.data.current?.translation ?? {};
+    const prompt = resolveMediaPrompt(
+      "translation",
+      current.promptId,
+      this.plugin.data.mediaPrompts
+    );
+    if (!prompt) {
+      return { ok: false, results, error: "번역 프롬프트가 선택되어 있지 않습니다." };
+    }
+    const profile =
+      this.plugin.ai.getProfileById(current.modelProfileId) ??
+      this.plugin.ai.getDefaultGenerationProfile();
+    if (!profile) {
+      return { ok: false, results, error: "번역에 사용할 모델 프로필이 없습니다." };
+    }
+    const books = await loadMediaLorebooks(this.plugin.store, lorebookIds ?? []);
+
+    const chunks = chunkParagraphs(
+      targets.map((t) => ({ hash: t.id, source: t.source })),
+      CHUNK_PARAGRAPHS,
+      CHUNK_CHARS
+    );
+    for (const chunk of chunks) {
+      const segments = chunk.map((c) => ({
+        id: c.hash,
+        role: "translate" as const,
+        source: c.source,
+      }));
+      const lorebookText = buildLorebookText(
+        books,
+        segments.map((s) => s.source).join("\n")
+      );
+      try {
+        const responseText = await this.callModel(
+          profile,
+          prompt.prompt,
+          segments,
+          lorebookText
+        );
+        const parsed = parseTranslationResponse(responseText);
+        if (!parsed || parsed.length === 0) {
+          return {
+            ok: false,
+            results,
+            error: "번역 응답이 올바른 형식이 아닙니다.",
+          };
+        }
+        const valid = new Set(chunk.map((c) => c.hash));
+        for (const r of parsed) {
+          if (valid.has(r.id) && r.translation.trim()) {
+            results.set(r.id, r.translation);
+          }
+        }
+      } catch (err) {
+        // 취소는 오류가 아니다 — 남은 청크를 발사하지 않고 조용히 멈춘다.
+        if (isCancelledError(err)) return { ok: results.size > 0, results };
+        return {
+          ok: false,
+          results,
+          error: `번역 호출 실패: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+    }
+    return { ok: true, results };
   }
 
   /**
@@ -183,7 +277,9 @@ export class TranslationService {
     chunk: ReturnType<typeof chunkParagraphs>[number],
     books: Awaited<ReturnType<typeof loadMediaLorebooks>>,
     retry: boolean,
-    errorCount: { n: number }
+    errorCount: { n: number },
+    /** 확장 결과물 정규식(저장 원문 시점 + 번역 대상 전역 스크립트) — 없으면 null. */
+    applyRegex: ((text: string) => string) | null
   ): Promise<{
     results: ReturnType<typeof parseTranslationResponse>;
     sourceById: Map<string, string>;
@@ -211,7 +307,11 @@ export class TranslationService {
         );
         const parsed = parseTranslationResponse(responseText);
         if (parsed && parsed.length > 0) {
-          results = parsed;
+          // 받은 번역문을 기록 전에 가공 — 치환 후 빈 번역은 caller 의 기존
+          // trim 검사가 걸러 저장하지 않는다(재번역 대상으로 남음).
+          results = applyRegex
+            ? parsed.map((r) => ({ ...r, translation: applyRegex(r.translation) }))
+            : parsed;
           break;
         }
         lastError = "번역 응답이 올바른 JSON 배열이 아닙니다.";
@@ -268,6 +368,11 @@ export class TranslationService {
     const items: TranslationPreviewItem[] = [];
     const errors: string[] = [];
     const errorCount = { n: 0 };
+    const applyRegex = await createExtensionRegexApplier(
+      this.plugin,
+      sessionFile,
+      "translation"
+    );
 
     for (const chunk of chunks) {
       const { results, sourceById, reason, cancelled } = await this.translateChunk(
@@ -277,7 +382,8 @@ export class TranslationService {
         chunk,
         books,
         retry,
-        errorCount
+        errorCount,
+        applyRegex
       );
       if (cancelled) break; // 취소 — 조용히 멈춤(오류로 처리하지 않음)
       if (!results || results.length === 0) {
@@ -369,6 +475,11 @@ export class TranslationService {
     let done = 0;
     let cancelledRun = false;
     const errorCount = { n: 0 };
+    const applyRegex = await createExtensionRegexApplier(
+      this.plugin,
+      sessionFile,
+      "translation"
+    );
 
     for (const chunk of chunks) {
       const { results, sourceById, reason, cancelled } = await this.translateChunk(
@@ -378,7 +489,8 @@ export class TranslationService {
         chunk,
         books,
         retry,
-        errorCount
+        errorCount,
+        applyRegex
       );
 
       // 취소 — 남은 청크를 발사하지 않고 멈춘다. 여기까지 저장된 청크는 보존.

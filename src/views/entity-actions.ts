@@ -6,7 +6,7 @@
  * 호출부 콜백으로 잇는다. 목록 재렌더 자체는 store 이벤트가 이미 전파한다.
  */
 
-import { Notice, TFile } from "obsidian";
+import { Notice, Platform, TFile } from "obsidian";
 import type { ReadingExportMode } from "../util/export-session";
 import type { ImportResult } from "../import";
 import type { NaiStoryProgress } from "../import/parse-nai-story";
@@ -1018,7 +1018,12 @@ export function confirmDeleteLorebook(
 export function runImportPicker(plugin: StellaEnginePlugin): void {
   const input = document.createElement("input");
   input.type = "file";
-  input.accept = ".json,.jsonl,.lorebook,.scenario,.story,.png,.apng,.charx";
+  // 모바일 파일 선택창은 커스텀 확장자(.jsonl/.lorebook/.scenario/.story/.charx)를
+  // 알려진 MIME 로 매핑하지 못해 목록에서 숨긴다. 선택 후 내용으로 형식을 판별하므로
+  // 모바일에서는 필터를 풀어 모든 파일이 보이게 둔다.
+  if (!Platform.isMobile) {
+    input.accept = ".json,.jsonl,.lorebook,.scenario,.story,.png,.apng,.charx";
+  }
   input.style.display = "none";
 
   input.addEventListener("change", async () => {

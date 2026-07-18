@@ -7,6 +7,10 @@ import { getDefaultPrompts, isBuiltinMediaPrompt } from "../../util/default-medi
 import { TRANSLATION_IO_INSTRUCTIONS } from "../../util/translate-paragraphs";
 import { SUMMARY_IO_INSTRUCTIONS } from "../../util/summarize-session";
 import { PARAGRAPH_REGEN_IO_INSTRUCTIONS } from "../../util/paragraph-regen";
+import {
+  PHONE_SNS_IO_INSTRUCTIONS,
+  PHONE_TUBE_IO_INSTRUCTIONS,
+} from "../../util/phone-prompts";
 import { LorebookSelectModal } from "../lorebook-select-modal";
 import { createModalShell } from "../modal-shell";
 import { uuidv4 } from "../../util/uuid";
@@ -34,6 +38,8 @@ export function getBucketIoInstructions(bucket: PromptBucket): string | null {
   if (bucket === "translation") return TRANSLATION_IO_INSTRUCTIONS;
   if (bucket === "summary") return SUMMARY_IO_INSTRUCTIONS;
   if (bucket === "paragraphRegen") return PARAGRAPH_REGEN_IO_INSTRUCTIONS;
+  if (bucket === "phoneSns") return PHONE_SNS_IO_INSTRUCTIONS;
+  if (bucket === "phoneTube") return PHONE_TUBE_IO_INSTRUCTIONS;
   return null;
 }
 

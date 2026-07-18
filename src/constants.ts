@@ -19,6 +19,9 @@ export const VIEW_TYPE_DETAIL = "ggai-stella-detail";
 /** 삽화 출력 전용 뷰 (L9) — 우측 사이드바 자체 아이콘, 활성 세션 최신 삽화 표시. */
 export const VIEW_TYPE_ILLUSTRATION_OUTPUT = "ggai-stella-illustration";
 
+/** 스텔라 폰 뷰 (PH1) — 문자/SNS. PC 는 폰 프레임 안, 모바일은 풀 화면. */
+export const VIEW_TYPE_PHONE = "ggai-stella-phone";
+
 // 시나리오/로어북/페르소나 편집기는 대시보드 내부 라우트(EditorRoute)로 편입됨 —
 // 더 이상 별도 워크스페이스 뷰 타입이 아니다. (dashboard-view.ts EditorKind 참조)
 
@@ -33,6 +36,7 @@ export const SUBFOLDERS = [
   "PRESETS",
   "USERS",
   "GROUPS",
+  "PHONE",
 ] as const;
 
 export type SubFolder = (typeof SUBFOLDERS)[number];

@@ -1,6 +1,6 @@
 {
   "name": "ggai-stella-engine",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "NovelAI 스토리텔러 스타일의 소설 생성 옵시디언 플러그인 (GGAI Core 기반)",
   "main": "main.js",
   "scripts": {

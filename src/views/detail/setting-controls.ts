@@ -191,6 +191,28 @@ export function renderNumberRow(opts: {
 }
 
 /**
+ * 라벨 + 한 줄 텍스트 입력 (change 시점 커밋 — 타이핑 중 재렌더를 유발하지 않는다).
+ */
+export function renderTextRow(opts: {
+  parent: HTMLElement;
+  label: string;
+  value: string;
+  placeholder?: string;
+  onChange: (value: string) => void;
+}): HTMLInputElement {
+  const row = opts.parent.createDiv({ cls: "ggai-media-number-row" });
+  row.createSpan({ cls: "ggai-media-label", text: opts.label });
+  const input = row.createEl("input", {
+    cls: "ggai-media-text-input",
+    type: "text",
+    attr: opts.placeholder ? { placeholder: opts.placeholder } : {},
+  });
+  input.value = opts.value;
+  input.addEventListener("change", () => opts.onChange(input.value.trim()));
+  return input;
+}
+
+/**
  * 온오프 토글 — 박스 안에 라벨 + 체크박스. 박스 아무 곳이나 눌러도 토글.
  */
 export function renderEnableToggle(opts: {

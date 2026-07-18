@@ -19,6 +19,7 @@
 import type { PromptPresetParams } from "./prompt";
 import type {
   IllustrationActiveSettings,
+  LorebookPlusActiveSettings,
   SummaryActiveSettings,
   TranslationActiveSettings,
 } from "./preset";
@@ -163,6 +164,8 @@ export interface SessionMeta {
   illustration?: IllustrationActiveSettings;
   /** 요약 활성 설정 — 자동 요약(summaries.json 노드 앵커 누적)의 실행 조건. */
   summarize?: SummaryActiveSettings;
+  /** 로어북 확장 — 키워드/AI 매칭 스위치와 AI 선별 옵션. */
+  lorebookPlus?: LorebookPlusActiveSettings;
   /** 선채팅(P1) 세션 설정 — 챗 리모컨 종 버튼으로 토글. 빈도/상한은 플러그인 설정. */
   proactive?: ProactiveSessionSettings;
   /** NAI 형식으로 보내기 — 텍스트 컴플리션 전송 시 <|system|>/<|user|>/<|assistant|> 턴으로 감싼다. */

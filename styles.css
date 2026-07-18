@@ -958,6 +958,77 @@
   width: min(92vw, 860px);
 }
 
+/* 이미지 자르기 창 — 공용 모달 뼈대(L 규격) 위의 내부 레이아웃.
+   도구줄 = 비율 버튼 + 크기 표시. 본문 = 스테이지(이미지 + 크롭 영역). */
+.ggai-crop-ratio-btn.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+.ggai-crop-size {
+  margin-left: auto;
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.ggai-crop-stage {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--background-secondary);
+  border-radius: var(--radius-m, 6px);
+  /* 크롭 영역 바깥 그림자(9999px)가 창 밖으로 새지 않게 여기서 자른다. */
+  overflow: hidden;
+}
+.ggai-crop-canvas {
+  position: relative;
+  touch-action: none;
+  cursor: crosshair;
+  user-select: none;
+  line-height: 0;
+}
+.ggai-crop-canvas img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+}
+/* 바깥 어둡게 = 크롭 영역의 거대한 바깥 그림자. 별도 오버레이 요소가 필요 없다. */
+.ggai-crop-rect {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid #fff;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.5);
+  cursor: move;
+}
+.ggai-crop-handle {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  background: #fff;
+  border-radius: 3px;
+}
+.ggai-crop-handle.is-nw {
+  top: -7px;
+  left: -7px;
+  cursor: nwse-resize;
+}
+.ggai-crop-handle.is-ne {
+  top: -7px;
+  right: -7px;
+  cursor: nesw-resize;
+}
+.ggai-crop-handle.is-sw {
+  bottom: -7px;
+  left: -7px;
+  cursor: nesw-resize;
+}
+.ggai-crop-handle.is-se {
+  bottom: -7px;
+  right: -7px;
+  cursor: nwse-resize;
+}
+
 /* 문단 재생성 모달 — 공용 모달 뼈대(M 규격) 위에 얹는 내부 레이아웃.
    도구줄(.ggai-modal-toolbar-row) = 범위/프롬프트/직접입력 두 줄. 본문 = 편집
    textarea(유일한 스크롤 영역). 액션줄(footerAux/footerMain) = 단계 이력 / 취소·적용 —
@@ -1281,6 +1352,44 @@ input.ggai-vs-slider[type="range"] {
 /* PC 뷰어 줄 — 모바일 뷰 헤더 액션과 같은 위치(본문 위 우측 상단)에 같은
    모양(둥근 아이콘 가로 줄)으로 띄운다. 0높이 레이어라 본문을 밀지 않고,
    탭 타이틀 바를 꺼도 항상 보인다. */
+/* PC 명령 버튼 줄 — 모바일 툴바에 담긴 명령을 상단 좌측에 같은 모양으로.
+   뷰어 옵션 줄과 같은 0높이 플로팅 레이어(본문 안 밀림), 정렬만 좌측. */
+.ggai-session-command-bar {
+  position: relative;
+  z-index: 5;
+  height: 0;
+  overflow: visible;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  align-items: flex-start;
+  gap: var(--size-4-2, 0.5rem);
+  padding-left: 10px;
+  pointer-events: none;
+}
+.ggai-session-command-bar .clickable-icon {
+  pointer-events: auto;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  margin-top: 8px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--background-primary);
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.18);
+  opacity: 0.7;
+  transition: opacity 0.12s ease;
+}
+.ggai-session-command-bar:hover .clickable-icon,
+.ggai-session-command-bar .clickable-icon:hover,
+.ggai-session-command-bar .clickable-icon:focus-visible {
+  opacity: 1;
+}
+
 .ggai-session-viewer-options {
   position: relative;
   z-index: 5;
@@ -6782,14 +6891,13 @@ body.is-mobile .ggai-dash-page {
 .ggai-chat-para {
   margin: 0;
 }
-/* 문단 사이 spacer — 슬라이더 값(px)만큼만 추가로 벌린다. 0 = 줄바꿈과 같은 간격. */
-.ggai-chat-para + .ggai-chat-para {
-  margin-top: 0;
-}
-.ggai-chat-para + .ggai-chat-para::before {
-  content: "";
-  display: block;
-  height: var(--ggai-view-para-gap, 0px);
+/* 문단 사이 빈 줄 — 원문의 빈 줄 수(--ggai-sep-lines)만큼 그대로 보이고,
+   문단 간격 슬라이더 값(px)은 그 위에 추가로 얹는다. 0 = 원문 그대로. */
+.ggai-chat-para-sep {
+  height: calc(
+    var(--ggai-sep-lines, 1) * var(--line-height-normal, 1.5) * 1em +
+      var(--ggai-view-para-gap, 0px)
+  );
 }
 .ggai-chat-bubble em {
   font-style: italic;
@@ -7163,4 +7271,1502 @@ body.is-mobile .ggai-chat-inputbar {
   text-align: right;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
+}
+
+/* ── 정규식 치환 — 확장 탭 패널 + 편집 모달 ─────────────────────────── */
+
+.ggai-regex-section {
+  margin-bottom: 12px;
+}
+.ggai-regex-section-title {
+  font-size: 0.82em;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.ggai-regex-section-hint {
+  font-size: 0.72em;
+  color: var(--text-faint);
+  margin: -4px 0 6px;
+}
+.ggai-regex-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.ggai-regex-empty {
+  font-size: 0.82em;
+  color: var(--text-faint);
+  padding: 4px 2px;
+}
+.ggai-regex-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+}
+.ggai-regex-row-info {
+  flex: 1 1 0;
+  min-width: 0;
+  cursor: pointer;
+}
+.ggai-regex-row-name {
+  font-size: 0.88em;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ggai-regex-row-meta {
+  font-size: 0.76em;
+  color: var(--text-muted);
+}
+.ggai-regex-row-btn {
+  flex: 0 0 auto;
+  padding: 4px 6px;
+  height: auto;
+}
+.ggai-regex-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 편집 모달 */
+.ggai-regex-field {
+  margin-bottom: 12px;
+}
+.ggai-regex-label {
+  display: block;
+  font-size: 0.82em;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.ggai-regex-input,
+.ggai-regex-textarea {
+  width: 100%;
+}
+.ggai-regex-textarea {
+  resize: vertical;
+  min-height: 60px;
+}
+/* 정규식 입력칸 — input/textarea 가 서로 다른 기본 글꼴을 받아 백슬래시가
+   한쪽은 ₩, 한쪽은 \ 로 보이는 혼란 방지. 둘 다 같은 모노스페이스로 고정. */
+input.ggai-regex-mono,
+textarea.ggai-regex-mono {
+  font-family: var(--font-monospace);
+  font-size: 0.86em;
+}
+.ggai-regex-input.is-invalid {
+  border-color: var(--text-error);
+}
+.ggai-regex-error {
+  min-height: 0;
+  font-size: 0.78em;
+  color: var(--text-error);
+  margin-top: 4px;
+}
+.ggai-regex-error:empty {
+  display: none;
+}
+.ggai-regex-checks {
+  display: flex;
+  gap: 16px;
+}
+.ggai-regex-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.ggai-regex-allow {
+  margin-bottom: 8px;
+  font-size: 0.88em;
+}
+.ggai-regex-timing {
+  display: flex;
+  gap: 8px;
+}
+.ggai-regex-timing-btn {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  height: auto;
+  padding: 8px 10px;
+  text-align: left;
+  border: 1px solid var(--background-modifier-border);
+}
+.ggai-regex-timing-btn.is-active {
+  border-color: var(--interactive-accent);
+  box-shadow: inset 0 0 0 1px var(--interactive-accent);
+}
+.ggai-regex-timing-title {
+  font-weight: 600;
+}
+.ggai-regex-timing-hint {
+  font-size: 0.72em;
+  color: var(--text-muted);
+}
+.ggai-regex-test-output {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--background-secondary);
+  font-size: 0.86em;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ggai-regex-test-output:empty {
+  display: none;
+}
+
+/* ─────────────────────────── 스텔라 폰 (PH1) ─────────────────────────── */
+
+.ggai-phone-root {
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* 테마 격리 — 폰 내부의 버튼/입력창은 어떤 테마를 써도 폰답게 보이도록,
+   테마의 버튼 꾸밈(테두리·알약형·그림자·패딩)을 여기서 전부 무효화한다.
+   :where 로 특이도를 (0,2,0)에 맞춰, 이 파일 아래쪽의 .ggai-phone-screen 접두
+   개별 클래스가 문서 순서로 이긴다. */
+.ggai-phone-root .ggai-phone-screen :where(button) {
+  appearance: none;
+  -webkit-appearance: none;
+  background: none;
+  border: none;
+  outline: none;
+  box-shadow: none;
+  padding: 0;
+  margin: 0;
+  height: auto;
+  min-height: 0;
+  border-radius: 0;
+  font: inherit;
+  color: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+.ggai-phone-root .ggai-phone-screen :where(textarea) {
+  appearance: none;
+  -webkit-appearance: none;
+  box-shadow: none;
+  outline: none;
+  margin: 0;
+  font: inherit;
+}
+
+/* PC 오버레이 — 모달 껍데기를 투명하게 지우고 폰 프레임만 띄운다.
+   바깥(스크림) 클릭·Esc = 닫기 (Modal 기본 동작). */
+.modal.ggai-phone-modal {
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  width: auto;
+  max-width: none;
+}
+.ggai-phone-modal .modal-close-button {
+  display: none;
+}
+.ggai-phone-modal .ggai-phone-root {
+  width: min(400px, 92vw);
+  height: min(780px, 88vh);
+  overflow: visible;
+}
+.ggai-phone-modal .ggai-phone-frame-wrap {
+  padding: 0;
+}
+/* 모바일 오버레이 — 프레임 없이 버튼만 보이는 풀 화면 (창은 띄우되 프레임 감춤). */
+.ggai-phone-modal.is-mobile {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+}
+.ggai-phone-modal.is-mobile .ggai-phone-root {
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+}
+.ggai-phone-modal.is-mobile .ggai-phone-screen.is-bare {
+  border-radius: 0;
+}
+
+/* PC — 폰 프레임 (모바일은 .is-bare 로 프레임 없이 풀 화면). */
+.ggai-phone-frame-wrap {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.ggai-phone-frame {
+  width: min(400px, 100%);
+  height: min(780px, 100%);
+  border: 10px solid var(--background-modifier-border);
+  border-radius: 36px;
+  background: var(--background-primary);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+  display: flex;
+}
+.ggai-phone-screen {
+  flex: 1;
+  min-height: 0;
+  /* min-width 0 필수 — flex item 기본 min-width:auto 라서 넓은 콘텐츠(이미지
+     원본 폭, 줄바꿈 없는 미리보기)가 화면 폭을 밀어내던 문제. */
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--background-primary);
+}
+.ggai-phone-screen.is-bare {
+  height: 100%;
+  /* 넓은 뷰(태블릿/모바일 에뮬레이트/가로 화면)에서 폰 콘텐츠가 끝까지 늘어나
+     갤러리·문자 목록의 가로 크기가 깨지지 않도록 폰 폭으로 고정하고 가운데 정렬. */
+  width: 100%;
+  max-width: 460px;
+  margin: 0 auto;
+}
+.ggai-phone-body {
+  overflow-x: hidden;
+}
+/* 모바일 탭 뷰 — view-content 기본 패딩이 홈 바/하단을 화면 밖으로 밀어내지 않게. */
+.workspace-leaf-content[data-type="ggai-stella-phone"] .view-content {
+  padding: 0;
+  overflow: hidden;
+}
+
+/* 헤더 */
+.ggai-phone-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  flex: 0 0 auto;
+}
+.ggai-phone-title {
+  flex: 1;
+  font-weight: 700;
+  font-size: 1.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-phone-screen .ggai-phone-icon-btn {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 4px;
+  cursor: pointer;
+  color: var(--text-normal);
+  display: flex;
+  align-items: center;
+}
+/* 번역 보기 토글 (PH5) — 켜짐/번역 중 상태. */
+.ggai-phone-screen .ggai-phone-icon-btn.is-active {
+  color: var(--interactive-accent);
+}
+.ggai-phone-screen .ggai-phone-icon-btn.is-busy {
+  opacity: 0.5;
+  pointer-events: none;
+}
+.ggai-phone-screen .ggai-phone-sns-reply-btn.is-active {
+  color: var(--interactive-accent);
+}
+
+/* 연락처 등록 버튼 (1회 필터 진입점) */
+.ggai-phone-screen .ggai-phone-register-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 9px 12px;
+  margin-bottom: 6px;
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: 12px;
+  background: none;
+  box-shadow: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 0.9em;
+}
+.ggai-phone-screen .ggai-phone-register-btn:hover {
+  color: var(--text-normal);
+  border-color: var(--interactive-accent);
+}
+
+/* 문자 컴포저 — 첨부 버튼 + 입력 + 전송 한 줄, 첨부 미리보기 위 줄 */
+.ggai-phone-composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  width: 100%;
+}
+.ggai-phone-msg-attach {
+  position: relative;
+  width: 64px;
+  margin-bottom: 6px;
+}
+.ggai-phone-msg-attach.is-hidden {
+  display: none;
+}
+.ggai-phone-msg-attach img {
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 10px;
+  display: block;
+}
+/* 말풍선 속 사진 */
+.ggai-chat-bubble .ggai-phone-msg-photo {
+  display: block;
+  max-width: 200px;
+  max-height: 240px;
+  border-radius: 10px;
+  cursor: zoom-in;
+  margin-bottom: 4px;
+}
+
+/* SNS 사진/모아보기 */
+.ggai-phone-sns-photo {
+  cursor: zoom-in;
+}
+.ggai-phone-sns-name.is-clickable {
+  cursor: pointer;
+}
+.ggai-phone-sns-avatar {
+  cursor: pointer;
+}
+.ggai-phone-sns-more {
+  flex: 0 0 auto;
+}
+.ggai-phone-sns-filterbar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 11px;
+  margin-bottom: 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  background: var(--background-secondary);
+  font-size: 0.9em;
+}
+.ggai-phone-sns-filterbar-label {
+  flex: 1;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 카메라 — 프롬프트 직접 입력 체크 */
+.ggai-phone-camera-direct {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.84em;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+/* 이미지 확대 뷰어 */
+.ggai-phone-lightbox-modal {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  width: auto;
+  max-width: 92vw;
+}
+.ggai-phone-lightbox {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.ggai-phone-lightbox img {
+  max-width: 88vw;
+  max-height: 80vh;
+  object-fit: contain;
+  border-radius: 10px;
+  cursor: zoom-out;
+}
+.ggai-phone-lightbox-caption {
+  max-width: 88vw;
+  text-align: center;
+  font-size: 0.88em;
+  color: var(--text-muted);
+}
+.ggai-phone-screen .ggai-phone-persona {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  box-shadow: none;
+  cursor: pointer;
+  font-size: 0.82em;
+  color: var(--text-muted);
+  max-width: 45%;
+}
+.ggai-phone-persona-icon {
+  display: flex;
+  align-items: center;
+}
+.ggai-phone-persona-icon svg {
+  width: 13px;
+  height: 13px;
+}
+.ggai-phone-persona-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 본문 (목록/스레드 공용 스크롤러) */
+.ggai-phone-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 0;
+}
+.ggai-phone-body.is-thread {
+  padding: 12px 12px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ggai-phone-empty {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text-muted);
+}
+.ggai-phone-empty-sub {
+  margin-top: 6px;
+  font-size: 0.85em;
+}
+
+/* 연락처 목록 */
+.ggai-phone-contact {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  cursor: pointer;
+}
+.ggai-phone-contact:hover {
+  background: var(--background-secondary);
+}
+.ggai-phone-contact-thumb {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  overflow: hidden;
+  flex: 0 0 auto;
+  background: var(--background-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ggai-phone-contact-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.ggai-phone-contact-main {
+  flex: 1;
+  min-width: 0;
+}
+.ggai-phone-contact-name {
+  font-weight: 600;
+}
+.ggai-phone-contact-preview {
+  font-size: 0.82em;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-phone-contact-time {
+  font-size: 0.72em;
+  color: var(--text-faint);
+  flex: 0 0 auto;
+  align-self: flex-start;
+  margin-top: 3px;
+}
+.ggai-phone-screen .ggai-phone-contact-more {
+  flex: 0 0 auto;
+  align-self: center;
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+.ggai-phone-contact:hover .ggai-phone-contact-more {
+  opacity: 1;
+}
+
+/* 말풍선 — 스킨은 챗 세션 공용 클래스(.ggai-chat-*)를 그대로 쓰고,
+   폰 안에서는 아바타/글자만 살짝 축소한다. */
+.ggai-phone-body.is-thread {
+  --ggai-chat-avatar-size: 38px;
+}
+.ggai-phone-body.is-thread .ggai-chat-msg {
+  margin: 0;
+}
+.ggai-phone-body.is-thread .ggai-chat-bubble {
+  font-size: 0.92em;
+}
+.ggai-phone-msg-time {
+  font-size: 0.68em;
+  color: var(--text-faint);
+  margin-top: 2px;
+  padding: 0 4px;
+}
+.ggai-chat-msg.is-user .ggai-phone-msg-time {
+  text-align: right;
+}
+
+/* 날짜 구분 칩 — 대화 중 날짜가 바뀔 때 가운데 표시. */
+.ggai-phone-day-sep {
+  align-self: center;
+  font-size: 0.7em;
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  border-radius: 999px;
+  padding: 3px 11px;
+  margin: 4px 0 2px;
+}
+
+/* 입력 중… 점 세 개 */
+.ggai-phone-typing {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  min-height: 20px;
+}
+.ggai-phone-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  animation: ggai-phone-dot 1.2s infinite ease-in-out;
+}
+.ggai-phone-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.ggai-phone-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+@keyframes ggai-phone-dot {
+  0%, 60%, 100% { opacity: 0.35; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ggai-phone-dot { animation: none; }
+}
+
+/* 컴포저 */
+.ggai-phone-composer {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  padding: 8px 10px;
+  border-top: 1px solid var(--background-modifier-border);
+  flex: 0 0 auto;
+}
+body.is-mobile .ggai-phone-composer {
+  padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+}
+.ggai-phone-composer.is-hidden {
+  display: none;
+}
+.ggai-phone-screen .ggai-phone-input {
+  flex: 1;
+  resize: none;
+  min-height: 34px;
+  max-height: 96px;
+  border-radius: 17px;
+  padding: 7px 13px;
+  font-size: 0.92em;
+  line-height: 1.4;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+}
+.ggai-phone-screen .ggai-phone-send {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: none;
+  box-shadow: none;
+  cursor: pointer;
+  padding: 0;
+}
+.ggai-phone-send svg {
+  width: 16px;
+  height: 16px;
+}
+.ggai-phone-screen .ggai-phone-send:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* 설정 킷 — 한 줄 텍스트 입력 (renderTextRow) */
+.ggai-media-text-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  padding: 7px 10px;
+  box-shadow: none !important;
+}
+
+/* 스텔라 폰 — 상태 바 / 홈 화면 / 홈 바 (홈 화면 모델) */
+.ggai-phone-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px 4px;
+  flex: 0 0 auto;
+}
+.ggai-phone-status-clock {
+  font-size: 0.8em;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.ggai-phone-header.is-hidden {
+  display: none;
+}
+/* 홈 월페이퍼 — 상태바·홈 바까지 화면 전체를 덮는다. */
+.ggai-phone-screen.is-home {
+  background:
+    radial-gradient(120% 90% at 20% 0%, rgba(120, 90, 255, 0.32), transparent 60%),
+    radial-gradient(120% 90% at 90% 100%, rgba(64, 156, 255, 0.28), transparent 60%),
+    radial-gradient(80% 60% at 60% 45%, rgba(255, 140, 200, 0.12), transparent 70%),
+    linear-gradient(180deg, var(--background-primary), var(--background-secondary));
+}
+.ggai-phone-body.is-home {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 28px 20px 20px;
+}
+.ggai-phone-home-clock {
+  text-align: center;
+  margin: 14px 0 30px;
+}
+.ggai-phone-home-time {
+  font-size: 3.2em;
+  font-weight: 200;
+  letter-spacing: 0.02em;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.ggai-phone-home-date {
+  margin-top: 4px;
+  font-size: 0.86em;
+  color: var(--text-muted);
+}
+.ggai-phone-home-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px 10px;
+  width: 100%;
+  max-width: 340px;
+}
+.ggai-phone-app {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  box-shadow: none;
+  cursor: pointer;
+  padding: 0;
+}
+.ggai-phone-app-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.35),
+    0 4px 12px rgba(0, 0, 0, 0.22);
+}
+.ggai-phone-app-icon svg {
+  width: 26px;
+  height: 26px;
+}
+.ggai-phone-app-icon.is-messages {
+  background: linear-gradient(160deg, #34c759, #1fa64a);
+}
+.ggai-phone-app-icon.is-sns {
+  background: linear-gradient(160deg, #8a5cff, #5a8bff);
+}
+.ggai-phone-app-label {
+  font-size: 0.7em;
+  color: var(--text-normal);
+  max-width: 70px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 하단 내비게이션 바 — 뒤로 + 홈 가상 버튼 (안드로이드식, 항상 보임). */
+/* 하단 내비 — 3분할: 새로고침(좌)·홈(중)·뒤로(우). 진짜 폰 제스처 바 느낌. */
+.ggai-phone-homebar {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: space-around;
+  align-items: center;
+  padding: 6px 12px 8px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+body.is-mobile .ggai-phone-homebar {
+  padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+}
+.ggai-phone-homebar.is-hidden {
+  visibility: hidden;
+}
+.ggai-phone-screen .ggai-phone-nav-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 40px;
+  border-radius: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.ggai-phone-screen .ggai-phone-nav-btn:hover {
+  background: var(--background-secondary);
+  color: var(--text-normal);
+}
+.ggai-phone-screen .ggai-phone-nav-btn:active {
+  transform: scale(0.92);
+}
+.ggai-phone-screen .ggai-phone-nav-btn svg {
+  width: 24px;
+  height: 24px;
+}
+.ggai-phone-screen .ggai-phone-nav-btn.is-home svg {
+  width: 18px;
+  height: 18px;
+}
+.ggai-phone-screen .ggai-phone-nav-btn.is-refresh svg {
+  width: 20px;
+  height: 20px;
+}
+/* 새로고침 진행 중 — 아이콘 회전. */
+.ggai-phone-screen .ggai-phone-nav-btn.is-refresh.is-busy {
+  color: var(--interactive-accent);
+  pointer-events: none;
+}
+.ggai-phone-screen .ggai-phone-nav-btn.is-refresh.is-busy svg {
+  animation: ggai-phone-spin 0.8s linear infinite;
+}
+@keyframes ggai-phone-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ggai-phone-screen .ggai-phone-nav-btn.is-refresh.is-busy svg { animation: none; }
+}
+
+/* 스텔라 폰 — SNS 피드 (PH3) */
+.ggai-phone-body.is-sns {
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ggai-phone-sns-compose,
+.ggai-phone-sns-reply-compose {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.ggai-phone-sns-reply-compose {
+  margin-top: 8px;
+}
+.ggai-phone-screen .ggai-phone-sns-post-btn,
+.ggai-phone-screen .ggai-phone-sns-reply-btn {
+  flex: 0 0 auto;
+  border: none;
+  box-shadow: none;
+  cursor: pointer;
+  border-radius: 14px;
+  padding: 6px 14px;
+  font-size: 0.82em;
+}
+.ggai-phone-screen .ggai-phone-sns-post-btn {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+.ggai-phone-screen .ggai-phone-sns-reply-btn {
+  background: none;
+  color: var(--text-muted);
+  padding: 2px 6px;
+}
+.ggai-phone-screen .ggai-phone-sns-reply-btn:hover {
+  color: var(--text-normal);
+}
+.ggai-phone-sns-post {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 14px;
+  padding: 10px 12px;
+  background: var(--background-primary);
+}
+.ggai-phone-sns-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+.ggai-phone-sns-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.8em;
+  font-weight: 700;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+.ggai-phone-sns-avatar.is-persona {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+.ggai-phone-sns-name {
+  font-weight: 600;
+  font-size: 0.88em;
+}
+.ggai-phone-sns-time {
+  margin-left: auto;
+  font-size: 0.7em;
+  color: var(--text-faint);
+}
+.ggai-phone-sns-text {
+  font-size: 0.92em;
+  line-height: 1.45;
+  word-break: break-word;
+}
+.ggai-phone-sns-text .ggai-chat-para {
+  margin: 0;
+}
+.ggai-phone-sns-replies {
+  margin-top: 8px;
+  padding-left: 10px;
+  border-left: 2px solid var(--background-modifier-border);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.ggai-phone-sns-reply-text .ggai-chat-para {
+  display: inline;
+  margin: 0;
+}
+.ggai-phone-sns-actions {
+  margin-top: 6px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* 스텔라 네트워크 — 댓글 (헤더 줄 + 전체 폭 본문 2줄 구조, 대댓글은 얕은 들여쓰기) */
+.ggai-phone-sns-reply {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.86em;
+}
+.ggai-phone-sns-reply.is-nested {
+  margin-left: 16px;
+}
+.ggai-phone-sns-reply-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.ggai-phone-sns-reply-head .ggai-phone-sns-avatar {
+  width: 20px;
+  height: 20px;
+  font-size: 0.66em;
+}
+.ggai-phone-sns-reply-head .ggai-phone-sns-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-phone-sns-reply-head .ggai-phone-sns-reply-likes {
+  margin-left: auto;
+}
+.ggai-phone-sns-reply .ggai-phone-sns-reply-text {
+  min-width: 0;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.ggai-phone-sns-reply .ggai-phone-sns-reply-btn {
+  align-self: flex-start;
+  font-size: 0.75em;
+  padding: 0;
+  opacity: 0.7;
+}
+.ggai-phone-sns-reply:hover .ggai-phone-sns-reply-btn {
+  opacity: 1;
+}
+
+/* 스텔라 네트워크 — 스트리밍 방송 (PH4) */
+.ggai-phone-sns-live {
+  font-size: 0.62em;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  padding: 2px 7px;
+  border-radius: 8px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+}
+.ggai-phone-sns-live.is-live {
+  background: #e5383b;
+  color: #fff;
+  animation: ggai-phone-live-pulse 1.6s infinite ease-in-out;
+}
+/* 붐업 배지 (v2) — 다시 화제가 되어 재부상한 글. */
+.ggai-phone-screen .ggai-phone-sns-bumped {
+  font-size: 0.68em;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 8px;
+  background: var(--background-secondary);
+  color: var(--text-accent);
+  white-space: nowrap;
+}
+/* 이슈 등급 배지 (v2) — 등급 3+ 게시글. */
+.ggai-phone-screen .ggai-phone-sns-issue {
+  font-size: 0.68em;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 8px;
+  background: color-mix(in srgb, #e5383b 14%, transparent);
+  color: #e5383b;
+  white-space: nowrap;
+}
+/* [더 보기] — 접힌 댓글 공개 + 반응 추가 생성 (v2). */
+.ggai-phone-screen .ggai-phone-sns-more-replies {
+  align-self: flex-start;
+  margin: 2px 14px 10px;
+  color: var(--text-muted);
+}
+@keyframes ggai-phone-live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ggai-phone-sns-live.is-live { animation: none; }
+}
+.ggai-phone-sns-text.is-stream-screen {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  padding: 9px 11px;
+  background: var(--background-secondary);
+  font-size: 0.86em;
+  color: var(--text-muted);
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+/* 스텔라 폰 — 카메라 앱 (PH5) */
+.ggai-phone-app-icon.is-camera {
+  background: linear-gradient(160deg, #4b5563, #1f2937);
+}
+.ggai-phone-body.is-camera {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ggai-phone-camera-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.ggai-phone-camera-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ggai-phone-camera-caption {
+  font-size: 0.8em;
+  color: var(--text-muted);
+}
+.ggai-phone-sns-photo {
+  display: block;
+  width: 100%;
+  border-radius: 12px;
+  margin-top: 8px;
+  max-height: 320px;
+  object-fit: cover;
+}
+.ggai-phone-sns-photo-caption {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 8px;
+  padding: 9px 11px;
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: 10px;
+  font-size: 0.84em;
+  color: var(--text-muted);
+}
+.ggai-phone-sns-photo-icon {
+  display: flex;
+}
+.ggai-phone-sns-photo-icon svg {
+  width: 15px;
+  height: 15px;
+}
+/* 스텔라 네트워크 — 인스타풍 재디자인 */
+.ggai-phone-sns-compose {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 14px;
+  padding: 10px 12px;
+}
+.ggai-phone-sns-compose-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.ggai-phone-sns-compose-row .ggai-phone-sns-avatar {
+  margin-top: 2px;
+}
+.ggai-phone-sns-compose-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+.ggai-phone-sns-reply-btn.is-attach {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  opacity: 1;
+  font-size: 0.82em;
+}
+.ggai-phone-sns-attach {
+  position: relative;
+  align-self: flex-start;
+}
+.ggai-phone-sns-attach img {
+  max-height: 110px;
+  border-radius: 10px;
+  display: block;
+}
+.ggai-phone-screen .ggai-phone-sns-attach-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: none;
+  background: var(--background-modifier-error, #e5383b);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+}
+.ggai-phone-sns-attach-remove svg {
+  width: 11px;
+  height: 11px;
+}
+.ggai-phone-sns-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+  display: block;
+}
+.ggai-phone-sns-avatar {
+  width: 30px;
+  height: 30px;
+  overflow: hidden;
+}
+.ggai-phone-sns-avatar.is-extra {
+  background: linear-gradient(160deg, #64748b, #334155);
+  color: #fff;
+}
+.ggai-phone-sns-namewrap {
+  min-width: 0;
+  line-height: 1.2;
+}
+.ggai-phone-sns-world {
+  font-size: 0.7em;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-phone-sns-photo {
+  margin-top: 4px;
+}
+.ggai-phone-sns-actions {
+  justify-content: flex-start;
+  align-items: center;
+  gap: 12px;
+  margin-top: 7px;
+}
+.ggai-phone-screen .ggai-phone-sns-like,
+.ggai-phone-screen .ggai-phone-sns-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 0.84em;
+}
+.ggai-phone-sns-count {
+  cursor: default;
+}
+.ggai-phone-sns-like-icon {
+  display: flex;
+}
+.ggai-phone-sns-like-icon svg {
+  width: 17px;
+  height: 17px;
+}
+.ggai-phone-sns-like.is-liked {
+  color: #e5383b;
+}
+.ggai-phone-sns-like.is-liked .ggai-phone-sns-like-icon svg {
+  fill: #e5383b;
+}
+.ggai-phone-sns-actions .ggai-phone-sns-reply-btn {
+  margin-left: auto;
+}
+.ggai-phone-sns-name.is-inline {
+  display: inline;
+  margin-right: 2px;
+}
+.ggai-phone-sns-text {
+  margin-top: 6px;
+}
+.ggai-phone-sns-text .ggai-chat-para {
+  display: inline;
+}
+.ggai-phone-sns-reply-likes {
+  font-size: 0.72em;
+  color: var(--text-faint);
+  flex: 0 0 auto;
+}
+.ggai-phone-sns-reply-world {
+  font-size: 0.7em;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 auto;
+}
+
+/* 이미지 피커 모달 */
+.ggai-phone-picker-grid {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  max-height: 55vh;
+  overflow-y: auto;
+}
+/* 연락처 관리 모달 (v2 §3.1) — 체크 = 등록. */
+.ggai-phone-contact-modal-sub {
+  font-size: 0.82em;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+.ggai-phone-contact-modal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.ggai-phone-contact-modal-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.ggai-phone-contact-modal-row:hover {
+  background: var(--background-modifier-hover);
+}
+.ggai-phone-contact-modal-thumb {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.ggai-phone-contact-modal-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.ggai-phone-contact-modal-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ggai-phone-contact-modal-empty {
+  color: var(--text-muted);
+  padding: 12px 0;
+}
+
+.ggai-phone-picker-cell {
+  cursor: pointer;
+}
+.ggai-phone-picker-cell img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 8px;
+  display: block;
+}
+.ggai-phone-picker-cell:hover img {
+  outline: 2px solid var(--interactive-accent);
+}
+.ggai-phone-picker-label {
+  font-size: 0.68em;
+  color: var(--text-muted);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 스텔라 네트워크 — 핸들 / 인증 배지 */
+.ggai-phone-sns-nameline {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.ggai-phone-sns-verified {
+  display: inline-flex;
+  color: #3897f0;
+}
+.ggai-phone-sns-verified svg {
+  width: 14px;
+  height: 14px;
+  fill: #3897f0;
+  stroke: #fff;
+}
+.ggai-phone-sns-verified.is-small svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* ─────────────────────────── 스텔라튜브 (v2 §7) ─────────────────────────── */
+.ggai-phone-app-icon.is-tube {
+  background: linear-gradient(160deg, #ff4e45, #c81d25);
+}
+/* 홈 아이콘 LIVE 점 배지 */
+.ggai-phone-app-icon {
+  position: relative;
+}
+.ggai-phone-app-badge-live {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #e5383b;
+  border: 2px solid var(--background-primary);
+  animation: ggai-phone-live-pulse 1.6s infinite ease-in-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ggai-phone-app-badge-live { animation: none; }
+}
+.ggai-phone-body.is-tube {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+.ggai-phone-tube {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+/* 방송 화면 — 장면 텍스트 + 오버레이 (유튜브 라이브 느낌의 어두운 화면) */
+.ggai-phone-tube-screen {
+  position: relative;
+  flex: 0 0 auto;
+  background: #101014;
+  color: #e8e8ec;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+/* 방송 화면 = 삽화 이미지 또는 이니셜 플레이스홀더 (장면 텍스트 없음). */
+.ggai-phone-tube-stage {
+  height: 190px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.ggai-phone-tube-stage-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.ggai-phone-tube-stage.is-placeholder {
+  background:
+    radial-gradient(circle at 50% 40%, #2a2a33, #101014 70%);
+}
+.ggai-phone-tube-stage-initial {
+  width: 74px;
+  height: 74px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2em;
+  font-weight: 800;
+  color: #fff;
+  background: linear-gradient(160deg, #ff4e45, #c81d25);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+.ggai-phone-tube-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.65));
+  font-size: 0.85em;
+}
+.ggai-phone-tube-streamer {
+  font-weight: 700;
+  color: #fff;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.ggai-phone-tube-viewers {
+  margin-left: auto;
+  color: #ffd166;
+  font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+/* 실시간 채팅 컬럼 */
+.ggai-phone-tube-chat {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.ggai-phone-tube-line {
+  font-size: 0.82em;
+  line-height: 1.45;
+  word-break: break-word;
+}
+/* 실시간 채팅처럼 한 줄씩 아래에서 흘러들어오는 등장 애니메이션. */
+.ggai-phone-tube-line.is-enter {
+  animation: ggai-phone-tube-line-in 0.28s ease-out both;
+}
+@keyframes ggai-phone-tube-line-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ggai-phone-tube-line.is-enter { animation: none; }
+}
+.ggai-phone-tube-line-name {
+  font-weight: 700;
+  color: var(--text-muted);
+  margin-right: 2px;
+}
+.ggai-phone-tube-line-text {
+  color: var(--text-normal);
+}
+/* 도네이션 채팅 — 하이라이트 카드 */
+.ggai-phone-tube-line.is-donation {
+  background: linear-gradient(160deg, rgba(255, 209, 102, 0.22), rgba(255, 155, 66, 0.16));
+  border: 1px solid rgba(255, 178, 66, 0.45);
+  border-radius: 10px;
+  padding: 6px 9px;
+}
+.ggai-phone-tube-donation {
+  font-weight: 800;
+  font-size: 0.9em;
+  color: #c96f00;
+  margin-bottom: 2px;
+}
+.ggai-phone-tube-chat-empty {
+  color: var(--text-muted);
+  font-size: 0.82em;
+  text-align: center;
+  padding: 18px 0;
+}
+/* 다시보기 목록 행 아이콘 */
+.ggai-phone-contact-thumb.is-tube-replay {
+  color: var(--text-muted);
+  border-radius: 12px;
+}
+.ggai-phone-contact-thumb.is-tube-replay svg {
+  width: 20px;
+  height: 20px;
 }

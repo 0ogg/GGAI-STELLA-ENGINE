@@ -24,6 +24,15 @@ export interface MediaPromptLibrary {
   illustrationPromptGen?: MediaPromptItem[];
   paragraphRegen?: MediaPromptItem[];
   summary?: MediaPromptItem[];
+  lorebookSelect?: MediaPromptItem[];
+  /** 스텔라 폰 — 문자 답장/선발신 (시나리오 캐릭터). */
+  phoneText?: MediaPromptItem[];
+  /** 스텔라 폰 — 모르는 번호(엑스트라) 문자. */
+  phoneExtra?: MediaPromptItem[];
+  /** 스텔라 폰 — SNS 피드 생성. */
+  phoneSns?: MediaPromptItem[];
+  /** 스텔라 폰 — 스텔라튜브 시청자 채팅 (v2). */
+  phoneTube?: MediaPromptItem[];
 }
 
 /**
@@ -95,6 +104,26 @@ export interface IllustrationActiveSettings {
   autoMinParagraphs?: number;
 }
 
+/**
+ * 로어북 확장 활성 설정 — 로어북 활성화 방식 제어.
+ * 키워드/AI 매칭은 각각 독립 체크 — 둘 다 켜면 합집합(중복 없이), 둘 다 끄면
+ * 상시(constant) 엔트리만 들어간다.
+ */
+export interface LorebookPlusActiveSettings {
+  /** 키워드 매칭 사용. 생략 시 true (기존 동작). */
+  keywordMatching?: boolean;
+  /** AI 매칭 사용 — 생성 전 선별 모델이 필요한 엔트리를 고른다. 생략 시 false. */
+  aiMatching?: boolean;
+  /** AI 매칭 전용 모델 프로필. 없으면 기본 프로필. */
+  modelProfileId?: string;
+  /** 선별 프롬프트 id (mediaPrompts.lorebookSelect). 없으면 기본 프롬프트. */
+  promptId?: string;
+  /** 선별 모델에 첨부할 최근 본문 길이(자). 생략 시 4000. */
+  contextChars?: number;
+  /** true 면 같은 지점 재생성은 직전 선별 결과를 재사용 (새 AI 호출 없음). */
+  reuseOnRegen?: boolean;
+}
+
 export interface StellaPreset {
   /** UUID v4 — 라운드트립 고유 식별자. */
   id: string;
@@ -120,6 +149,8 @@ export interface ActiveSettings {
   translation?: TranslationActiveSettings;
   illustration?: IllustrationActiveSettings;
   summarize?: SummaryActiveSettings;
+  /** 로어북 확장 — 키워드/AI 매칭 스위치와 AI 선별 옵션. */
+  lorebookPlus?: LorebookPlusActiveSettings;
   /** NAI 형식으로 보내기 — 텍스트 컴플리션 전송 시 역할 토큰으로 감싼다. */
   naiFormat?: boolean;
   /** 이어쓰기 이음새 보정 (챗 모델) — 마지막 문장 반복을 유도한 뒤 응답에서 제거. */

@@ -27,7 +27,12 @@ import {
   toggleIllustrationFavorite,
 } from "../util/illustrations";
 import { getDeepestLatestDescendant } from "../util/session-tree";
-import { IllustrationGalleryModal, type GalleryItem } from "./gallery-modal";
+import {
+  IllustrationGalleryModal,
+  illustrationCaption,
+  shareGalleryImageToNetwork,
+  type GalleryItem,
+} from "./gallery-modal";
 import { openImageLightbox } from "./image-lightbox";
 import {
   collectScenarioTags,
@@ -119,10 +124,17 @@ interface GalleryEntry {
   variantId: string;
   createdAt: number;
   favorite: boolean;
+  /** vault 전체 경로 — 스텔라 네트워크 게시용. */
+  path: string;
+  /** 게시 시 이미지 캡션 (삽화 프롬프트 첫 줄 / 폰 갤러리 캡션). */
+  caption: string;
 }
 
 /** 갤러리 분류 칩 필터 — "" 전체 / "__fav__" 즐겨찾기 / 그 외 시나리오 folder. */
 const GALLERY_FAVORITE_FILTER = "__fav__";
+
+/** 스텔라 폰 갤러리 항목의 가상 분류 폴더 (PH5 — 세션 귀속 없음). */
+const PHONE_GALLERY_FOLDER = "__phone__";
 
 /**
  * DashboardView — Stella 패널의 로비 (대문).
@@ -280,6 +292,20 @@ export class DashboardView extends ItemView {
     );
     this.registerEvent(
       this.store.on("session-illustrations-changed", debouncedRecent)
+    );
+    // 스텔라 폰 갤러리 변경 (PH5) — 갤러리 집계 무효화 + 보고 있으면 다시 그림.
+    this.registerEvent(
+      this.store.on("phone-gallery-changed", () => {
+        this.galleryEntries = null;
+        if (
+          this.activeTab === "gallery" &&
+          !this.detailFolder &&
+          !this.branchSessionFile &&
+          !this.editorRoute
+        ) {
+          this.renderGalleryTab();
+        }
+      })
     );
     // 안 읽음 뱃지 갱신 (홈 히어로 카드 / 세션 탭 / 시나리오 상세 세션 줄).
     this.registerEvent(this.store.on("session-unread-changed", debouncedRecent));
@@ -1622,6 +1648,12 @@ export class DashboardView extends ItemView {
         void this.store.saveSessionIllustrations(session.sessionFile, illus);
         return next;
       },
+      ...(this.plugin.phone.isPhoneInUse()
+        ? {
+            onShareToNetwork: (item: GalleryItem) =>
+              shareGalleryImageToNetwork(this.plugin, item.path!, item.caption),
+          }
+        : {}),
     }).open();
   }
 
@@ -1643,6 +1675,8 @@ export class DashboardView extends ItemView {
           variantId: v.id,
           favorite: v.favorite,
           createdAt: v.createdAt,
+          path,
+          caption: illustrationCaption(v.prompt),
         });
       }
     }
@@ -1791,16 +1825,24 @@ export class DashboardView extends ItemView {
     });
 
     const grid = body.createDiv({ cls: "ggai-dash-gallery-grid" });
+    const usePhone = this.plugin.phone.isPhoneInUse();
     visible.forEach((entry, i) => {
       const cell = grid.createDiv({ cls: "ggai-dash-gallery-cell" });
       const img = cell.createEl("img", { cls: "ggai-dash-gallery-img" });
       img.src = entry.src;
       img.loading = "lazy";
-      img.addEventListener("click", () =>
+      img.addEventListener("click", (e) => {
+        if (this.pressMenu.consumeSuppressedClick(e)) return;
         openImageLightbox(
-          visible.map((e) => ({ src: e.src })),
+          visible.map((en) => ({ src: en.src })),
           i
-        )
+        );
+      });
+      const menu = () => this.buildGalleryEntryMenu(entry, usePhone);
+      this.pressMenu.attachContextMenu(
+        cell,
+        (e) => menu().showAtMouseEvent(e),
+        (x, y) => menu().showAtPosition({ x, y })
       );
 
       const fav = cell.createEl("button", { cls: "ggai-dash-gallery-fav" });
@@ -1813,15 +1855,18 @@ export class DashboardView extends ItemView {
       });
 
       const actions = cell.createDiv({ cls: "ggai-dash-gallery-cell-actions" });
-      const jump = actions.createEl("button", {
-        cls: "ggai-dash-gallery-cell-btn",
-      });
-      setIcon(jump, "locate-fixed");
-      jump.setAttr("aria-label", "이 분기로 이동");
-      jump.addEventListener("click", (e) => {
-        e.stopPropagation();
-        void this.jumpToIllustrationBranch(entry.sessionFile, entry.nodeId);
-      });
+      // 분기 이동은 세션 귀속 삽화만 (폰 사진은 원문 노드가 없다).
+      if (entry.sessionFile) {
+        const jump = actions.createEl("button", {
+          cls: "ggai-dash-gallery-cell-btn",
+        });
+        setIcon(jump, "locate-fixed");
+        jump.setAttr("aria-label", "이 분기로 이동");
+        jump.addEventListener("click", (e) => {
+          e.stopPropagation();
+          void this.jumpToIllustrationBranch(entry.sessionFile, entry.nodeId);
+        });
+      }
       const del = actions.createEl("button", {
         cls: "ggai-dash-gallery-cell-btn is-danger",
       });
@@ -1860,9 +1905,29 @@ export class DashboardView extends ItemView {
             variantId: v.id,
             createdAt: v.createdAt,
             favorite: !!v.favorite,
+            path,
+            caption: illustrationCaption(v.prompt),
           });
         }
       }
+    }
+    // 스텔라 폰 갤러리 (PH5) — 카메라/업로드/SNS 사진을 "스텔라 폰" 분류로 합류.
+    // 세션 귀속이 없으므로 sessionFile="" (즐겨찾기/분기 이동 버튼 미표시).
+    const phoneGallery = await this.store.getPhoneGallery().catch(() => null);
+    for (const item of phoneGallery?.items ?? []) {
+      if (!this.app.vault.getAbstractFileByPath(item.file)) continue;
+      entries.push({
+        src: this.app.vault.adapter.getResourcePath(item.file),
+        sessionFile: "",
+        scenarioName: "스텔라 폰",
+        scenarioFolder: PHONE_GALLERY_FOLDER,
+        nodeId: "",
+        variantId: item.id,
+        createdAt: item.createdAt,
+        favorite: !!item.favorite,
+        path: item.file,
+        caption: item.caption,
+      });
     }
     entries.sort((a, b) => b.createdAt - a.createdAt);
     this.galleryEntries = entries;
@@ -1873,7 +1938,51 @@ export class DashboardView extends ItemView {
     }
   }
 
+  /** 갤러리 셀 우클릭/롱프레스 메뉴 — 폰 사진은 분기 이동만 빠진다. */
+  private buildGalleryEntryMenu(entry: GalleryEntry, usePhone: boolean): Menu {
+    const menu = new Menu().addItem((mi) =>
+      mi
+        .setTitle(entry.favorite ? "즐겨찾기 해제" : "즐겨찾기")
+        .setIcon("star")
+        .onClick(() => void this.toggleGalleryEntryFavorite(entry))
+    );
+    if (entry.sessionFile) {
+      menu.addItem((mi) =>
+        mi
+          .setTitle("이 분기로 이동")
+          .setIcon("locate-fixed")
+          .onClick(() =>
+            void this.jumpToIllustrationBranch(entry.sessionFile, entry.nodeId)
+          )
+      );
+    }
+    if (usePhone) {
+      menu.addItem((mi) =>
+        mi
+          .setTitle("스텔라 네트워크에 공유")
+          .setIcon("share-2")
+          .onClick(() =>
+            shareGalleryImageToNetwork(this.plugin, entry.path, entry.caption)
+          )
+      );
+    }
+    return menu.addSeparator().addItem((mi) =>
+      mi
+        .setTitle("삭제")
+        .setIcon("trash-2")
+        .onClick(() => void this.deleteGalleryEntry(entry))
+    );
+  }
+
   private async toggleGalleryEntryFavorite(entry: GalleryEntry): Promise<void> {
+    if (!entry.sessionFile) {
+      // 폰 사진 — 폰 갤러리 자체에 즐겨찾기 저장.
+      entry.favorite = await this.store.togglePhoneGalleryFavorite(
+        entry.variantId
+      );
+      this.renderGalleryTab();
+      return;
+    }
     const illus = await this.store
       .getSessionIllustrations(entry.sessionFile)
       .catch(() => null);
@@ -1885,11 +1994,16 @@ export class DashboardView extends ItemView {
   }
 
   private async deleteGalleryEntry(entry: GalleryEntry): Promise<void> {
-    await this.deleteSessionIllustration(
-      entry.sessionFile,
-      entry.nodeId,
-      entry.variantId
-    );
+    if (!entry.sessionFile) {
+      // 폰 사진 — 폰 갤러리에서 제거 + 파일 휴지통.
+      await this.store.deletePhoneGalleryItem(entry.variantId);
+    } else {
+      await this.deleteSessionIllustration(
+        entry.sessionFile,
+        entry.nodeId,
+        entry.variantId
+      );
+    }
     // 집계에서 즉시 제거하고 다시 그린다(이벤트로도 무효화되지만 즉각 반영).
     if (this.galleryEntries) {
       this.galleryEntries = this.galleryEntries.filter(

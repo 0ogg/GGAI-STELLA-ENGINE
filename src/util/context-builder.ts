@@ -89,6 +89,11 @@ export interface ContextBuilderInputV2 {
   choiceValues?: Record<string, string[]>;
   /** 세션 단위 로어북 sticky/cooldown 상태. */
   timingStates?: Record<string, EntryTimingState>;
+  /**
+   * 로어북 확장 — 활성화 방식 제어. keywordMatching=false 면 키워드 매칭 끔,
+   * forcedEntryKeys 는 AI 선별 등으로 키워드 없이 강제 활성화할 엔트리 키 목록.
+   */
+  lorebookControl?: { keywordMatching?: boolean; forcedEntryKeys?: string[] };
   /** 현재 턴 번호. 로어북 delay 계산에 사용한다. */
   turnNumber?: number;
   /** 출력 토큰 예산. 입력이 많이 차면 이 값을 줄여 전체 컨텍스트 창을 맞춘다. */
@@ -156,6 +161,10 @@ export function buildContext(
     activeText: recentMessages[recentMessages.length - 1],
     turnNumber: input.turnNumber,
     timingStates,
+    keywordMatching: input.lorebookControl?.keywordMatching,
+    forcedEntryKeys: input.lorebookControl?.forcedEntryKeys
+      ? new Set(input.lorebookControl.forcedEntryKeys)
+      : undefined,
   });
 
   const lorebookByPos: Record<string, StellaLorebookEntry[]> = {

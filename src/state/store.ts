@@ -20,6 +20,11 @@
  *   "session-translations-changed" (sessionFile) - 특정 세션의 translations.json (문단 번역) 변경
  *   "session-summaries-changed" (sessionFile)    - 특정 세션의 summaries.json (노드 앵커 요약) 변경
  *   "groups-changed"                     - 그룹 목록 또는 내용 변경 (G1)
+ *   "phone-messages-changed" (personaId) - 스텔라 폰 문자함 변경 (PH1)
+ *   "sns-feed-changed"                   - 스텔라 폰 SNS 피드 변경 (PH3)
+ *   "phone-accounts-changed"             - 스텔라 폰 SNS 계정 DB 변경 (v2)
+ *   "phone-gallery-changed"              - 스텔라 폰 갤러리 변경 (PH5)
+ *   "session-stream-changed" (sessionFile) - 특정 세션의 stream.json (스텔라튜브 방송, v2) 변경
  *
  * 주의: 자기 view 가 발화한 이벤트도 본인에게 도달한다. 본인 변경 skip 은
  * saveSession 에 `{ origin: <뷰 토큰> }` 을 넘기고 핸들러에서 detail.origin 비교가
@@ -52,6 +57,22 @@ import {
   normalizeSessionSummaries,
   type SessionSummaries,
 } from "../types/summary";
+import {
+  backfillAccountsFromSnsFeed,
+  createEmptyPhoneGallery,
+  createEmptyPhoneMessages,
+  createEmptySnsFeed,
+  normalizePhoneAccounts,
+  normalizePhoneGallery,
+  normalizePhoneMessages,
+  normalizeSessionStream,
+  normalizeSnsFeed,
+  type SessionStreamFile,
+  type PhoneAccountsFile,
+  type PhoneGalleryFile,
+  type PhoneMessagesFile,
+  type SnsFeedFile,
+} from "../types/phone";
 import type { StellaPreset } from "../types/preset";
 import type { StellaPromptPreset } from "../types/prompt";
 import type { StellaScenario } from "../types/scenario";
@@ -154,6 +175,18 @@ export class StellaStore extends Events {
   private defaultUserProfile: StellaUserProfile | null = null;
   private usersCache: UserListItem[] | null = null;
   private userByFile = new Map<string, StellaUserProfile>();
+
+  /** 스텔라 폰 문자 (PHONE/<personaId>/messages.json) 캐시 — key 는 페르소나 profile.id. */
+  private phoneMessagesByPersona = new Map<string, PhoneMessagesFile>();
+
+  /** 스텔라 폰 SNS 피드 (PHONE/sns.json — 볼트 공용) 캐시. */
+  private snsFeedCache: SnsFeedFile | null = null;
+
+  /** 스텔라 폰 SNS 계정 DB (PHONE/accounts.json — 볼트 공용, v2) 캐시. */
+  private phoneAccountsCache: PhoneAccountsFile | null = null;
+
+  /** 스텔라 폰 갤러리 (PHONE/gallery.json — 볼트 공용) 캐시. */
+  private phoneGalleryCache: PhoneGalleryFile | null = null;
 
   /** path → 마지막 자기 write 시각 (ms). grace 기간 내면 vault.modify skip. */
   private selfWriteTimes = new Map<string, number>();
@@ -838,6 +871,252 @@ export class StellaStore extends Events {
     if (f instanceof TFile) await this.vault.modify(f, body);
     else await this.vault.create(path, body);
     this.trigger("session-translations-changed", sessionFile, detail);
+  }
+
+  // ─────────────────────────── phone messages (PHONE/<personaId>/messages.json) ───────────────────────────
+
+  /**
+   * 스텔라 폰 문자함 (PH1). 파일이 없으면 빈 구조 반환 (디스크에 만들지 않음).
+   * 이벤트: "phone-messages-changed" (personaId).
+   */
+  async getPhoneMessages(personaId: string): Promise<PhoneMessagesFile> {
+    const cached = this.phoneMessagesByPersona.get(personaId);
+    if (cached) return cached;
+    const path = phoneMessagesPath(personaId);
+    let messages = createEmptyPhoneMessages();
+    const f = this.vault.getAbstractFileByPath(path);
+    if (f instanceof TFile) {
+      try {
+        messages = normalizePhoneMessages(JSON.parse(await this.vault.read(f)));
+      } catch (err) {
+        console.warn("[GGAI Stella] 폰 messages.json 로드 실패:", err);
+      }
+    }
+    this.phoneMessagesByPersona.set(personaId, messages);
+    return messages;
+  }
+
+  async savePhoneMessages(
+    personaId: string,
+    messages: PhoneMessagesFile
+  ): Promise<void> {
+    const path = phoneMessagesPath(personaId);
+    this.phoneMessagesByPersona.set(personaId, messages);
+    await this.ensureFolderPath(`${BASE_FOLDER}/PHONE/${personaId}`);
+    this.markSelfWrite(path);
+    const body = JSON.stringify(messages, null, 2);
+    const f = this.vault.getAbstractFileByPath(path);
+    if (f instanceof TFile) await this.vault.modify(f, body);
+    else await this.vault.create(path, body);
+    this.trigger("phone-messages-changed", personaId);
+  }
+
+  /**
+   * 스텔라 폰 SNS 피드 (PH3) — 볼트 공용. 없으면 빈 구조 반환.
+   * 이벤트: "sns-feed-changed".
+   */
+  async getSnsFeed(): Promise<SnsFeedFile> {
+    if (this.snsFeedCache) return this.snsFeedCache;
+    const path = SNS_FEED_PATH;
+    let feed = createEmptySnsFeed();
+    const f = this.vault.getAbstractFileByPath(path);
+    if (f instanceof TFile) {
+      try {
+        feed = normalizeSnsFeed(JSON.parse(await this.vault.read(f)));
+      } catch (err) {
+        console.warn("[GGAI Stella] sns.json 로드 실패:", err);
+      }
+    }
+    this.snsFeedCache = feed;
+    return feed;
+  }
+
+  async saveSnsFeed(feed: SnsFeedFile): Promise<void> {
+    // 피드 비대 방지 — 최신 게시글만 유지.
+    if (feed.posts.length > 200) {
+      feed.posts.sort((a, b) => a.createdAt - b.createdAt);
+      feed.posts = feed.posts.slice(-200);
+    }
+    this.snsFeedCache = feed;
+    await this.ensureFolderPath(`${BASE_FOLDER}/PHONE`);
+    this.markSelfWrite(SNS_FEED_PATH);
+    const body = JSON.stringify(feed, null, 2);
+    const f = this.vault.getAbstractFileByPath(SNS_FEED_PATH);
+    if (f instanceof TFile) await this.vault.modify(f, body);
+    else await this.vault.create(SNS_FEED_PATH, body);
+    this.trigger("sns-feed-changed");
+  }
+
+  /**
+   * 스텔라 폰 SNS 계정 DB (v2) — 볼트 공용. 파일이 없으면 기존 sns.json 작성자를
+   * 스캔해 백필한 구조를 반환한다 (디스크 쓰기는 다음 save 때 자연 발생).
+   * 이벤트: "phone-accounts-changed".
+   */
+  async getPhoneAccounts(): Promise<PhoneAccountsFile> {
+    if (this.phoneAccountsCache) return this.phoneAccountsCache;
+    let accounts: PhoneAccountsFile | null = null;
+    const f = this.vault.getAbstractFileByPath(PHONE_ACCOUNTS_PATH);
+    if (f instanceof TFile) {
+      try {
+        accounts = normalizePhoneAccounts(JSON.parse(await this.vault.read(f)));
+      } catch (err) {
+        console.warn("[GGAI Stella] 폰 accounts.json 로드 실패:", err);
+      }
+    }
+    if (!accounts) {
+      accounts = backfillAccountsFromSnsFeed(await this.getSnsFeed(), uuidv4);
+    }
+    this.phoneAccountsCache = accounts;
+    return accounts;
+  }
+
+  async savePhoneAccounts(accounts: PhoneAccountsFile): Promise<void> {
+    this.phoneAccountsCache = accounts;
+    await this.ensureFolderPath(`${BASE_FOLDER}/PHONE`);
+    this.markSelfWrite(PHONE_ACCOUNTS_PATH);
+    const body = JSON.stringify(accounts, null, 2);
+    const f = this.vault.getAbstractFileByPath(PHONE_ACCOUNTS_PATH);
+    if (f instanceof TFile) await this.vault.modify(f, body);
+    else await this.vault.create(PHONE_ACCOUNTS_PATH, body);
+    this.trigger("phone-accounts-changed");
+  }
+
+  /**
+   * 스텔라 폰 갤러리 (PH5) — 카메라/업로드/SNS 사진 목록. 없으면 빈 구조 반환.
+   * 이벤트: "phone-gallery-changed".
+   */
+  async getPhoneGallery(): Promise<PhoneGalleryFile> {
+    if (this.phoneGalleryCache) return this.phoneGalleryCache;
+    let gallery = createEmptyPhoneGallery();
+    const f = this.vault.getAbstractFileByPath(PHONE_GALLERY_PATH);
+    if (f instanceof TFile) {
+      try {
+        gallery = normalizePhoneGallery(JSON.parse(await this.vault.read(f)));
+      } catch (err) {
+        console.warn("[GGAI Stella] 폰 gallery.json 로드 실패:", err);
+      }
+    }
+    this.phoneGalleryCache = gallery;
+    return gallery;
+  }
+
+  async savePhoneGallery(gallery: PhoneGalleryFile): Promise<void> {
+    this.phoneGalleryCache = gallery;
+    await this.ensureFolderPath(`${BASE_FOLDER}/PHONE`);
+    this.markSelfWrite(PHONE_GALLERY_PATH);
+    const body = JSON.stringify(gallery, null, 2);
+    const f = this.vault.getAbstractFileByPath(PHONE_GALLERY_PATH);
+    if (f instanceof TFile) await this.vault.modify(f, body);
+    else await this.vault.create(PHONE_GALLERY_PATH, body);
+    this.trigger("phone-gallery-changed");
+  }
+
+  /** 폰 갤러리 항목 즐겨찾기 토글 — 새 상태 반환. 없는 id 면 false. */
+  async togglePhoneGalleryFavorite(id: string): Promise<boolean> {
+    const gallery = await this.getPhoneGallery();
+    const item = gallery.items.find((i) => i.id === id);
+    if (!item) return false;
+    item.favorite = !item.favorite;
+    await this.savePhoneGallery(gallery);
+    return !!item.favorite;
+  }
+
+  /** 폰 갤러리 항목 삭제 — 목록에서 제거 + 이미지 파일 휴지통. */
+  async deletePhoneGalleryItem(id: string): Promise<void> {
+    const gallery = await this.getPhoneGallery();
+    const item = gallery.items.find((i) => i.id === id);
+    if (!item) return;
+    gallery.items = gallery.items.filter((i) => i.id !== id);
+    await this.savePhoneGallery(gallery);
+    const f = this.vault.getAbstractFileByPath(item.file);
+    if (f instanceof TFile) {
+      this.markSelfWrite(item.file);
+      await this.vault.trash(f, false);
+    }
+  }
+
+  // ─────────────────────────── 스텔라튜브 방송 (stream.json, v2 §7) ───────────────────────────
+
+  /**
+   * 세션 폴더의 stream.json (스텔라튜브 방송). 없으면 null.
+   * 캐시 없이 매번 읽는다 (반응 생성/뷰 표시 시점에만 접근).
+   * 이벤트: "session-stream-changed" (sessionFile).
+   */
+  async getSessionStream(sessionFile: string): Promise<SessionStreamFile | null> {
+    const path = streamFileOfSessionFile(sessionFile);
+    if (!path) return null;
+    const f = this.vault.getAbstractFileByPath(path);
+    if (!(f instanceof TFile)) return null;
+    try {
+      return normalizeSessionStream(JSON.parse(await this.vault.read(f)));
+    } catch (err) {
+      console.warn("[GGAI Stella] stream.json 로드 실패:", err);
+      return null;
+    }
+  }
+
+  async saveSessionStream(
+    sessionFile: string,
+    stream: SessionStreamFile
+  ): Promise<void> {
+    const path = streamFileOfSessionFile(sessionFile);
+    if (!path) throw new Error("Invalid session path");
+    this.markSelfWrite(path);
+    const body = JSON.stringify(stream, null, 2);
+    const f = this.vault.getAbstractFileByPath(path);
+    if (f instanceof TFile) await this.vault.modify(f, body);
+    else await this.vault.create(path, body);
+    this.trigger("session-stream-changed", sessionFile);
+  }
+
+  /** 방송 기록(다시보기) 삭제 — stream.json 휴지통. */
+  async deleteSessionStream(sessionFile: string): Promise<void> {
+    const path = streamFileOfSessionFile(sessionFile);
+    if (!path) return;
+    const f = this.vault.getAbstractFileByPath(path);
+    if (f instanceof TFile) {
+      this.markSelfWrite(path);
+      await this.vault.trash(f, false);
+      this.trigger("session-stream-changed", sessionFile);
+    }
+  }
+
+  /** 볼트 전체 방송 목록 (라이브 판정 + 다시보기 목록용). */
+  async listSessionStreams(): Promise<
+    { sessionFile: string; stream: SessionStreamFile }[]
+  > {
+    const out: { sessionFile: string; stream: SessionStreamFile }[] = [];
+    for (const f of this.vault.getFiles()) {
+      if (
+        !f.path.startsWith(`${BASE_FOLDER}/SCENARIOS/`) ||
+        !f.path.endsWith("/stream.json")
+      ) {
+        continue;
+      }
+      try {
+        const stream = normalizeSessionStream(
+          JSON.parse(await this.vault.read(f))
+        );
+        if (stream) {
+          out.push({
+            sessionFile: `${f.path.slice(0, -"/stream.json".length)}/session.json`,
+            stream,
+          });
+        }
+      } catch {
+        /* 깨진 파일 스킵 */
+      }
+    }
+    return out;
+  }
+
+  /** 폰 이미지 바이너리 저장 (PHONE/assets/) — vault 전체 경로를 반환. */
+  async savePhoneAsset(filename: string, data: ArrayBuffer): Promise<string> {
+    const folder = `${BASE_FOLDER}/PHONE/assets`;
+    await this.ensureFolderPath(folder);
+    const path = normalizePath(`${folder}/${filename}`);
+    await this.writeBinaryFile(path, data);
+    return path;
   }
 
   // ─────────────────────────── reading export (.md) ───────────────────────────
@@ -1719,6 +1998,12 @@ export class StellaStore extends Events {
       this.trigger("session-summaries-changed", sessionFile);
       return;
     }
+    // stream.json 변경 (스텔라튜브 방송, v2)
+    if (path.endsWith("/stream.json")) {
+      const sessionFile = `${path.slice(0, -"/stream.json".length)}/session.json`;
+      this.trigger("session-stream-changed", sessionFile);
+      return;
+    }
     // illustrations.json 변경 (노드 삽화)
     if (path.endsWith("/illustrations.json")) {
       const sessionFile = `${path.slice(0, -"/illustrations.json".length)}/session.json`;
@@ -1769,6 +2054,36 @@ export class StellaStore extends Events {
       this.lorebooksCache = null;
       this.trigger("lorebook-changed", path);
       this.trigger("lorebooks-changed");
+      return;
+    }
+    // PHONE/sns.json 변경 (스텔라 폰 SNS 피드, PH3)
+    if (path === SNS_FEED_PATH) {
+      this.snsFeedCache = null;
+      this.trigger("sns-feed-changed");
+      return;
+    }
+    // PHONE/accounts.json 변경 (스텔라 폰 SNS 계정 DB, v2)
+    if (path === PHONE_ACCOUNTS_PATH) {
+      this.phoneAccountsCache = null;
+      this.trigger("phone-accounts-changed");
+      return;
+    }
+    // PHONE/gallery.json 변경 (스텔라 폰 갤러리, PH5)
+    if (path === PHONE_GALLERY_PATH) {
+      this.phoneGalleryCache = null;
+      this.trigger("phone-gallery-changed");
+      return;
+    }
+    // PHONE/<personaId>/messages.json 변경 (스텔라 폰 문자, PH1)
+    if (
+      path.startsWith(`${BASE_FOLDER}/PHONE/`) &&
+      path.endsWith("/messages.json")
+    ) {
+      const personaId = path.split("/")[2] ?? "";
+      if (personaId) {
+        this.phoneMessagesByPersona.delete(personaId);
+        this.trigger("phone-messages-changed", personaId);
+      }
       return;
     }
     // GROUPS/<X>/group.json 변경 (G1)
@@ -1930,6 +2245,20 @@ function translationsFileOfSessionFile(sessionFile: string): string | null {
   return folder ? `${folder}/translations.json` : null;
 }
 
+/** 페르소나 profile.id → 폰 문자함 파일 경로 (PH1). */
+function phoneMessagesPath(personaId: string): string {
+  return `${BASE_FOLDER}/PHONE/${personaId}/messages.json`;
+}
+
+/** SNS 피드 파일 경로 (PH3) — 볼트 공용 단일 파일. */
+const SNS_FEED_PATH = `${BASE_FOLDER}/PHONE/sns.json`;
+
+/** 폰 갤러리 파일 경로 (PH5) — 볼트 공용 단일 파일. */
+const PHONE_GALLERY_PATH = `${BASE_FOLDER}/PHONE/gallery.json`;
+
+/** SNS 계정 DB 파일 경로 (v2) — 볼트 공용 단일 파일. */
+const PHONE_ACCOUNTS_PATH = `${BASE_FOLDER}/PHONE/accounts.json`;
+
 /** .../session.json → .../summaries.json */
 function summariesFileOfSessionFile(sessionFile: string): string | null {
   const folder = sessionFolderOfSessionFilePath(sessionFile);
@@ -1940,6 +2269,12 @@ function summariesFileOfSessionFile(sessionFile: string): string | null {
 function illustrationsFileOfSessionFile(sessionFile: string): string | null {
   const folder = sessionFolderOfSessionFilePath(sessionFile);
   return folder ? `${folder}/illustrations.json` : null;
+}
+
+/** .../session.json → .../stream.json (스텔라튜브 방송, v2) */
+function streamFileOfSessionFile(sessionFile: string): string | null {
+  const folder = sessionFolderOfSessionFilePath(sessionFile);
+  return folder ? `${folder}/stream.json` : null;
 }
 
 async function uniquePath(vault: Vault, basePath: string): Promise<string> {

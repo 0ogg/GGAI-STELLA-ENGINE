@@ -23,6 +23,7 @@ import {
 } from "../util/media-lorebook";
 import { recordIllustrationVariant } from "../util/illustrations";
 import { buildSpans, spansToText } from "../util/session-text";
+import { createExtensionRegexApplier } from "../util/session-regex";
 
 const DEFAULT_CONTEXT_CHARS = 4000;
 
@@ -104,6 +105,14 @@ export class IllustrationService {
     } catch (err) {
       return fail("삽화 프롬프트 생성 실패: " + msgOf(err));
     }
+    // 확장 결과물 정규식 — "저장 원문" 시점 + 삽화 대상 전역 스크립트만.
+    // 받은 프롬프트를 이미지 생성/저장 전에 가공(JSON 껍데기 제거 등).
+    const applyRegex = await createExtensionRegexApplier(
+      this.plugin,
+      sessionFile,
+      "illustration"
+    );
+    if (applyRegex) imagePrompt = applyRegex(imagePrompt);
     if (!imagePrompt.trim()) return fail("생성된 삽화 프롬프트가 비어 있습니다.");
 
     // 품질 태그(메인 프롬프트)와 UC 는 삽화 이미지 프로필(Core)에 등록된 값을 쓴다.
@@ -151,6 +160,52 @@ export class IllustrationService {
       signal: opts?.signal,
       origin: opts?.origin,
     });
+  }
+
+  /**
+   * 임의 텍스트(장면 묘사)를 본문 삼아 삽화 이미지 프롬프트만 뽑는다 — 스텔라 폰
+   * 카메라 공용. 모델/프롬프트/로어북은 전역 삽화 설정(`PluginData.current`)을 쓰고,
+   * 세션/variant 에는 아무것도 기록하지 않는다.
+   */
+  async generatePromptFromText(
+    text: string
+  ): Promise<{ ok: true; prompt: string } | { ok: false; error: string }> {
+    if (!this.plugin.ai.isAvailable()) {
+      return { ok: false, error: "GGAI Core 가 설치/활성화되어 있지 않습니다." };
+    }
+    const body = text.trim();
+    if (!body) return { ok: false, error: "장면 묘사가 비어 있습니다." };
+    const ill = this.plugin.data.current?.illustration ?? {};
+    const genProfile =
+      this.plugin.ai.getProfileById(ill.promptGenModelProfileId) ??
+      this.plugin.ai.getDefaultGenerationProfile();
+    if (!genProfile) {
+      return { ok: false, error: "삽화 프롬프트 생성 모델이 없습니다." };
+    }
+    const genPrompt = resolveMediaPrompt(
+      "illustrationPromptGen",
+      ill.promptGenPromptId,
+      this.plugin.data.mediaPrompts
+    );
+    const books = await loadMediaLorebooks(
+      this.plugin.store,
+      ill.lorebookIds ?? []
+    );
+    const lorebookText = buildLorebookText(books, body);
+    try {
+      const prompt = await this.generateImagePrompt(
+        genProfile,
+        genPrompt?.prompt ?? "",
+        body,
+        lorebookText
+      );
+      if (!prompt.trim()) {
+        return { ok: false, error: "생성된 삽화 프롬프트가 비어 있습니다." };
+      }
+      return { ok: true, prompt: prompt.trim() };
+    } catch (err) {
+      return { ok: false, error: "삽화 프롬프트 생성 실패: " + msgOf(err) };
+    }
   }
 
   /** image() 호출 → assets PNG 저장 → variant 기록 (Store 경유). */

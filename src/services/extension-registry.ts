@@ -6,35 +6,90 @@
  * 확장은 기본 생성 과정에 끼어들어 두 가지 방식으로 개입한다:
  *
  *  1) 기여형(여럿 동시 가능) — 기본 흐름에 무언가를 보탠다.
- *     - `contributeContext` : 전송본에 컨텍스트(요약 등)를 채워 넣는다.
+ *     - `contributeContext` : 전송본에 컨텍스트를 채워 넣는다. 내장 슬롯(summary/
+ *       phone) + 외부 확장 공용 `custom` 슬롯(배치 규칙 포함, 아래 타입 참조).
  *     - `onGenerationComplete` : 생성이 끝난 직후 자동 실행(자동 요약 등).
  *
  *  2) 대체형(이음새당 단일 소유) — 기본 알고리즘을 통째로 갈아끼운다.
  *     - `selectLorebooks` : 기본 키워드 매칭 대신 확장이 로어북을 고른다.
  *     - 생성 실행 대체(다중 검증 생성 등)는 RESERVED — 스테이지 4에서 연동한다.
  *
- * 전송본 미리보기("현재 컨텍스트 확인")는 엔진 기본 조립만 그린다. 외부 확장의
- * 기여를 일일이 미리보기에 반영하지는 않으며, 실제 전송된 내용은 GGAI Core 로그가
- * 단일 진실 소스다.
+ * 컨텍스트 기여는 planSessionRequest 한 곳에서 수집되므로 전송본 미리보기
+ * ("현재 컨텍스트 확인")에도 생성과 동일하게 반영된다. 최종 전송 내용의 진실
+ * 소스는 GGAI Core 요청 로그.
  */
 
 import type StellaEnginePlugin from "../main";
 import type { GenerationProfileLite } from "./ai-service";
 import type { ActiveSettings } from "../types/preset";
-import type { StellaLorebook } from "../types/lorebook";
+import type {
+  StellaLorebook,
+  LorebookPosition,
+  LorebookRole,
+} from "../types/lorebook";
 import type { StellaScenario } from "../types/scenario";
 import type { StellaSession } from "../types/session";
 
 /**
- * 확장이 채우는 엔진 정의 컨텍스트 슬롯. 슬롯은 엔진이 위치·매크로를 이미 아는
- * 자리다 — 확장은 값(text)만 제공하고, 삽입 위치와 `{{매크로}}` 처리는 엔진이 한다.
- * 현재 슬롯: `summary`(작가노트 바로 위 자동 삽입 / `{{summary}}` 매크로 / chatSummary 마커).
- * 새 슬롯은 실제 소비자가 생길 때 추가한다(투기적 일반화 금지).
+ * 확장이 채우는 컨텍스트 기여.
+ *
+ *  - 내장 슬롯 `summary`/`phone`: 엔진이 위치·매크로를 이미 아는 자리 — 확장은
+ *    값(text)만 제공한다. 새 내장 슬롯은 실제 소비자가 생길 때 추가한다.
+ *  - `custom`: 외부 확장 공용 슬롯. 확장이 배치 규칙(position/depth/role/order)을
+ *    함께 제공하면 엔진이 가상 로어북 상시 엔트리로 감싸 그 위치에 삽입한다
+ *    (폰/그룹 멤버 프로필과 같은 기계 — 미리보기·생성·토큰 예산 자동 동일).
+ *    외부 확장이 컨텍스트에 텍스트를 넣는 진입점은 이것 하나다 — 확장마다
+ *    별도 삽입 경로를 만들지 않는다.
  */
-export interface ContextContribution {
-  slot: "summary";
-  /** 슬롯에 채울 텍스트. 빈 문자열이면 무시된다. */
+export type ContextContribution =
+  | {
+      slot: "summary" | "phone";
+      /** 슬롯에 채울 텍스트. 빈 문자열이면 무시된다. */
+      text: string;
+    }
+  | CustomContextContribution;
+
+/** 외부 확장 공용 컨텍스트 기여 — 배치 규칙을 확장이 직접 지정한다. */
+export interface CustomContextContribution {
+  slot: "custom";
+  /** 삽입할 텍스트. 빈 문자열이면 무시된다. */
   text: string;
+  /** 디버깅/로그 표시명. 생략 시 확장 id. */
+  name?: string;
+  /** 삽입 위치 (ST 로어북 position 의미 그대로). 기본 `after_char`. */
+  position?: LorebookPosition;
+  /** position=at_depth 일 때 히스토리 끝에서의 깊이. 기본 4. */
+  depth?: number;
+  /** position=at_depth 일 때 메시지 역할. 기본 `system`. */
+  role?: LorebookRole;
+  /** 같은 위치 내 정렬 — 큰 값이 우선. 같은 슬롯을 쓰는 확장 간 배치 조정용. 기본 100. */
+  order?: number;
+}
+
+/** collectContext 가 기여에 출처 확장 id 를 얹어 반환하는 형태. */
+export type CollectedContribution = ContextContribution & { sourceId: string };
+
+/** 세션 조작 액션 실행 입력. */
+export interface SessionActionInput {
+  plugin: StellaEnginePlugin;
+  /** 액션을 실행한 세션 파일 경로. */
+  sessionFile: string;
+}
+
+/**
+ * 확장이 세션창 하단 확장 버튼(퍼즐)의 트레이에 넣는 조작 액션.
+ * 확장이 자체 조작 UI(버튼/툴바/모달)를 세션 화면에 직접 붙이는 대신 쓰는
+ * 공용 진입점 — 또 하나의 선택지는 확장이 옵시디언 명령(addCommand)으로
+ * 노출하고 사용자가 모바일 툴바/커맨더로 버튼을 배치하는 것.
+ */
+export interface StellaSessionAction {
+  /** 확장 안에서 유일한 id. */
+  id: string;
+  /** 트레이에 표시할 이름. */
+  title: string;
+  /** Lucide 아이콘 이름. 생략 시 puzzle. */
+  icon?: string;
+  run(input: SessionActionInput): void | Promise<void>;
 }
 
 export interface ExtensionContextInput {
@@ -90,6 +145,11 @@ export interface StellaExtension {
    * 없으면 기본 키워드 매칭.
    */
   selectLorebooks?: LorebookSelector;
+  /**
+   * 세션창 하단 확장 버튼 트레이에 넣을 조작 액션들. 확장별 자체 조작 UI 를
+   * 만들지 않기 위한 공용 진입점(트레이 또는 옵시디언 명령, 두 선택지만).
+   */
+  sessionActions?: StellaSessionAction[];
 }
 
 export class StellaExtensionRegistry {
@@ -117,13 +177,13 @@ export class StellaExtensionRegistry {
    */
   async collectContext(
     input: Omit<ExtensionContextInput, "plugin">
-  ): Promise<ContextContribution[]> {
-    const out: ContextContribution[] = [];
+  ): Promise<CollectedContribution[]> {
+    const out: CollectedContribution[] = [];
     for (const ext of this.extensions.values()) {
       if (!ext.contributeContext) continue;
       try {
         const parts = await ext.contributeContext({ plugin: this.plugin, ...input });
-        for (const p of parts) if (p.text.trim()) out.push(p);
+        for (const p of parts) if (p.text.trim()) out.push({ ...p, sourceId: ext.id });
       } catch (err) {
         console.warn(`[GGAI Stella] 확장 컨텍스트 기여 실패 (${ext.id}):`, err);
       }
@@ -131,8 +191,8 @@ export class StellaExtensionRegistry {
     return out;
   }
 
-  /** 특정 슬롯의 기여 텍스트를 합친다(여러 확장이 같은 슬롯을 채우면 이어붙인다). */
-  pickSlot(contributions: ContextContribution[], slot: ContextContribution["slot"]): string {
+  /** 내장 슬롯의 기여 텍스트를 합친다(여러 확장이 같은 슬롯을 채우면 이어붙인다). */
+  pickSlot(contributions: ContextContribution[], slot: "summary" | "phone"): string {
     return contributions
       .filter((c) => c.slot === slot)
       .map((c) => c.text)
@@ -159,6 +219,15 @@ export class StellaExtensionRegistry {
           }
         })
     );
+  }
+
+  /** 등록 순서대로 모든 확장의 세션 조작 액션을 평탄화해 반환. */
+  listSessionActions(): StellaSessionAction[] {
+    const out: StellaSessionAction[] = [];
+    for (const ext of this.extensions.values()) {
+      for (const action of ext.sessionActions ?? []) out.push(action);
+    }
+    return out;
   }
 
   /** 로어북 선택 대체를 등록한 확장이 있으면 그 선택 함수, 없으면 null(기본 매칭). */

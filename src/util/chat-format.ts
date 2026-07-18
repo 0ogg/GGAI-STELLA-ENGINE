@@ -9,6 +9,8 @@
  *  - `*지문*`      → 기울임 (`<em>`)
  *  - `**강조**`    → 굵게  (`<strong>`)  — 기울임보다 먼저 처리
  *  - 빈 줄 = 문단 경계 (문단마다 `<p>`, 문단 안 단일 줄바꿈은 `<br>`)
+ *    빈 줄은 접지 않고 원문 개수만큼 그대로 보인다(`.ggai-chat-para-sep`) —
+ *    문단 간격 슬라이더는 그 위에 여백을 "추가"할 뿐이다.
  */
 
 function escapeHtml(text: string): string {
@@ -34,10 +36,14 @@ function formatInline(escaped: string): string {
  * 인한 마크업 주입이 없다.
  */
 export function formatChatText(text: string): string {
-  const paragraphs = text.split(/\n{2,}/);
-  return paragraphs
-    .map((para) => {
-      const lines = para.split("\n").map((line) => formatInline(escapeHtml(line)));
+  // 경계(연속 줄바꿈)를 캡처해 빈 줄 수(k개 줄바꿈 = k-1개 빈 줄)를 보존한다.
+  const parts = text.split(/(\n{2,})/);
+  return parts
+    .map((part) => {
+      if (/^\n{2,}$/.test(part)) {
+        return `<div class="ggai-chat-para-sep" style="--ggai-sep-lines: ${part.length - 1};"></div>`;
+      }
+      const lines = part.split("\n").map((line) => formatInline(escapeHtml(line)));
       return `<p class="ggai-chat-para">${lines.join("<br>")}</p>`;
     })
     .join("");
