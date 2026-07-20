@@ -597,10 +597,22 @@ export class StellaStore extends Events {
     return list;
   }
 
+  /**
+   * 목록 표시용 재스캔. 디스크 내용을 반영하되 **캐시 객체의 identity 는 보존한다** —
+   * 세션창/디테일 뷰가 들고 있는 참조를 갈아치우면 그 뷰의 다음 저장이 옛 사본을
+   * 디스크에 덮어써 모델/파라미터/번역 설정이 직전 값으로 되돌아간다.
+   * (refreshSession 과 같은 제자리 갱신 규칙. 회귀금지.md 참조.)
+   */
   async refreshSessions(scenarioFolder: string): Promise<SessionListItem[]> {
     const list = await scanSessions(this.vault, scenarioFolder);
     for (const item of list) {
-      this.sessionByFile.set(item.sessionFile, item.session);
+      const existing = this.sessionByFile.get(item.sessionFile);
+      if (existing) {
+        assignSessionInPlace(existing, item.session);
+        item.session = existing;
+      } else {
+        this.sessionByFile.set(item.sessionFile, item.session);
+      }
     }
     this.sessionsByFolder.set(scenarioFolder, list);
     return list;
@@ -633,10 +645,7 @@ export class StellaStore extends Events {
         // 제자리 갱신 — SessionView 등이 들고 있는 참조가 고아가 돼서
         // 다른 뷰의 refresh 후 메타 변경(updateToolbar/auto 실행 등)이
         // 누락되는 버그를 막기 위해 같은 객체에 덮어쓴다.
-        for (const key of Object.keys(existing)) {
-          delete (existing as unknown as Record<string, unknown>)[key];
-        }
-        Object.assign(existing, fresh);
+        assignSessionInPlace(existing, fresh);
         return existing;
       }
       this.sessionByFile.set(file, fresh);
@@ -2404,4 +2413,16 @@ function normalizeUserProfile(raw: Partial<StellaUserProfile>): StellaUserProfil
     createdAt: typeof raw.createdAt === "number" ? raw.createdAt : fallback.createdAt,
     modifiedAt: typeof raw.modifiedAt === "number" ? raw.modifiedAt : fallback.modifiedAt,
   };
+}
+
+/**
+ * 세션 객체를 제자리에서 갈아끼운다 (참조 identity 보존).
+ * 뷰가 들고 있는 참조가 고아가 되면 그 뷰의 다음 저장이 옛 사본을 디스크에
+ * 덮어쓴다 — 목록 재스캔/파일 재읽기 경로는 반드시 이 함수를 쓴다.
+ */
+function assignSessionInPlace(target: StellaSession, fresh: StellaSession): void {
+  for (const key of Object.keys(target)) {
+    delete (target as unknown as Record<string, unknown>)[key];
+  }
+  Object.assign(target, fresh);
 }

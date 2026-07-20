@@ -110,9 +110,9 @@ export class ModelSection {
       return;
     }
     this.activeModelProfileId = profile.id;
-    // 사용자가 모델을 직접 지정 — 프리셋 랜덤 순환이 켜져 있어도 다음 1회 생성은
-    // 이 선택 그대로 간다.
-    this.plugin.notePresetRotationManualChoice();
+    // 사용자가 모델을 직접 지정 — 프리셋 선택이 풀리고, 순환이 켜져 있어도 다음
+    // 1회 생성은 이 선택 그대로 간다.
+    await this.plugin.noteManualSettingChange();
     // 텍스트 모델이면 "NAI 형식으로 보내기"를 자동으로 켜고, 채팅이면 끈다.
     await this.plugin.setNaiFormatForModel(profile.kind, this.activeSessionFile);
     this.render();

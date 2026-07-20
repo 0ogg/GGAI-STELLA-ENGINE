@@ -33,6 +33,11 @@ import {
   TRANSLATION_IO_INSTRUCTIONS,
 } from "../util/translate-paragraphs";
 import { createExtensionRegexApplier } from "../util/session-regex";
+import {
+  collectStylePairs,
+  formatStylePairs,
+  PRO_STYLE_PAIRS_DEFAULT,
+} from "../util/pro-convert";
 import type { MediaPromptItem } from "../types/preset";
 import type { TranslationUndoItem } from "../types/media";
 
@@ -93,6 +98,8 @@ export class TranslationService {
         profile: { id: string; kind: "chat" | "text" };
         books: Awaited<ReturnType<typeof loadMediaLorebooks>>;
         retry: boolean;
+        /** 집필 프로 문체 예시 쌍 첨부 수 (authored 쌍이 없는 일반 세션은 무의미). */
+        stylePairsMax: number;
       }
     | { ok: false; error: string }
   > {
@@ -133,6 +140,7 @@ export class TranslationService {
       profile,
       books,
       retry: translation.retryOnFormatError === true,
+      stylePairsMax: settings.pro?.stylePairs ?? PRO_STYLE_PAIRS_DEFAULT,
     };
   }
 
@@ -290,7 +298,9 @@ export class TranslationService {
     retry: boolean,
     errorCount: { n: number },
     /** 확장 결과물 정규식(저장 원문 시점 + 번역 대상 전역 스크립트) — 없으면 null. */
-    applyRegex: ((text: string) => string) | null
+    applyRegex: ((text: string) => string) | null,
+    /** 집필 프로 문체 예시 쌍 블록 — 없으면 "" (일반 세션). */
+    pairsText = ""
   ): Promise<{
     results: ReturnType<typeof parseTranslationResponse>;
     sourceById: Map<string, string>;
@@ -318,7 +328,8 @@ export class TranslationService {
           profile,
           promptText,
           segments,
-          lorebookText
+          lorebookText,
+          pairsText
         );
         const parsed = parseTranslationResponse(responseText);
         if (parsed && parsed.length > 0) {
@@ -388,6 +399,13 @@ export class TranslationService {
       sessionFile,
       "translation"
     );
+    // 집필 프로 — 저자 문단 쌍 문체 예시 (일괄 번역 경로와 동일 규칙).
+    const previewTranslations =
+      await this.plugin.store.getSessionTranslations(sessionFile);
+    const pairsText = formatStylePairs(
+      collectStylePairs(text, previewTranslations, setup.stylePairsMax),
+      "enToKo"
+    );
 
     for (const chunk of chunks) {
       const { results, sourceById, reason, cancelled } = await this.translateChunk(
@@ -399,7 +417,8 @@ export class TranslationService {
         books,
         retry,
         errorCount,
-        applyRegex
+        applyRegex,
+        pairsText
       );
       if (cancelled) break; // 취소 — 조용히 멈춤(오류로 처리하지 않음)
       if (!results || results.length === 0) {
@@ -468,6 +487,12 @@ export class TranslationService {
     const translations = await this.plugin.store.getSessionTranslations(
       sessionFile
     );
+    // 집필 프로 — 저자 문단 쌍(authored)을 한국어 문체 예시로 첨부. 일반 세션은
+    // authored 쌍이 없어 빈 문자열(첨부 없음)이 된다.
+    const pairsText = formatStylePairs(
+      collectStylePairs(text, translations, setup.stylePairsMax),
+      "enToKo"
+    );
     const targets = opts?.hashes
       ? collectParagraphs(text).filter((p) => opts.hashes!.includes(p.hash))
       : collectUntranslatedParagraphs(text, translations);
@@ -507,7 +532,8 @@ export class TranslationService {
         books,
         retry,
         errorCount,
-        applyRegex
+        applyRegex,
+        pairsText
       );
 
       // 취소 — 남은 청크를 발사하지 않고 멈춘다. 여기까지 저장된 청크는 보존.
@@ -589,12 +615,14 @@ export class TranslationService {
     profile: { id: string; kind: "chat" | "text" },
     instruction: string,
     segments: ReturnType<typeof buildTranslationRequest>,
-    lorebookText: string
+    lorebookText: string,
+    pairsText = ""
   ): Promise<string> {
     const payload = JSON.stringify(segments);
-    // 본문(JSON 페이로드)은 지침의 {{main}}, 로어북은 {{lorebook}} 위치에 결합.
-    // JSON 입출력 규약(TRANSLATION_IO_INSTRUCTIONS)은 엔진 고정 프로토콜.
-    const combined = composeMediaPrompt(instruction, payload, lorebookText);
+    // 본문(JSON 페이로드)은 지침의 {{main}}, 로어북은 {{lorebook}}, 집필 프로 문체
+    // 예시 쌍은 {{pairs}} 위치에 결합. JSON 입출력 규약(TRANSLATION_IO_INSTRUCTIONS)은
+    // 엔진 고정 프로토콜.
+    const combined = composeMediaPrompt(instruction, payload, lorebookText, pairsText);
     if (profile.kind === "text") {
       const r = await this.plugin.ai.generate({
         profileId: profile.id,

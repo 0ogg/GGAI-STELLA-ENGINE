@@ -41,6 +41,8 @@ export async function applyRawRegexToGeneration(
   text: string
 ): Promise<string> {
   if (!text) return text;
+  // 정규식 후처리 확장이 꺼져 있으면 저장 원문 치환도 하지 않는다(완전 비활성화).
+  if (!plugin.isExtensionEnabled("stella:regex")) return text;
   try {
     const { item, substitute } = await resolveRegexContext(plugin, sessionFile);
     const stellaId = item?.scenario.data?.extensions?.stella?.id;
@@ -76,6 +78,8 @@ export async function createExtensionRegexApplier(
   target: RegexExtensionTarget
 ): Promise<((text: string) => string) | null> {
   try {
+    // 정규식 후처리 확장이 꺼져 있으면 후가공을 하지 않는다(완전 비활성화).
+    if (!plugin.isExtensionEnabled("stella:regex")) return null;
     const scripts = (plugin.data.extensionRegex?.[target] ?? []).filter(
       (s) => !s.disabled
     );

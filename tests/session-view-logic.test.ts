@@ -3286,3 +3286,110 @@ function regexScript(overrides: Partial<RegexScript>): RegexScript {
   assert.deepEqual(parseLorebookSelectionResponse(" 2, 5]", 5), [2, 5]);
   assert.deepEqual(parseLorebookSelectionResponse("3", 5), [3]);
 }
+
+// ─── 집필 프로 — 한→영 변환 프로토콜 (util/pro-convert) ───
+{
+  const {
+    buildProSpliceRequest,
+    assembleProConversion,
+    sliceStyleTail,
+  } = require("../src/util/pro-convert") as typeof import("../src/util/pro-convert");
+
+  // 요청 조립 — 문체 꼬리는 context, 각 op 의 한국어 문단은 위치 id 의 write.
+  const req = buildProSpliceRequest(
+    ["첫 문단.\n\n둘째 문단.", "고친 문단."],
+    "English tail one.\nEnglish tail two."
+  );
+  assert.deepEqual(
+    req.segments.map((s) => [s.id, s.role]),
+    [
+      ["ctx1", "context"],
+      ["ctx2", "context"],
+      ["w1_1", "write"],
+      ["w1_2", "write"],
+      ["w2_1", "write"],
+    ]
+  );
+  assert.deepEqual(req.perOp[0].writeIds, ["w1_1", "w1_2"]);
+  assert.deepEqual(req.perOp[1].writeIds, ["w2_1"]);
+
+  // 접합 — 한국어 구분자 구조 그대로, 짝은 문서 순서. 내부 줄바꿈은 공백으로 접는다.
+  const byId = new Map([
+    ["w1_1", "First paragraph."],
+    ["w1_2", "Second\nparagraph."],
+    ["w2_1", "Revised paragraph."],
+  ]);
+  const ok = assembleProConversion(req.perOp[0], byId);
+  assert.equal(ok.ok, true);
+  assert.equal(ok.englishText, "First paragraph.\n\nSecond paragraph.");
+  assert.deepEqual(ok.pairs, [
+    { en: "First paragraph.", ko: "첫 문단." },
+    { en: "Second paragraph.", ko: "둘째 문단." },
+  ]);
+  const ok2 = assembleProConversion(req.perOp[1], byId);
+  assert.equal(ok2.ok, true);
+  assert.equal(ok2.englishText, "Revised paragraph.");
+
+  // 누락 응답 = 그 op 전체 실패 (부분 접합 금지 — 원고 어긋남 방지).
+  const missing = assembleProConversion(
+    req.perOp[0],
+    new Map([["w1_1", "Only one."]])
+  );
+  assert.equal(missing.ok, false);
+  assert.equal(missing.englishText, "");
+  assert.equal(missing.pairs.length, 0);
+
+  // 문체 꼬리 자르기 — 잘린 앞쪽 부분 문단은 버린다(문단 경계 정렬).
+  assert.equal(sliceStyleTail("short", 100), "short");
+  assert.equal(sliceStyleTail("aaa\nbbb\nccc", 7), "ccc");
+  assert.equal(sliceStyleTail("abcdef", 0), "");
+}
+
+// ─── 집필 프로 — 문체 예시 쌍 수집/포맷 (util/pro-convert) ───
+{
+  const {
+    collectStylePairs,
+    formatStylePairs,
+  } = require("../src/util/pro-convert") as typeof import("../src/util/pro-convert");
+  const { hashText } = require("../src/util/translate-paragraphs") as typeof import("../src/util/translate-paragraphs");
+  const { createEmptySessionTranslations } = require("../src/types/media") as typeof import("../src/types/media");
+
+  const baseline = "Alpha en.\nBeta en.\nGamma en.";
+  const tr = createEmptySessionTranslations();
+  const put = (en: string, ko: string, kind: string) => {
+    const hash = hashText(en);
+    tr.paragraphs[hash] = {
+      source: en,
+      activeVariantId: "v1",
+      variants: {
+        v1: {
+          id: "v1", kind: kind as any, sourceHash: hash, text: ko,
+          createdAt: 0, updatedAt: 0,
+        },
+      },
+    };
+  };
+  put("Alpha en.", "알파 한국어.", "authored");
+  put("Beta en.", "베타 기계번역.", "ai-translation"); // authored 아님 — 제외
+  put("Gamma en.", "감마 한국어.", "authored");
+
+  // 끝에서부터 authored 만, 반환은 문서 순서.
+  assert.deepEqual(collectStylePairs(baseline, tr, 5), [
+    { en: "Alpha en.", ko: "알파 한국어." },
+    { en: "Gamma en.", ko: "감마 한국어." },
+  ]);
+  // max 는 최근(뒤쪽) 우선.
+  assert.deepEqual(collectStylePairs(baseline, tr, 1), [
+    { en: "Gamma en.", ko: "감마 한국어." },
+  ]);
+  assert.deepEqual(collectStylePairs(baseline, tr, 0), []);
+
+  // 포맷 — 빈 쌍은 빈 문자열(첨부 없음), 방향별 안내 한 줄.
+  assert.equal(formatStylePairs([], "koToEn"), "");
+  const block = formatStylePairs(
+    [{ en: "Gamma en.", ko: "감마 한국어." }],
+    "enToKo"
+  );
+  assert.ok(block.includes('"ko":"감마 한국어."'));
+  assert.ok(block.includes("Korean voice"));
+}

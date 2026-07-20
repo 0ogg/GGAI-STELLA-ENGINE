@@ -39,6 +39,7 @@ import {
   type GroupSpeakerCandidate,
 } from "../util/group-speaker";
 import { planSessionRequest } from "../util/build-session-context";
+import { presetToGenerationOverride } from "../types/preset";
 import { applyRawRegexToGeneration } from "../util/session-regex";
 import {
   buildChatMessages,
@@ -294,6 +295,10 @@ export class ChatSessionView extends ItemView {
         void this.refreshMacroContext().then(() => this.renderMessages());
       })
     );
+    // 확장 켜기/끄기 → 번역/삽화 버튼 노출을 즉시 반영.
+    this.registerEvent(
+      this.store.on("extensions-changed", () => this.updateToolbar())
+    );
     // 그룹 멤버 변경 (초대/내보내기) — 발화자 후보/라벨 재료 갱신.
     this.registerEvent(
       this.store.on("groups-changed", () => {
@@ -482,6 +487,8 @@ export class ChatSessionView extends ItemView {
    * 전송본은 불변(편집 진입 시 raw 로 스왑되는 구조라 편집에도 안전).
    */
   private displayRegexText(text: string, index: number): string {
+    // 정규식 후처리 확장이 꺼져 있으면 표시 치환도 하지 않는다(완전 비활성화).
+    if (!this.plugin.isExtensionEnabled("stella:regex")) return text;
     const scripts = this.displayRegexScripts();
     const msg = this.messages[index];
     if (scripts.length === 0 || !msg || !text) return text;
@@ -1334,8 +1341,12 @@ export class ChatSessionView extends ItemView {
       getDeepestLatestDescendant(this.session, cur.id)?.id !== cur.id;
     if (this.jumpEndBtn) this.jumpEndBtn.disabled = generating || !hasDeeper;
 
+    // 확장이 꺼져 있으면 번역/삽화 버튼을 통째로 숨긴다(완전 비활성화).
+    const transExtOn = this.plugin.isExtensionEnabled("stella:translation");
+    const illusExtOn = this.plugin.isExtensionEnabled("stella:illustration");
     const t = this.session.meta.translation;
     if (this.translateBtn) {
+      this.translateBtn.toggleClass("is-hidden", !transExtOn);
       this.translateBtn.disabled =
         generating || this.translating || t?.enabled !== true;
       this.translateBtn.toggleClass("is-auto-on", t?.auto === true);
@@ -1343,6 +1354,7 @@ export class ChatSessionView extends ItemView {
     }
     const i = this.session.meta.illustration;
     if (this.illustrationBtn) {
+      this.illustrationBtn.toggleClass("is-hidden", !illusExtOn);
       this.illustrationBtn.disabled =
         generating || this.illustrating || i?.enabled !== true;
       this.illustrationBtn.toggleClass("is-auto-on", i?.auto === true);
@@ -2246,10 +2258,16 @@ export class ChatSessionView extends ItemView {
     }
 
     const sessionFile = this.sessionFile;
+    // 프리셋 랜덤 순환 — 소설 세션창과 같은 규칙. 값만 이 생성 1회의 전송에 얹고
+    // 활성 설정/세션/디테일 UI 는 건드리지 않는다.
+    const rotationPreset = await this.plugin.pickRotationPreset();
     const plan = await planSessionRequest(this.plugin, sessionFile, {
       leafId: parentId,
       excludeTailAssistant: opts?.replaceFrom != null,
       speakerId: opts?.speakerId,
+      settingsOverride: rotationPreset
+        ? presetToGenerationOverride(rotationPreset)
+        : undefined,
     });
     if ("error" in plan) {
       new Notice(plan.error);

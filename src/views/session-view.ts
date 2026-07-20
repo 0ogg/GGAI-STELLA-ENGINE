@@ -6,6 +6,7 @@ import {
 } from "../constants";
 import type StellaEnginePlugin from "../main";
 import { AIService, type GenerationProfileLite } from "../services/ai-service";
+import type { ProSpliceOp } from "../services/pro-service";
 import { StellaStore, type SessionChangeDetail } from "../state/store";
 import type {
   Patch,
@@ -141,6 +142,9 @@ export interface SessionViewState {
 }
 
 const IDLE_COMMIT_MS = 1500;
+
+/** 집필 프로 — 초고/문단 수정이 멈춘 뒤 영어판 반영(집필 변환)까지의 대기. */
+const PRO_CONVERT_IDLE_MS = 3000;
 /** 일괄 번역이 이 분량을 넘으면 실행 전 확인 다이얼로그 (실수로 전체 텍스트 전송 방지). */
 const TRANSLATE_CONFIRM_PARAGRAPHS = 6;
 const TRANSLATE_CONFIRM_CHARS = 2000;
@@ -292,6 +296,20 @@ export class SessionView extends ItemView {
   private translationEditEl: HTMLElement | null = null;
   /** 번역 편집 커밋 디바운스 타이머 (편집 영역 전체 공용). */
   private translationCommitTimer: number | null = null;
+
+  // ── 집필 프로(PRO) 대기 문단 모델 — proWritingMode() 서브클래스 전용 ──
+  /** 번역 뷰 끝의 이어쓰기(초고) 영역 — 아직 영어판에 없는 한국어. */
+  private proPendingEl: HTMLElement | null = null;
+  /** 이어쓰기 영역 텍스트 (재렌더 생존). */
+  private proPendingDraft = "";
+  private proConvertTimer: number | null = null;
+  /** 진행 중 변환 — flush 가 완료를 기다렸다가 잔여분을 이어 변환한다. */
+  private proConvertPromise: Promise<boolean> | null = null;
+  /** 변환 중 잠근 요소들 — 성공/실패 시 해제. */
+  private proLockedBlockEls: HTMLElement[] = [];
+  private proLockedTailSpan: HTMLElement | null = null;
+  /** 잠근 초고 프리픽스 길이 — 재렌더로 잠금 DOM 이 사라져도 remainder 계산 가능. */
+  private proInFlightPrefixLen = 0;
   /** 번역 실행 중 — 중복 실행 방지 + 버튼 busy 표시. */
   private translating = false;
   /**
@@ -368,7 +386,8 @@ export class SessionView extends ItemView {
     if (document.visibilityState === "visible") void this.handleExternalChange();
   };
 
-  private plugin: StellaEnginePlugin;
+  // 집필 프로 뷰(ProSessionView)가 상속해 쓰므로 protected — 소설 뷰 내부 규약은 동일.
+  protected plugin: StellaEnginePlugin;
   private store: StellaStore;
   private ai: AIService;
 
@@ -460,6 +479,10 @@ export class SessionView extends ItemView {
    */
   async flushPendingEdits(): Promise<void> {
     await this.commitPending({ force: true });
+    // 집필 프로 — 대기 초고/문단을 영어판에 반영 (소설 뷰는 no-op). 미리보기 =
+    // 전송본 불변식에 초고도 포함되어야 하므로 여기서 함께 flush 한다. 실패해도
+    // 여기서는 막지 않는다(호출자 다수) — 생성 시작 차단은 handleContinue 몫.
+    if (this.proWritingMode()) await this.runProConvert(true);
   }
 
   /**
@@ -514,7 +537,17 @@ export class SessionView extends ItemView {
       }
       case "toggle-translation":
       case "batch-translate":
-        return this.session.meta.translation?.enabled === true;
+        return (
+          this.plugin.isExtensionEnabled("stella:translation") &&
+          this.session.meta.translation?.enabled === true
+        );
+      case "illustrate":
+        return this.plugin.isExtensionEnabled("stella:illustration");
+      case "gallery":
+        return (
+          this.plugin.isExtensionEnabled("stella:illustration") ||
+          Object.keys(this.illustrations?.nodes ?? {}).length > 0
+        );
       default:
         return true;
     }
@@ -615,6 +648,13 @@ export class SessionView extends ItemView {
     this.registerEvent(
       this.store.on("user-profile-changed", () => {
         void this.handleMacroContextChanged();
+      })
+    );
+    // 확장 켜기/끄기 → 번역/삽화 버튼 노출과 인라인 삽화 표시를 즉시 반영.
+    this.registerEvent(
+      this.store.on("extensions-changed", () => {
+        this.updateViewToggleBtn();
+        void this.refreshIllustrations();
       })
     );
     // 요약 앵커 변경 → 본문 {{summary}} 매크로 표시 갱신.
@@ -976,6 +1016,11 @@ export class SessionView extends ItemView {
       active: true,
       state: { stellaPanel: this.stellaPanel },
     });
+  }
+
+  /** 집필 프로 뷰(ProSessionView)가 true 로 오버라이드 — 대기 문단(pending) 모델 게이트. */
+  protected proWritingMode(): boolean {
+    return false;
   }
 
   /** 로비(대시보드)로 — 미저장 본문 편집을 커밋한 뒤 같은 탭에서 전환. */
@@ -2398,6 +2443,12 @@ export class SessionView extends ItemView {
   private async handleContinue(): Promise<void> {
     if (!this.session || this.generation) return;
     await this.commitPending({ force: true });
+    // 집필 프로 — 대기 초고를 먼저 영어판에 반영. 실패하면 생성을 시작하지 않는다
+    // (초고가 빠진 채 이어쓰면 스토리가 어긋난다). 초고는 대기 상태로 남는다.
+    if (this.proWritingMode() && !(await this.runProConvert(true))) {
+      new Notice("초고 변환에 실패해 생성을 시작하지 않았습니다.");
+      return;
+    }
     // 타이핑을 멈출 때마다 잘게 쌓인 유저 작성 노드를 생성 직전 하나로 합친다
     // (본문은 동일, 분기 트리만 정리). 합쳤으면 저장.
     if (mergeTrailingUserWrites(this.session)) {
@@ -3179,10 +3230,16 @@ export class SessionView extends ItemView {
   /** 뷰 헤더 액션 뷰어 도구 상태 — 원문↔번역 토글 + 미번역 일괄 번역 등. */
   private updateViewToggleBtn(): void {
     const splitMode = this.outputMode === "split-h";
+    // 확장이 꺼져 있으면 미디어 트리거 버튼(번역/삽화)을 통째로 숨긴다(완전 비활성화).
+    const transExtOn = this.plugin.isExtensionEnabled("stella:translation");
+    const illusExtOn = this.plugin.isExtensionEnabled("stella:illustration");
+    this.translateBtn?.toggleClass("is-hidden", !transExtOn);
+    this.illustrationBtn?.toggleClass("is-hidden", !illusExtOn);
     // 번역 4버튼(전환/일괄/되돌리기/다시적용)은 번역 사용(enabled) 여부로만 노출을
     // 결정한다 — 원문/번역 보기 전환 같은 일시적 상태로는 뜨고 사라지지 않는다
-    // (버튼 구성이 계속 바뀌는 걸 방지).
-    const enabled = this.session?.meta.translation?.enabled === true;
+    // (버튼 구성이 계속 바뀌는 걸 방지). 확장이 꺼져 있으면 무조건 숨긴다.
+    const enabled =
+      transExtOn && this.session?.meta.translation?.enabled === true;
 
     if (this.viewToggleBtn) {
       this.viewToggleBtn.toggleClass("is-hidden", !enabled);
@@ -3256,11 +3313,12 @@ export class SessionView extends ItemView {
     }
     if (this.galleryToolBtn) {
       // 삽화가 꺼져 있어도 이미 생성된 이미지가 있으면 갤러리는 계속 보여준다.
+      // 단 삽화 확장 자체가 꺼져 있으면 갤러리 버튼도 숨긴다(완전 비활성화).
       const illustrationEnabled = this.session?.meta.illustration?.enabled === true;
       const hasImages = Object.keys(this.illustrations?.nodes ?? {}).length > 0;
       this.galleryToolBtn.toggleClass(
         "is-hidden",
-        !illustrationEnabled && !hasImages
+        !illusExtOn || (!illustrationEnabled && !hasImages)
       );
     }
   }
@@ -3445,7 +3503,10 @@ export class SessionView extends ItemView {
     editEl.setAttr("contenteditable", "plaintext-only");
     editEl.setAttr("spellcheck", "false");
     this.translationEditEl = editEl;
-    editEl.addEventListener("input", () => this.scheduleTranslationCommit());
+    editEl.addEventListener("input", () => {
+      this.scheduleTranslationCommit();
+      if (this.proWritingMode()) this.onProPendingInput();
+    });
     editEl.addEventListener("blur", () => this.flushTranslationEdits());
 
     let docOffset = 0;
@@ -3476,6 +3537,10 @@ export class SessionView extends ItemView {
         attr: { "data-paragraph-hash": token.hash },
       });
       this.appendMarkdownRun(span, baseline, "", false);
+      // 집필 프로 — 직접 수정돼 영어판 반영을 기다리는 문단 표시(불변식: active=user-edit).
+      if (this.proWritingMode() && translated && active!.kind === "user-edit") {
+        span.addClass("ggai-tr-propending-block");
+      }
 
       const block = {
         hash: token.hash,
@@ -3488,6 +3553,18 @@ export class SessionView extends ItemView {
       docOffset += token.source.length;
       this.translationBlocks.push(block);
       // 개별 문단 재번역은 문단 재생성 패널(문단 선택 모드 → 재번역 버튼)로 통합됐다.
+    }
+    // 집필 프로 — 본문 끝 이어쓰기(초고) 영역 + 남은 대기분 반영 재예약(자기 회복).
+    if (this.proWritingMode()) {
+      this.renderProPendingRegion(editEl);
+      if (
+        this.proPendingDraft.trim() !== "" ||
+        this.translationBlocks.some((b) => this.isProPendingBlock(b))
+      ) {
+        this.scheduleProConvert();
+      }
+    } else {
+      this.proPendingEl = null;
     }
     // 인라인 삽화(번역 패널) — 스크롤 복원 전에 꽂아 높이를 이전과 같게.
     this.renderInlineIllustrations();
@@ -3502,6 +3579,7 @@ export class SessionView extends ItemView {
     }
     this.translationBlocks = [];
     this.translationEditEl = null;
+    this.proPendingEl = null;
   }
 
   /** 편집 영역 입력 → 디바운스 후 바뀐 문단만 커밋. */
@@ -3559,7 +3637,299 @@ export class SessionView extends ItemView {
     if (changed) {
       void this.saveTranslationsSuppressed();
       this.updateViewToggleBtn();
+      // 집필 프로 — 방금 커밋된 수정 문단을 대기 표시하고 영어판 반영을 예약.
+      if (this.proWritingMode()) {
+        for (const block of this.translationBlocks) {
+          if (this.isProPendingBlock(block)) {
+            block.el.addClass("ggai-tr-propending-block");
+          }
+        }
+        this.scheduleProConvert();
+      }
     }
+  }
+
+  // ─── 집필 프로(PRO) — 대기 문단(pending) 모델 (proWritingMode() 전용) ───
+  //
+  // 저자는 한국어 보기 본문에서 직접 쓴다/고친다. 아직 영어판에 없는 글은 "대기"로
+  // 표시되고, 손을 멈추면(디바운스) plugin.pro.convertAndSplice 가 영어판에 접합한다.
+  // IME 안전 원칙: 커서가 있는 문단/초고 줄은 강제 flush 외엔 건드리지 않고,
+  // 변환 중인 구간은 contenteditable=false 로 잠가 경합 자체를 없앤다.
+
+  /** 번역 뷰 끝의 이어쓰기(초고) 영역 — 여기 쓴 한국어가 잠시 후 영어판으로 확정된다. */
+  private renderProPendingRegion(editEl: HTMLElement): void {
+    const pending = editEl.createEl("span", { cls: "ggai-tr-propending" });
+    pending.setText(this.proPendingDraft);
+    this.proPendingEl = pending;
+  }
+
+  /** editEl input 위임 — 초고 영역 텍스트 변화를 draft 에 반영하고 변환을 예약. */
+  private onProPendingInput(): void {
+    const pending = this.proPendingEl;
+    if (!pending) return;
+    const text = pending.textContent ?? "";
+    if (text !== this.proPendingDraft) {
+      this.proPendingDraft = text;
+      this.scheduleProConvert();
+    }
+  }
+
+  private scheduleProConvert(): void {
+    if (!this.proWritingMode()) return;
+    if (this.proConvertTimer != null) window.clearTimeout(this.proConvertTimer);
+    this.proConvertTimer = window.setTimeout(() => {
+      this.proConvertTimer = null;
+      void this.runProConvert(false);
+    }, PRO_CONVERT_IDLE_MS);
+  }
+
+  /**
+   * 영어판 반영 대기 문단 판별 — active 번역 variant 가 user-edit 인 문단(데이터
+   * 불변식이라 재렌더를 넘어 생존). 반영이 끝나면 새 영어 해시의 active 는
+   * authored 가 되므로 자동으로 대기에서 벗어난다.
+   */
+  private isProPendingBlock(block: { hash: string }): boolean {
+    const entry = this.translations?.paragraphs[block.hash];
+    const active = entry ? entry.variants[entry.activeVariantId] : undefined;
+    return active?.kind === "user-edit" && active.text.trim() !== "";
+  }
+
+  private selectionStartWithin(el: HTMLElement): boolean {
+    const sel = document.getSelection();
+    return (
+      !!sel && sel.rangeCount > 0 && el.contains(sel.getRangeAt(0).startContainer)
+    );
+  }
+
+  private caretOffsetWithin(el: HTMLElement): number {
+    const sel = document.getSelection();
+    if (!sel || sel.rangeCount === 0) return 0;
+    const range = sel.getRangeAt(0);
+    const pre = range.cloneRange();
+    pre.selectNodeContents(el);
+    pre.setEnd(range.startContainer, range.startOffset);
+    return pre.toString().length;
+  }
+
+  /**
+   * 이번에 영어판에 반영할 연산 수집.
+   *  - 수정 문단: 대기 블록 전부 (force 아니면 커서가 있는 문단은 다음 기회로)
+   *  - 초고: 영역 전체 (force 아니면 커서가 있는 줄 앞까지의 완성 문단만)
+   */
+  private collectProOps(force: boolean): {
+    ops: ProSpliceOp[];
+    blockEls: HTMLElement[];
+    tailPrefixLen: number;
+  } {
+    const ops: ProSpliceOp[] = [];
+    const blockEls: HTMLElement[] = [];
+    for (const block of this.translationBlocks) {
+      if (!this.isProPendingBlock(block)) continue;
+      if (!force && this.selectionStartWithin(block.el)) continue;
+      const entry = this.translations!.paragraphs[block.hash];
+      const active = entry.variants[entry.activeVariantId];
+      ops.push({
+        from: block.offset,
+        to: block.offset + block.source.length,
+        ko: active.text,
+        expect: block.source,
+      });
+      blockEls.push(block.el);
+    }
+    let tailPrefixLen = 0;
+    const draft = this.proPendingEl?.textContent ?? this.proPendingDraft;
+    if (draft.trim() !== "") {
+      let prefix = draft;
+      if (
+        !force &&
+        this.proPendingEl &&
+        this.selectionStartWithin(this.proPendingEl)
+      ) {
+        const caret = this.caretOffsetWithin(this.proPendingEl);
+        const cut = draft.lastIndexOf("\n", Math.max(0, caret - 1));
+        prefix = cut >= 0 ? draft.slice(0, cut + 1) : "";
+      }
+      if (prefix.trim() !== "") {
+        tailPrefixLen = prefix.length;
+        ops.push({
+          from: this.baselineText.length,
+          to: this.baselineText.length,
+          ko: prefix,
+        });
+      }
+    }
+    return { ops, blockEls, tailPrefixLen };
+  }
+
+  /** 변환 대상 잠금 — 수정 문단은 편집 불가, 초고 프리픽스는 비편집 span 으로 감싼다. */
+  private lockProOps(blockEls: HTMLElement[], tailPrefixLen: number): void {
+    for (const el of blockEls) {
+      el.setAttr("contenteditable", "false");
+      el.addClass("is-pro-converting");
+      this.proLockedBlockEls.push(el);
+    }
+    this.proInFlightPrefixLen = tailPrefixLen;
+    const pending = this.proPendingEl;
+    if (!pending || tailPrefixLen <= 0) return;
+    pending.normalize();
+    const first = pending.firstChild;
+    if (!first || first.nodeType !== Node.TEXT_NODE) return;
+    const textNode = first as Text;
+    // splitText 는 뒤쪽을 새 노드로 떼어낸다 — 커서가 뒤쪽이면 브라우저가 따라간다.
+    if (textNode.length > tailPrefixLen) textNode.splitText(tailPrefixLen);
+    const wrap = document.createElement("span");
+    wrap.className = "ggai-tr-propending-lock";
+    wrap.setAttribute("contenteditable", "false");
+    pending.insertBefore(wrap, textNode);
+    wrap.appendChild(textNode);
+    this.proLockedTailSpan = wrap;
+  }
+
+  private unlockProOps(): void {
+    for (const el of this.proLockedBlockEls) {
+      el.removeAttribute("contenteditable");
+      el.removeClass("is-pro-converting");
+    }
+    this.proLockedBlockEls = [];
+    const wrap = this.proLockedTailSpan;
+    if (wrap?.parentElement) {
+      const parent = wrap.parentElement;
+      while (wrap.firstChild) parent.insertBefore(wrap.firstChild, wrap);
+      wrap.remove();
+      parent.normalize();
+    }
+    this.proLockedTailSpan = null;
+    this.proInFlightPrefixLen = 0;
+  }
+
+  /**
+   * 대기분을 영어판에 반영. force = 커서 문단까지 전부(생성/미리보기 직전 flush).
+   * 반환 false = 실패(초고는 대기 상태로 보존됨). 진행 중이면 완료를 기다렸다가
+   * force 일 때만 잔여분을 이어서 반영한다.
+   */
+  private async runProConvert(force: boolean): Promise<boolean> {
+    if (!this.proWritingMode() || !this.session || !this.sessionFile) return true;
+    if (this.proConvertPromise) {
+      const prev = await this.proConvertPromise;
+      if (!force) return prev;
+    }
+    if (this.generation) {
+      // 생성 중엔 본문 소유권이 생성 플로우에 있다 — 끝난 뒤로 미룬다.
+      if (!force) this.scheduleProConvert();
+      return !force;
+    }
+    if (
+      !force &&
+      this.deferWhileComposing("pro-convert", () => void this.runProConvert(false))
+    ) {
+      return true;
+    }
+    // DOM 편집을 variant 로 확정해야 수집 재료(active variant)가 최신이 된다.
+    this.flushTranslationEdits();
+    const { ops, blockEls, tailPrefixLen } = this.collectProOps(force);
+    if (ops.length === 0) return true;
+    const run = this.performProConvert(ops, blockEls, tailPrefixLen);
+    this.proConvertPromise = run;
+    return await run.finally(() => {
+      this.proConvertPromise = null;
+    });
+  }
+
+  private async performProConvert(
+    ops: ProSpliceOp[],
+    blockEls: HTMLElement[],
+    tailPrefixLen: number
+  ): Promise<boolean> {
+    if (!this.session || !this.sessionFile) return false;
+    this.lockProOps(blockEls, tailPrefixLen);
+    try {
+      const r = await this.plugin.pro.convertAndSplice(this.sessionFile, ops, {
+        origin: this.storeOrigin,
+      });
+      if (!r.ok) {
+        this.unlockProOps();
+        if (!r.cancelled) {
+          new Notice(
+            "집필 변환 실패: " +
+              (r.errors[0] ?? "알 수 없는 오류") +
+              " — 초고는 대기 상태로 남아 있습니다."
+          );
+        }
+        return false;
+      }
+      this.applyProConversionResult();
+      return true;
+    } catch (err) {
+      this.unlockProOps();
+      new Notice(
+        "집필 변환 실패: " + (err instanceof Error ? err.message : String(err))
+      );
+      return false;
+    }
+  }
+
+  /**
+   * 변환 성공 반영 — 서비스가 세션/번역(store 캐시 공유 객체)을 이미 갱신·저장했다
+   * (origin = 이 뷰라 외부 이벤트로는 안 돌아온다). 여기서 baseline 재계산 + 재렌더
+   * + 남은 초고/커서 복원까지 마친다 (afterLeafChange 의 로컬 재구성 패턴).
+   */
+  private applyProConversionResult(): void {
+    if (!this.session) return;
+    // 남은 초고와 커서 위치 회수 — 잠금 span 이 재렌더로 사라졌으면 프리픽스 길이로 폴백.
+    const pending = this.proPendingEl;
+    let remainder = "";
+    let caretInRemainder: number | null = null;
+    if (pending) {
+      const lockedLen =
+        this.proLockedTailSpan?.textContent?.length ?? this.proInFlightPrefixLen;
+      const full = pending.textContent ?? "";
+      remainder = full.slice(Math.min(lockedLen, full.length));
+      if (this.selectionStartWithin(pending)) {
+        caretInRemainder = Math.max(
+          0,
+          this.caretOffsetWithin(pending) - lockedLen
+        );
+      }
+    } else {
+      remainder = this.proPendingDraft.slice(this.proInFlightPrefixLen);
+    }
+    // 확정된 프리픽스가 개행으로 끝났으니 remainder 선두의 남은 개행은 정리한다.
+    remainder = remainder.replace(/^\n+/, "");
+    this.proPendingDraft = remainder;
+    this.unlockProOps();
+
+    this.baselineSpans = buildSpans(this.session);
+    this.baselineText = spansToText(this.baselineSpans);
+    this.refreshDisplayBaseline();
+    this.suppressEvents = true;
+    this.preserveReadingPosition(() => this.renderBodySpans());
+    this.suppressEvents = false;
+    if (this.translationViewActive || this.outputMode === "split-h") {
+      this.renderTranslationBlocks();
+      if (caretInRemainder != null) this.setCaretInProPending(caretInRemainder);
+    }
+    this.updateToolbar();
+    this.updateViewToggleBtn();
+  }
+
+  /** 재렌더된 초고 영역 안으로 커서 복원 (이어 쓰던 흐름 유지). */
+  private setCaretInProPending(offset: number): void {
+    const pending = this.proPendingEl;
+    if (!pending) return;
+    const sel = window.getSelection();
+    if (!sel) return;
+    pending.normalize();
+    const range = document.createRange();
+    const first = pending.firstChild;
+    if (first && first.nodeType === Node.TEXT_NODE) {
+      range.setStart(first, Math.min(offset, (first as Text).length));
+    } else {
+      range.selectNodeContents(pending);
+      range.collapse(false);
+    }
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
   }
 
   /**
@@ -3955,6 +4325,7 @@ export class SessionView extends ItemView {
   /** 인라인 삽화 앵커 계산 (인라인 표시 조건을 모두 만족할 때만, 아니면 빈 배열). */
   private inlineAnchorsForDisplay(): IllustrationAnchor[] {
     if (!this.session || !this.sessionFile || !this.illustrations) return [];
+    if (!this.plugin.isExtensionEnabled("stella:illustration")) return [];
     const ill = this.session.meta.illustration;
     if (ill?.enabled !== true) return [];
     if (resolveIllustrationOutput(ill.output) !== "inline") return [];

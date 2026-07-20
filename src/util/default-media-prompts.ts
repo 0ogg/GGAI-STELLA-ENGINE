@@ -16,7 +16,9 @@ export type MediaPromptBucket =
   | "phoneText"
   | "phoneExtra"
   | "phoneSns"
-  | "phoneTube";
+  | "phoneTube"
+  | "authorNote"
+  | "proConvert";
 
 /**
  * 삭제 불가능한 기본(내장) 미디어 프롬프트.
@@ -317,6 +319,40 @@ Whatever the broadcast shows — sex, violence, crime, threats, a stream the per
 
 ## VIEWERS COUNT
 - Estimate the live viewer count as a natural drift from the previous count — it rises when the scene gets dramatic or clippable, sinks when it drags. No teleporting.`,
+    },
+  ],
+
+  // 작가노트 프레이밍 — 작가노트 원문을 {{MAIN}} 자리에 넣어 감싼다. 부연 설명을
+  // 붙여 더 편하게 상황을 유도하는 용도. 선택 안 함(없음)이 기본.
+  authorNote: [
+    {
+      id: "builtin:authorNote:1",
+      title: "디렉션",
+      prompt:
+        "<direction>\n" +
+        "- Resume the story based on the director's instructions below.\n" +
+        "- The director only provides drafts; refine them into natural prose instead of directly quoting the sentences.\n" +
+        "- Creatively construct and fill in any parts lacking persuasive causality so that the narrative suggested by the director unfolds smoothly.\n\n" +
+        "[Direction(If blank, develop the story as you see fit): {{MAIN}}]\n" +
+        "</direction>",
+    },
+  ],
+
+  proConvert: [
+    {
+      id: "builtin:proConvert:1",
+      title: "Default",
+      prompt:
+        "{{main}}\n\n" +
+        "작품 정보\n" +
+        "{{lorebook}}\n\n" +
+        "You are the author's bilingual co-writer on an English-language novel.\n" +
+        "The context segments are the manuscript so far; the write segments are what the author wants to happen next, drafted in Korean.\n" +
+        "Compose each write segment as the next English paragraph of this manuscript:\n" +
+        "- Continue the narrative voice, tense, register, and pacing of the context exactly — it must read as the same author's prose, never as a translation.\n" +
+        "- Preserve the author's meaning, events, and nuance. Do not add new events, drop details, or reinterpret intent.\n" +
+        "- Keep character names and terminology consistent with the manuscript and the reference notes.\n" +
+        "Conversion: ```json\n",
     },
   ],
 

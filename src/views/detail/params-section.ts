@@ -189,7 +189,11 @@ export class ParamsSection {
       unset: !isSet,
       format: (v) => formatValue(v, effSpec),
       normalize: (raw) => normalizeParamValue(raw, effSpec),
-      onChange: (v) => this.scheduleSave(spec.key, v),
+      onChange: (v) => {
+        this.scheduleSave(spec.key, v);
+        // 슬라이더를 직접 움직인 경우에만 — 프로필 상한 보정(위 재저장)은 제외.
+        void this.plugin.noteManualSettingChange();
+      },
       onCommit: () => this.flush(),
     });
   }

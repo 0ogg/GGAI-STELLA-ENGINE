@@ -7,6 +7,7 @@ import { getDefaultPrompts, isBuiltinMediaPrompt } from "../../util/default-medi
 import { TRANSLATION_IO_INSTRUCTIONS } from "../../util/translate-paragraphs";
 import { SUMMARY_IO_INSTRUCTIONS } from "../../util/summarize-session";
 import { PARAGRAPH_REGEN_IO_INSTRUCTIONS } from "../../util/paragraph-regen";
+import { PRO_CONVERT_IO_INSTRUCTIONS } from "../../util/pro-convert";
 import {
   PHONE_SNS_IO_INSTRUCTIONS,
   PHONE_TUBE_IO_INSTRUCTIONS,
@@ -24,7 +25,8 @@ export function usesBodyMacro(bucket: PromptBucket): boolean {
   return (
     bucket === "translation" ||
     bucket === "illustrationPromptGen" ||
-    bucket === "summary"
+    bucket === "summary" ||
+    bucket === "proConvert"
   );
 }
 
@@ -40,6 +42,7 @@ export function getBucketIoInstructions(bucket: PromptBucket): string | null {
   if (bucket === "paragraphRegen") return PARAGRAPH_REGEN_IO_INSTRUCTIONS;
   if (bucket === "phoneSns") return PHONE_SNS_IO_INSTRUCTIONS;
   if (bucket === "phoneTube") return PHONE_TUBE_IO_INSTRUCTIONS;
+  if (bucket === "proConvert") return PRO_CONVERT_IO_INSTRUCTIONS;
   return null;
 }
 
@@ -177,6 +180,13 @@ export interface MediaPromptPickerOptions {
   label: string;
   bucket: PromptBucket;
   activeId: string | undefined;
+  /** true 면 목록 맨 앞에 "없음" 버튼을 넣고, 아무 것도 안 골랐을 때 그것을 활성으로 둔다. */
+  allowNone?: boolean;
+  /** "없음" 버튼 라벨 (allowNone 일 때만). 생략 시 "없음". */
+  noneLabel?: string;
+  /** 편집/추가 모달의 프롬프트 입력란 아래에 붙일 안내(예: {{MAIN}} 사용법). */
+  macroHint?: string;
+  /** promptId 가 빈 문자열이면 "없음" 선택 (allowNone 일 때). */
   onSelect: (promptId: string) => void | Promise<void>;
   /** 프롬프트 라이브러리가 바뀌었을 때(추가/편집/기본값 복원) — 호출부가 자기 영역을 다시 그린다. */
   onChanged?: () => void;
@@ -195,9 +205,20 @@ export function renderMediaPromptPicker(opts: MediaPromptPickerOptions): void {
   const grid = block.createDiv({ cls: "ggai-preset-grid ggai-media-prompt-grid" });
   const prompts = getMediaPrompts(opts.plugin, opts.bucket);
 
-  // activeId 가 없으면 첫 기본 프롬프트를 "기본 선택"으로 표시 (사용자가 아직 아무 것도 고르지 않은 초기 상태)
-  const effectiveActive =
-    opts.activeId ?? getDefaultPrompts(opts.bucket as any)[0]?.id;
+  // allowNone 이면 아무 것도 안 고른 상태(빈 값)를 "없음"으로 그대로 두고,
+  // 아니면 activeId 가 없을 때 첫 기본 프롬프트를 기본 선택으로 표시한다.
+  const effectiveActive = opts.allowNone
+    ? opts.activeId || ""
+    : opts.activeId ?? getDefaultPrompts(opts.bucket as any)[0]?.id;
+
+  if (opts.allowNone) {
+    const noneBtn = grid.createEl("button", {
+      cls: "ggai-preset-btn",
+      text: opts.noneLabel ?? "없음",
+    });
+    if (!effectiveActive) noneBtn.addClass("is-active");
+    noneBtn.addEventListener("click", () => void opts.onSelect(""));
+  }
 
   for (const prompt of prompts) {
     const btn = grid.createEl("button", {
@@ -271,6 +292,7 @@ async function addMediaPrompt(opts: MediaPromptPickerOptions): Promise<void> {
     {
       bodyMacroHint: usesBodyMacro(opts.bucket),
       ioInstructions: getBucketIoInstructions(opts.bucket) ?? undefined,
+      macroHint: opts.macroHint,
     }
   );
   if (!result) return;
@@ -288,6 +310,7 @@ async function editMediaPrompt(
   const result = await PromptEditModal.open(opts.plugin, "프롬프트 편집", prompt, {
     bodyMacroHint: usesBodyMacro(opts.bucket),
     ioInstructions: getBucketIoInstructions(opts.bucket) ?? undefined,
+    macroHint: opts.macroHint,
   });
   if (!result) return;
   // builtin id 는 그대로 유지되어 override 로 저장된다 (없으면 추가, 있으면 교체).
@@ -336,7 +359,7 @@ export class PromptEditModal extends Modal {
     plugin: StellaEnginePlugin,
     title: string,
     initial: MediaPromptItem,
-    opts?: { bodyMacroHint?: boolean; ioInstructions?: string }
+    opts?: { bodyMacroHint?: boolean; ioInstructions?: string; macroHint?: string }
   ): Promise<MediaPromptItem | null> {
     return new Promise((resolve) => {
       new PromptEditModal(plugin, title, initial, resolve, opts).open();
@@ -348,7 +371,11 @@ export class PromptEditModal extends Modal {
     private readonly modalTitle: string,
     private readonly initial: MediaPromptItem,
     private readonly onResult: (value: MediaPromptItem | null) => void,
-    private readonly opts?: { bodyMacroHint?: boolean; ioInstructions?: string }
+    private readonly opts?: {
+      bodyMacroHint?: boolean;
+      ioInstructions?: string;
+      macroHint?: string;
+    }
   ) {
     super(plugin.app);
     this.titleValue = initial.title;
@@ -409,6 +436,9 @@ export class PromptEditModal extends Modal {
           "본문은 자동으로 맨 앞에 붙습니다. 지침 안에 {{main}} 을 쓰면 그 위치에 본문이, " +
           "{{lorebook}} 을 쓰면 그 위치에 로어북이 들어갑니다 (예: ({{main}}) → 괄호 안에 본문).",
       });
+    }
+    if (this.opts?.macroHint) {
+      field.createDiv({ cls: "ggai-media-hint", text: this.opts.macroHint });
     }
 
     const cancelBtn = footerMain.createEl("button", { cls: "ggai-btn", text: "취소" });

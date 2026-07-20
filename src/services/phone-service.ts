@@ -444,6 +444,8 @@ export class PhoneService {
   }
 
   private async tick(): Promise<void> {
+    // 폰 확장이 꺼져 있으면 배경 갱신도 멈춘다(완전 비활성화).
+    if (!this.plugin.isExtensionEnabled("stella:phone")) return;
     const t = this.plugin.data.phone?.triggers;
     const now = Date.now();
 

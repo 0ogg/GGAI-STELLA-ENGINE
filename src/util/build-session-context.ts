@@ -18,9 +18,30 @@ import {
 import { buildChatLog, buildChatMessages } from "./chat-messages";
 import type { StellaGroup } from "../types/group";
 import { applyMacros } from "./macros";
+import { getDefaultPrompts } from "./default-media-prompts";
+import type { MediaPromptItem } from "../types/preset";
 import { REGEX_PLACEMENT } from "../types/regex";
 import { getRegexedString } from "./regex-engine";
 import { collectRegexScripts } from "./regex-scripts";
+
+/**
+ * 작가노트 프레이밍 — 세션이 전용 프롬프트를 골랐으면 작가노트 원문을 그 프롬프트의
+ * {{MAIN}}({{main}}) 자리에 넣어 감싼다. 고르지 않았거나(없음) 못 찾으면 원문 그대로.
+ * 프롬프트가 선택돼 있으면 작가노트가 비어 있어도 프레임을 삽입한다(프레임 자체가
+ * "빈 경우 알아서 전개"를 지시하므로).
+ */
+function frameAuthorNote(
+  note: string | undefined,
+  templateId: string | undefined,
+  library: MediaPromptItem[] | undefined
+): string | undefined {
+  if (!templateId) return note;
+  const template =
+    library?.find((p) => p.id === templateId) ??
+    getDefaultPrompts("authorNote").find((p) => p.id === templateId);
+  if (!template) return note;
+  return template.prompt.replace(/\{\{\s*main\s*\}\}/gi, note ?? "");
+}
 
 /** 챗 세션 로그 — excludeTail 이면 끝의 assistant 메시지 1개 제외 (챗 재생성 전용). */
 function buildChatSessionLog(
@@ -506,7 +527,11 @@ export async function planSessionRequest(
             )
         : applyPromptRegex(buildSessionLog(parentSpans, session.meta.mode)),
     memory: session.meta.memory,
-    authorNote: session.meta.authorNote,
+    authorNote: frameAuthorNote(
+      session.meta.authorNote,
+      session.meta.authorNoteTemplateId,
+      plugin.data.mediaPrompts?.authorNote
+    ),
     summary: summaryContext || undefined,
     // {{idle_duration}} — 마지막 노드 이후 경과 (ST 호환, 실시간 채팅용).
     idleDuration:

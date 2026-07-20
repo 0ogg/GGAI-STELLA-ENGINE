@@ -15,7 +15,9 @@
 export type TranslationVariantKind =
   | "ai-translation"
   | "translation-regen"
-  | "user-edit";
+  | "user-edit"
+  /** 집필 프로 — 저자가 직접 쓴 한국어 원고 (한→영 변환의 원문, 왕복 번역 아님). */
+  | "authored";
 
 export interface TranslationVariant {
   id: string;

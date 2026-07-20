@@ -103,8 +103,10 @@ export class PromptsSection {
     this.setNaiFormat(await this.resolveEffectiveNai(settings.naiFormat));
     this.setContinueAnchor(settings.continueAnchor ?? false);
     this.resolveActive(settings.promptSetId);
-    // 활성 세트가 비었지만 list 가 있으면 첫 항목을 자동 활성화 (사용자에게 "비어있는" 화면 안 보이게).
-    if (!this.activePreset && this.promptList.length > 0) {
+    // 활성 세트가 아예 지정된 적 없으면(=신규) 첫 항목을 자동 활성화.
+    // 지정돼 있는데 목록에서 못 찾은 경우(세트 삭제/이름변경/레거시 필드)는 절대
+    // 덮어쓰지 않는다 — 사용자가 고른 프롬프트가 조용히 다른 세트로 바뀌던 원인.
+    if (!settings.promptSetId && this.promptList.length > 0) {
       const first = this.promptList[0];
       this.activePresetFile = first.presetFile;
       this.activePreset = first.preset;
@@ -733,6 +735,8 @@ export class PromptsSection {
     }
     this.activePresetFile = item.presetFile;
     this.activePreset = item.preset;
+    // 사용자가 프롬프트 세트를 직접 골랐다 — 프리셋 선택 해제 + 다음 1회 순환 skip.
+    await this.plugin.noteManualSettingChange();
     this.renderBody();
     this.refreshFoldBtn();
   }

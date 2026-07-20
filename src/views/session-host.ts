@@ -10,7 +10,11 @@
  */
 
 import type { View, Workspace, WorkspaceLeaf } from "obsidian";
-import { VIEW_TYPE_CHAT_SESSION, VIEW_TYPE_SESSION } from "../constants";
+import {
+  VIEW_TYPE_CHAT_SESSION,
+  VIEW_TYPE_PRO_SESSION,
+  VIEW_TYPE_SESSION,
+} from "../constants";
 
 /** 소설/챗 세션 뷰가 공통으로 제공해야 하는 인터페이스. */
 export interface SessionHostView extends View {
@@ -42,6 +46,7 @@ export function canRetargetSessionView(
 export const SESSION_HOST_VIEW_TYPES: readonly string[] = [
   VIEW_TYPE_SESSION,
   VIEW_TYPE_CHAT_SESSION,
+  VIEW_TYPE_PRO_SESSION,
 ];
 
 export function isSessionHostView(

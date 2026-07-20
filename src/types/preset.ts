@@ -35,6 +35,10 @@ export interface MediaPromptLibrary {
   phoneSns?: MediaPromptItem[];
   /** 스텔라 폰 — 스텔라튜브 시청자 채팅 (v2). */
   phoneTube?: MediaPromptItem[];
+  /** 작가노트 전용 프레이밍 프롬프트 — 작가노트를 {{MAIN}} 자리에 감싼다. */
+  authorNote?: MediaPromptItem[];
+  /** 집필 프로 — 한국어 입력을 영어판 문체를 이어받은 영어 문단으로 변환. */
+  proConvert?: MediaPromptItem[];
 }
 
 /**
@@ -158,6 +162,21 @@ export interface StellaPreset {
 }
 
 /** 활성 설정 — 세션 또는 PluginData.current 에 박히는 형태. */
+/**
+ * 집필 프로(PRO) 활성 설정 — 한→영 집필 변환 파이프라인.
+ * PRO 활성 환경의 "집필 프로" 패널에서만 노출·편집된다.
+ */
+export interface ProActiveSettings {
+  /** 집필 변환 모델 프로필. 미지정 시 기본 생성 프로필. */
+  modelProfileId?: string;
+  /** proConvert 버킷 프롬프트 id. 미지정 시 기본 프롬프트. */
+  promptId?: string;
+  /** 문체 참조로 첨부할 영어판 꼬리 글자 수. 미지정 시 기본값. */
+  styleTailChars?: number;
+  /** 양방향 변환에 예시로 첨부할 문단 쌍(내 한국어↔영어판) 수. 0 = 끄기. */
+  stylePairs?: number;
+}
+
 export interface ActiveSettings {
   modelProfileId?: string;
   params?: PromptPresetParams;
@@ -167,6 +186,8 @@ export interface ActiveSettings {
   summarize?: SummaryActiveSettings;
   /** 로어북 확장 — 키워드/AI 매칭 스위치와 AI 선별 옵션. */
   lorebookPlus?: LorebookPlusActiveSettings;
+  /** 집필 프로(PRO) — 한→영 집필 변환 설정. PRO 활성 환경에서만 쓰인다. */
+  pro?: ProActiveSettings;
   /** NAI 형식으로 보내기 — 텍스트 컴플리션 전송 시 역할 토큰으로 감싼다. */
   naiFormat?: boolean;
   /** 이어쓰기 이음새 보정 (챗 모델) — 마지막 문장 반복을 유도한 뒤 응답에서 제거. */

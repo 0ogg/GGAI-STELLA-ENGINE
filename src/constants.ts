@@ -11,6 +11,12 @@ export const VIEW_TYPE_SESSION = "ggai-stella-session";
 /** 챗 모드 세션 뷰 (M6/C0) — 소설 세션뷰와 완전 별도. meta.mode === "chat" 세션 전용. */
 export const VIEW_TYPE_CHAT_SESSION = "ggai-stella-chat-session";
 
+/**
+ * 집필 프로(PRO) 세션 뷰 — 소설 뷰 기반, meta.proWriting 세션 전용.
+ * 뷰 타입은 상시 등록하되, 라우팅은 PRO 활성화(plugin.pro.activate) 시에만 이쪽으로 온다.
+ */
+export const VIEW_TYPE_PRO_SESSION = "ggai-stella-pro-session";
+
 export const VIEW_TYPE_DASHBOARD = "ggai-stella-dashboard";
 
 /** 우측 사이드바 detail 뷰. R3 에서 뼈대 + 탭, R4/R5 에서 내용. */

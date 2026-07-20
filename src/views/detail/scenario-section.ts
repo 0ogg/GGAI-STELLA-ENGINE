@@ -15,6 +15,7 @@ import type { SessionListItem } from "../../util/scan-sessions";
 import { EditGuard } from "../edit-guard";
 import { LorebookSelectModal } from "../lorebook-select-modal";
 import { getSessionHostLeaves, isSessionHostView } from "../session-host";
+import { renderMediaPromptPicker } from "./media-prompt-panel";
 
 const DEBOUNCE_MS = 400;
 
@@ -43,6 +44,8 @@ export class ScenarioSection {
 
   private memoryEl: HTMLTextAreaElement | null = null;
   private authorNoteEl: HTMLTextAreaElement | null = null;
+  /** 작가노트 전용 프롬프트 선택 영역 — 부분 갱신용. */
+  private authorNoteTemplateAreaEl: HTMLElement | null = null;
   private sessionFieldsCollapsed = false;
   private sessionFieldsBodyEl: HTMLElement | null = null;
   private formEls: Partial<Record<ScenarioField, HTMLTextAreaElement>> = {};
@@ -161,6 +164,7 @@ export class ScenarioSection {
       session.meta.authorNote ?? "",
       this.sessionPending.authorNote
     );
+    this.renderAuthorNoteTemplatePicker();
     this.renderSessionLorebookArea();
     void this.renderSeriesArea();
   }
@@ -274,6 +278,7 @@ export class ScenarioSection {
     this.root.empty();
     this.memoryEl = null;
     this.authorNoteEl = null;
+    this.authorNoteTemplateAreaEl = null;
     this.sessionFieldsBodyEl = null;
     this.formEls = {};
     this.formBodyEl = null;
@@ -473,6 +478,67 @@ export class ScenarioSection {
       session.meta.authorNote ?? "",
       (v) => this.queueSession({ authorNote: v })
     );
+    this.authorNoteTemplateAreaEl = body.createDiv({
+      cls: "ggai-author-note-template",
+    });
+    this.renderAuthorNoteTemplatePicker();
+  }
+
+  /**
+   * 작가노트 전용 프롬프트 선택 — 고른 프롬프트의 {{MAIN}} 자리에 작가노트가 들어가
+   * 부연 설명과 함께 전송된다. "없음"이 기본(작가노트를 그대로 삽입).
+   */
+  private renderAuthorNoteTemplatePicker(): void {
+    const area = this.authorNoteTemplateAreaEl;
+    if (!area) return;
+    area.empty();
+    const session = this.session;
+    if (!session) return;
+    renderMediaPromptPicker({
+      plugin: this.plugin,
+      parent: area,
+      label: "작가노트 전용 프롬프트",
+      bucket: "authorNote",
+      activeId: session.meta.authorNoteTemplateId,
+      allowNone: true,
+      macroHint:
+        "프롬프트 안 {{MAIN}} 자리에 작가노트가 들어갑니다. 작가노트에 대한 " +
+        "부연 설명을 붙여 더 편하게 상황을 유도하세요.",
+      onSelect: (id) => void this.saveAuthorNoteTemplate(id),
+      onChanged: () => this.renderAuthorNoteTemplatePicker(),
+      onDeleted: (id) => {
+        if (session.meta.authorNoteTemplateId === id) {
+          void this.saveAuthorNoteTemplate("");
+        } else {
+          this.renderAuthorNoteTemplatePicker();
+        }
+      },
+    });
+  }
+
+  /** 작가노트 전용 프롬프트 선택 저장 — 빈 문자열이면 "없음"(필드 제거). */
+  private async saveAuthorNoteTemplate(id: string): Promise<void> {
+    const file = this.activeSessionFile;
+    if (!file) return;
+    try {
+      await this.guard.runSave(async () => {
+        const session = await this.plugin.store.getSession(file);
+        if (!session) return;
+        if (id) session.meta.authorNoteTemplateId = id;
+        else delete session.meta.authorNoteTemplateId;
+        if (this.session) {
+          if (id) this.session.meta.authorNoteTemplateId = id;
+          else delete this.session.meta.authorNoteTemplateId;
+        }
+        await this.plugin.store.saveSession(file, session);
+      });
+    } catch (err) {
+      console.warn("[GGAI Stella] 작가노트 프롬프트 저장 실패:", err);
+      new Notice(
+        `세션 저장 실패: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+    this.renderAuthorNoteTemplatePicker();
   }
 
   /**
@@ -656,13 +722,17 @@ export class ScenarioSection {
       {
         key: "translationLorebookIds",
         label: "번역 로어북",
-        enabled: session.meta.translation?.enabled === true,
+        enabled:
+          this.plugin.isExtensionEnabled("stella:translation") &&
+          session.meta.translation?.enabled === true,
         ids: stella?.translationLorebookIds ?? [],
       },
       {
         key: "illustrationLorebookIds",
         label: "삽화 로어북",
-        enabled: session.meta.illustration?.enabled === true,
+        enabled:
+          this.plugin.isExtensionEnabled("stella:illustration") &&
+          session.meta.illustration?.enabled === true,
         ids: stella?.illustrationLorebookIds ?? [],
       },
     ];

@@ -24,6 +24,8 @@ export function createLorebookPlusSettingsPanel(): SettingsPanel {
       const { plugin, settings } = ctx;
       const lp = settings.lorebookPlus ?? {};
 
+      // 매칭 섹션(키워드/AI)은 '로어북 확장 매칭' 확장이 켜져 있을 때만 그린다.
+      if (plugin.isExtensionEnabled("stella:lorebook-plus")) {
       renderEnableToggle({
         parent: body,
         label: "키워드 매칭",
@@ -126,8 +128,11 @@ export function createLorebookPlusSettingsPanel(): SettingsPanel {
           });
         }
       }
+      }
 
       // ── 로어북 자동 생성 — 세션 전용 로어북에 새 인물/사건/고유명사를 자동 기록.
+      // '로어북 자동 생성' 확장이 켜져 있을 때만 그린다.
+      if (plugin.isExtensionEnabled("stella:lorebook-gen")) {
       renderEnableToggle({
         parent: body,
         label: "자동 생성 — 새 인물·사건을 세션 로어북에 기록",
@@ -225,6 +230,7 @@ export function createLorebookPlusSettingsPanel(): SettingsPanel {
             }
           })();
         });
+      }
       }
     },
   };

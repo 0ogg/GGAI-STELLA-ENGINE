@@ -57,9 +57,13 @@ function createSummaryExtension(): StellaExtension {
 
 /**
  * 요약 확장 모듈 등록 — 확장(컨텍스트/생성-완료 훅) + 설정 패널을 한 번에 꽂는다.
- * main.ts onload 에서 한 번 호출한다.
+ * 반환된 함수를 호출하면 둘 다 해제된다(설정 '확장' 탭에서 끌 때 사용).
  */
-export function registerSummaryExtension(plugin: StellaEnginePlugin): void {
-  plugin.extensions.register(createSummaryExtension());
-  plugin.registerSettingsPanel(createSummarySettingsPanel());
+export function registerSummaryExtension(plugin: StellaEnginePlugin): () => void {
+  const disposeExt = plugin.extensions.register(createSummaryExtension());
+  const disposePanel = plugin.registerSettingsPanel(createSummarySettingsPanel());
+  return () => {
+    disposeExt();
+    disposePanel();
+  };
 }

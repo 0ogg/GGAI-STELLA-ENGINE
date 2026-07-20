@@ -1494,6 +1494,10 @@ input.ggai-vs-slider[type="range"] {
 .ggai-gallery-btn.is-hidden {
   display: none;
 }
+/* 번역/삽화 미디어 트리거 버튼 — 해당 확장이 설정에서 꺼지면 통째로 숨김. */
+.ggai-media-trigger-btn.is-hidden {
+  display: none;
+}
 /* 드래그 선택 = 기능이 "선택 영역만 번역"으로 바뀜 → 활성(채운 강조) 스타일 */
 .ggai-tr-batch-btn.is-selection {
   color: var(--text-on-accent);
@@ -9085,4 +9089,56 @@ body.is-mobile .ggai-phone-homebar {
 .ggai-phone-contact-thumb.is-tube-replay svg {
   width: 20px;
   height: 20px;
+}
+
+/* ── 플러그인 설정창 탭 바 (일반 / 확장) ── */
+.ggai-settings-tabbar {
+  display: flex;
+  gap: 4px;
+  margin: 4px 0 16px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.ggai-settings-tab {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 8px 14px;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--font-ui-medium);
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+}
+.ggai-settings-tab:hover {
+  color: var(--text-normal);
+  background: transparent;
+}
+.ggai-settings-tab.is-active {
+  color: var(--text-normal);
+  font-weight: var(--font-semibold);
+  border-bottom-color: var(--interactive-accent);
+}
+
+/* ─── 집필 프로(PRO) — 대기 문단(pending) 모델 ─── */
+/* 한국어 보기 본문 끝의 이어쓰기(초고) 영역 — 아직 영어판에 없는 글. */
+.ggai-tr-propending {
+  display: block;
+  min-height: 1.6em;
+  white-space: pre-wrap;
+  color: var(--text-accent);
+  margin-top: 0.35em;
+}
+.ggai-tr-propending:empty::before {
+  content: "여기서 한국어로 이어 쓰세요 — 잠시 멈추면 원고(영어판)에 반영됩니다";
+  color: var(--text-faint);
+  pointer-events: none;
+}
+/* 직접 수정돼 영어판 반영을 기다리는 기존 문단. */
+.ggai-tr-propending-block {
+  color: var(--text-accent);
+}
+/* 변환(영어판 반영) 진행 중 — 잠깐 잠긴 구간. */
+.ggai-tr-paragraph.is-pro-converting,
+.ggai-tr-propending-lock {
+  opacity: 0.55;
 }

@@ -27,7 +27,7 @@ function createLorebookGenExtension(): StellaExtension {
   };
 }
 
-/** main.ts onload 에서 한 번 호출한다. */
-export function registerLorebookGenExtension(plugin: StellaEnginePlugin): void {
-  plugin.extensions.register(createLorebookGenExtension());
+/** 반환된 함수를 호출하면 해제된다(설정 '확장' 탭에서 끌 때 사용). */
+export function registerLorebookGenExtension(plugin: StellaEnginePlugin): () => void {
+  return plugin.extensions.register(createLorebookGenExtension());
 }

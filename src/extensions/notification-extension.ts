@@ -210,8 +210,8 @@ export async function sendTestWebhookPush(
   );
 }
 
-export function registerNotificationExtension(plugin: StellaEnginePlugin): void {
-  plugin.extensions.register({
+export function registerNotificationExtension(plugin: StellaEnginePlugin): () => void {
+  return plugin.extensions.register({
     id: "stella:notification",
     async onGenerationComplete(input: GenerationCompleteInput): Promise<void> {
       const { sessionFile, generatedText } = input;

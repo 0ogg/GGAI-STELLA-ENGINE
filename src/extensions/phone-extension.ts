@@ -48,8 +48,8 @@ function hashRatio(s: string): number {
   return (h >>> 0) / 0xffffffff;
 }
 
-export function registerPhoneExtension(plugin: StellaEnginePlugin): void {
-  plugin.extensions.register({
+export function registerPhoneExtension(plugin: StellaEnginePlugin): () => void {
+  const disposeExt = plugin.extensions.register({
     id: "stella:phone",
     // 세션창 하단 확장 트레이(퍼즐)에서 폰을 켠다.
     sessionActions: [
@@ -185,7 +185,11 @@ export function registerPhoneExtension(plugin: StellaEnginePlugin): void {
     },
   });
 
-  plugin.registerSettingsPanel(createPhoneSettingsPanel());
+  const disposePanel = plugin.registerSettingsPanel(createPhoneSettingsPanel());
+  return () => {
+    disposeExt();
+    disposePanel();
+  };
 }
 
 /**

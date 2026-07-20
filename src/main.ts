@@ -15,6 +15,7 @@ import {
   VIEW_TYPE_DASHBOARD,
   VIEW_TYPE_DETAIL,
   VIEW_TYPE_ILLUSTRATION_OUTPUT,
+  VIEW_TYPE_PRO_SESSION,
   VIEW_TYPE_SESSION,
   VIEW_TYPE_SIDEBAR,
 } from "./constants";
@@ -31,6 +32,7 @@ import {
   type ProactiveScheduleEntry,
 } from "./services/proactive-service";
 import { PhoneService } from "./services/phone-service";
+import { ProService } from "./services/pro-service";
 import { registerPhoneExtension } from "./extensions/phone-extension";
 import { registerLorebookGenExtension } from "./extensions/lorebook-gen-extension";
 import type { PhonePluginData } from "./types/phone";
@@ -91,6 +93,7 @@ import {
   SESSION_HOST_VIEW_TYPES,
 } from "./views/session-host";
 import { SessionView, type SessionViewCommand } from "./views/session-view";
+import { ProSessionView } from "./views/pro-session-view";
 import { SidebarView } from "./views/sidebar-view";
 
 /**
@@ -169,6 +172,12 @@ export interface StellaPluginData {
   extensionRegex?: Partial<Record<RegexExtensionTarget, RegexScript[]>>;
   /** 스텔라 폰 전역 설정 (PH1) — 로그인 페르소나/모델/언어/기억 연동. */
   phone?: PhonePluginData;
+  /**
+   * 기본 제공 확장 켜짐/꺼짐 — 확장 id → enabled. 항목이 없으면 기본 켜짐(true).
+   * false 인 확장은 등록 자체를 하지 않아 자동 동작·설정 패널·세션 UI 가 전부 사라진다.
+   * 설정 '확장' 탭에서 조작. 게이트는 `plugin.isExtensionEnabled(id)`.
+   */
+  extensionsEnabled?: Record<string, boolean>;
   settings?: StellaPluginSettings;
   /** 최초 설치 온보딩(좌우 사이드바 배치 + 대시보드 자동 오픈)을 이미 보여줬는지. */
   installOnboardingShown?: boolean;
@@ -265,6 +274,8 @@ export default class StellaEnginePlugin extends Plugin {
   lorebookPlus!: LorebookPlusService;
   /** 로어북 자동 생성 실행기 — 생성 완료 훅/수동 스캔이 호출. */
   lorebookGen!: LorebookGenService;
+  /** 집필 프로(PRO) 게이트 — 개인 플러그인이 activate() 하기 전까지 휴면. */
+  pro!: ProService;
   /** 확장 탭 설정 패널 레지스트리. 내장/외부 패널 모두 `registerSettingsPanel()` 로 등록. */
   settingsPanels!: SettingsPanelRegistry;
   /** 확장 모듈 레지스트리 — 컨텍스트 기여 / 생성-완료 훅 / 로어북 선택 대체. */
@@ -272,6 +283,8 @@ export default class StellaEnginePlugin extends Plugin {
   /** 영속 플러그인 설정. onload 초반에 loadData 로 채움. */
   data!: StellaPluginData;
   private stellaPanelLeaf: WorkspaceLeaf | null = null;
+  /** 현재 켜져 있는 내장 확장의 해제 핸들 — 설정에서 끄면 호출해 완전히 내린다. */
+  private extensionResources = new Map<string, () => void>();
 
   async onload(): Promise<void> {
     // 0. 영속 데이터
@@ -318,21 +331,14 @@ export default class StellaEnginePlugin extends Plugin {
     this.phone.startScheduler();
     this.lorebookPlus = new LorebookPlusService(this);
     this.lorebookGen = new LorebookGenService(this);
+    this.pro = new ProService(this);
     this.settingsPanels = new SettingsPanelRegistry(() =>
       this.store.trigger("settings-panels-changed")
     );
     this.extensions = new StellaExtensionRegistry(this);
-    // 내장 확장 등록 — 번역/삽화/요약(확장 + 설정 패널). 외부 플러그인도 같은 API 로 꽂는다.
-    registerTranslationExtension(this);
-    registerIllustrationExtension(this);
-    registerSummaryExtension(this);
-    registerNotificationExtension(this);
-    registerPhoneExtension(this);
-    registerLorebookGenExtension(this);
-    // 정규식 치환 설정 — 전송본 치환 자체는 planSessionRequest 가 직접 수행(훅 아님).
-    this.registerSettingsPanel(createRegexSettingsPanel());
-    // 로어북 확장 — 키워드/AI 매칭 스위치 (매칭 자체는 planSessionRequest 경유).
-    this.registerSettingsPanel(createLorebookPlusSettingsPanel());
+    // 내장 확장 등록 — 켜져 있는 것만 꽂는다(설정 '확장' 탭에서 끈 것은 제외).
+    // 외부 플러그인도 같은 API 로 꽂는다.
+    this.applyExtensions();
     this.addSettingTab(new StellaSettingTab(this.app, this));
 
     // 4. View 등록 (plugin 인스턴스 주입 — view 가 store/ai 접근)
@@ -347,6 +353,11 @@ export default class StellaEnginePlugin extends Plugin {
     this.registerView(
       VIEW_TYPE_CHAT_SESSION,
       (leaf: WorkspaceLeaf) => new ChatSessionView(leaf, this)
+    );
+    // PRO 뷰 타입은 상시 등록(레이아웃 복원 대비) — 라우팅은 pro.activate() 후에만 온다.
+    this.registerView(
+      VIEW_TYPE_PRO_SESSION,
+      (leaf: WorkspaceLeaf) => new ProSessionView(leaf, this)
     );
     this.registerView(
       VIEW_TYPE_DASHBOARD,
@@ -385,13 +396,19 @@ export default class StellaEnginePlugin extends Plugin {
     this.addCommand({
       id: "open-stella-phone",
       name: "스텔라 폰 열기",
-      callback: () => void this.openStellaPhone(),
+      // 폰 확장을 끄면 명령도 사라진다(완전 비활성화).
+      checkCallback: (checking: boolean) => {
+        if (!this.isExtensionEnabled("stella:phone")) return false;
+        if (!checking) void this.openStellaPhone();
+        return true;
+      },
     });
     // 스텔라튜브 방송 토글 (v2 §7.2) — 켜짐↔꺼짐 커맨드 1개. 대상 = 현재 세션.
     this.addCommand({
       id: "toggle-stellatube-stream",
       name: "스텔라튜브 방송 토글",
       checkCallback: (checking: boolean) => {
+        if (!this.isExtensionEnabled("stella:phone")) return false;
         const sessionFile = this.getActiveOrLastSessionFile();
         if (!sessionFile) return false;
         if (!checking) {
@@ -782,6 +799,7 @@ export default class StellaEnginePlugin extends Plugin {
           illustration: session.meta.illustration ? { ...session.meta.illustration } : undefined,
           summarize: session.meta.summarize ? { ...session.meta.summarize } : undefined,
           lorebookPlus: session.meta.lorebookPlus ? { ...session.meta.lorebookPlus } : undefined,
+          pro: session.meta.pro ? { ...session.meta.pro } : undefined,
           naiFormat: session.meta.naiFormat,
           continueAnchor: session.meta.continueAnchor,
         };
@@ -828,6 +846,142 @@ export default class StellaEnginePlugin extends Plugin {
   }
 
   /**
+   * 설정 '확장' 탭에 노출되는 기본 제공 확장 목록. 각 항목을 끄면 그 확장의
+   * 자동 동작·설정 패널·세션창 버튼/트레이가 전부 사라진다(완전 비활성화).
+   * 순서 = 목록 표시 순서.
+   */
+  readonly builtinExtensions: ReadonlyArray<{
+    id: string;
+    name: string;
+    desc: string;
+  }> = [
+    {
+      id: "stella:translation",
+      name: "번역",
+      desc: "AI 응답을 번역해 보여줍니다. 끄면 세션창의 번역 버튼·자동 번역·번역 설정이 모두 사라집니다.",
+    },
+    {
+      id: "stella:illustration",
+      name: "삽화",
+      desc: "장면을 이미지로 그립니다. 끄면 삽화·갤러리 버튼과 자동 삽화, 삽화 설정이 사라집니다(이미 생성된 이미지는 남습니다).",
+    },
+    {
+      id: "stella:summary",
+      name: "자동 요약",
+      desc: "길어진 세션을 자동으로 요약해 문맥에 넣습니다. 끄면 자동 요약과 요약 설정이 사라집니다.",
+    },
+    {
+      id: "stella:notification",
+      name: "응답 알림",
+      desc: "보고 있지 않은 세션에 응답이 도착하면 소리·진동·푸시로 알립니다. 끄면 알림과 관련 설정이 사라집니다.",
+    },
+    {
+      id: "stella:phone",
+      name: "스텔라 폰",
+      desc: "캐릭터와 문자·SNS를 주고받는 폰 기능입니다. 끄면 폰 열기 명령·세션 트레이의 폰·문자 기억 주입·폰 설정이 사라집니다.",
+    },
+    {
+      id: "stella:lorebook-gen",
+      name: "로어북 자동 생성",
+      desc: "진행하며 새로 나온 설정을 로어북에 자동으로 기록합니다. 끄면 자동 생성이 멈춥니다.",
+    },
+    {
+      id: "stella:regex",
+      name: "정규식 후처리",
+      desc: "전송 직전 본문을 정규식으로 치환합니다. 끄면 치환이 멈추고 정규식 설정이 사라집니다.",
+    },
+    {
+      id: "stella:lorebook-plus",
+      name: "로어북 확장 매칭",
+      desc: "AI가 상황에 맞는 로어북 항목을 골라 넣습니다. 끄면 AI 매칭이 멈추고 로어북 확장 설정이 사라집니다.",
+    },
+  ];
+
+  /** 확장이 켜져 있는지 (항목 없으면 기본 켜짐). */
+  isExtensionEnabled(id: string): boolean {
+    return this.data.extensionsEnabled?.[id] !== false;
+  }
+
+  /**
+   * 확장 켜기/끄기 — 값을 저장하고 등록 상태를 즉시 재조정한 뒤,
+   * 열려 있는 세션창/디테일 뷰가 관련 UI 를 갱신하도록 신호를 보낸다.
+   */
+  async setExtensionEnabled(id: string, enabled: boolean): Promise<void> {
+    const map = { ...(this.data.extensionsEnabled ?? {}) };
+    if (enabled) delete map[id];
+    else map[id] = false;
+    await this.savePluginData({ extensionsEnabled: map });
+    this.applyExtensions();
+    this.store.trigger("extensions-changed", id);
+  }
+
+  /**
+   * 켜짐/꺼짐 상태에 맞춰 내장 확장을 등록/해제한다. onload 와 토글 시 호출.
+   * 이미 원하는 상태면 아무것도 하지 않는다(중복 등록 방지).
+   */
+  applyExtensions(): void {
+    this.syncExtensionResource(
+      "stella:translation",
+      this.isExtensionEnabled("stella:translation"),
+      () => registerTranslationExtension(this)
+    );
+    this.syncExtensionResource(
+      "stella:illustration",
+      this.isExtensionEnabled("stella:illustration"),
+      () => registerIllustrationExtension(this)
+    );
+    this.syncExtensionResource(
+      "stella:summary",
+      this.isExtensionEnabled("stella:summary"),
+      () => registerSummaryExtension(this)
+    );
+    this.syncExtensionResource(
+      "stella:notification",
+      this.isExtensionEnabled("stella:notification"),
+      () => registerNotificationExtension(this)
+    );
+    this.syncExtensionResource(
+      "stella:phone",
+      this.isExtensionEnabled("stella:phone"),
+      () => registerPhoneExtension(this)
+    );
+    this.syncExtensionResource(
+      "stella:lorebook-gen",
+      this.isExtensionEnabled("stella:lorebook-gen"),
+      () => registerLorebookGenExtension(this)
+    );
+    // 정규식 치환 설정 — 치환 자체는 planSessionRequest 가 isExtensionEnabled 로 게이트.
+    this.syncExtensionResource(
+      "stella:regex",
+      this.isExtensionEnabled("stella:regex"),
+      () => this.registerSettingsPanel(createRegexSettingsPanel())
+    );
+    // 로어북 확장 패널은 AI 매칭 + 자동 생성 설정을 함께 담는다 — 둘 중 하나라도
+    // 켜져 있으면 설정에 접근할 수 있게 보여준다. AI 매칭 동작은 planSessionRequest 게이트.
+    this.syncExtensionResource(
+      "stella:lorebook-plus-panel",
+      this.isExtensionEnabled("stella:lorebook-plus") ||
+        this.isExtensionEnabled("stella:lorebook-gen"),
+      () => this.registerSettingsPanel(createLorebookPlusSettingsPanel())
+    );
+  }
+
+  /** 리소스 하나를 원하는 켜짐 상태로 맞춘다(등록/해제는 상태가 실제로 바뀔 때만). */
+  private syncExtensionResource(
+    key: string,
+    enabled: boolean,
+    register: () => () => void
+  ): void {
+    const has = this.extensionResources.has(key);
+    if (enabled && !has) {
+      this.extensionResources.set(key, register());
+    } else if (!enabled && has) {
+      this.extensionResources.get(key)!();
+      this.extensionResources.delete(key);
+    }
+  }
+
+  /**
    * 프리셋의 묶음을 활성 설정에 통째 적용.
    * opts.silent 면 lastActivePresetId(=프리셋 그리드의 "선택됨" 표시)를 건드리지
    * 않는다 — 자동 순환처럼 사용자가 직접 고른 게 아닌 적용에 쓴다.
@@ -858,6 +1012,18 @@ export default class StellaEnginePlugin extends Plugin {
 
   notePresetRotationManualChoice(): void {
     this.presetRotationSkipOnce = true;
+  }
+
+  /**
+   * 사용자가 모델/프롬프트 세트/파라미터를 직접 바꿨다 — 프리셋 선택을 해제한다.
+   * (UI 에 보이는 값은 그대로 두고 "이 프리셋 쓰는 중" 표시만 푼다. 롤백 없음.)
+   * 순환이 켜져 있어도 다음 1회 생성은 이 선택 그대로 간다.
+   */
+  async noteManualSettingChange(): Promise<void> {
+    this.notePresetRotationManualChoice();
+    if (this.data.lastActivePresetId === undefined) return;
+    await this.savePluginData({ lastActivePresetId: undefined });
+    this.store.trigger("presets-changed");
   }
 
   /**
@@ -1197,6 +1363,9 @@ export default class StellaEnginePlugin extends Plugin {
     try {
       const session = await this.store.getSession(sessionFile);
       if (session?.meta.mode === "chat") return VIEW_TYPE_CHAT_SESSION;
+      // 집필 프로 세션 — PRO 활성 환경에서만 전용 뷰, 아니면 소설 뷰(우아한 강등).
+      if (session?.meta.proWriting && this.pro.isActive())
+        return VIEW_TYPE_PRO_SESSION;
     } catch {
       // 읽기 실패 → 소설 뷰가 기존 에러 처리를 담당
     }
@@ -1513,6 +1682,7 @@ function applyActiveSettingsPatch(
   if (patch.illustration !== undefined) target.illustration = { ...patch.illustration };
   if (patch.summarize !== undefined) target.summarize = { ...patch.summarize };
   if (patch.lorebookPlus !== undefined) target.lorebookPlus = { ...patch.lorebookPlus };
+  if (patch.pro !== undefined) target.pro = { ...patch.pro };
   if (patch.naiFormat !== undefined) target.naiFormat = patch.naiFormat;
   if (patch.continueAnchor !== undefined) target.continueAnchor = patch.continueAnchor;
 }
@@ -1537,11 +1707,66 @@ class StellaSettingTab extends PluginSettingTab {
     super(app, plugin);
   }
 
+  private activeTab: "general" | "extensions" = "general";
+
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "GGAI Stella Engine" });
+    this.renderTabBar(containerEl);
+    const body = containerEl.createDiv({ cls: "ggai-settings-tab-body" });
+    if (this.activeTab === "extensions") this.renderExtensionsTab(body);
+    else this.renderGeneralTab(body);
+  }
 
+  /** 상단 탭 바 (일반 / 확장). */
+  private renderTabBar(containerEl: HTMLElement): void {
+    const bar = containerEl.createDiv({ cls: "ggai-settings-tabbar" });
+    const tabs: Array<{ id: "general" | "extensions"; label: string }> = [
+      { id: "general", label: "일반" },
+      { id: "extensions", label: "확장" },
+    ];
+    for (const t of tabs) {
+      const btn = bar.createEl("button", {
+        cls: "ggai-settings-tab",
+        text: t.label,
+      });
+      btn.toggleClass("is-active", this.activeTab === t.id);
+      btn.addEventListener("click", () => {
+        if (this.activeTab === t.id) return;
+        this.activeTab = t.id;
+        this.display();
+      });
+    }
+  }
+
+  /**
+   * '확장' 탭 — 기본 제공 기능 켜기/끄기. 끄면 그 기능의 자동 동작·설정 패널·
+   * 세션 화면의 관련 버튼이 전부 사라진다(완전 비활성화). 언제든 다시 켤 수 있다.
+   */
+  private renderExtensionsTab(containerEl: HTMLElement): void {
+    const intro = containerEl.createEl("p", {
+      cls: "setting-item-description",
+    });
+    intro.setText(
+      "기본 제공 기능을 켜고 끕니다. 끄면 그 기능의 자동 동작은 물론, 설정 패널과 세션 화면의 관련 버튼까지 전부 사라집니다. 언제든 다시 켤 수 있습니다."
+    );
+    for (const ext of this.plugin.builtinExtensions) {
+      new Setting(containerEl)
+        .setName(ext.name)
+        .setDesc(ext.desc)
+        .addToggle((toggle) =>
+          toggle
+            .setValue(this.plugin.isExtensionEnabled(ext.id))
+            .onChange(async (value) => {
+              await this.plugin.setExtensionEnabled(ext.id, value);
+            })
+        );
+    }
+  }
+
+  /** '일반' 탭 — 기존 플러그인 설정 항목들. */
+  private renderGeneralTab(containerEl: HTMLElement): void {
     new Setting(containerEl)
       .setName("새 세션 제목 자동 생성")
       .setDesc("첫 AI 전개가 끝나면 본문 초반부를 반영한 제목으로 세션 이름을 한 번 자동 변경합니다.")
@@ -1580,6 +1805,8 @@ class StellaSettingTab extends PluginSettingTab {
         new FolderSuggest(this.app, text.inputEl);
       });
 
+    // 알림 관련 설정은 '응답 알림' 확장이 켜져 있을 때만 노출한다(끄면 통째로 사라짐).
+    if (this.plugin.isExtensionEnabled("stella:notification")) {
     new Setting(containerEl)
       .setName("응답 도착 알림음")
       .setDesc(
@@ -1700,6 +1927,7 @@ class StellaSettingTab extends PluginSettingTab {
           }
         })
       );
+    }
 
     // ── 선채팅 (세션별 켜기는 채팅 세션 리모컨의 종 버튼) ──
     new Setting(containerEl)

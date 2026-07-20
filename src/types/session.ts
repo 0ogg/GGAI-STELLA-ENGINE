@@ -20,6 +20,7 @@ import type { PromptPresetParams } from "./prompt";
 import type {
   IllustrationActiveSettings,
   LorebookPlusActiveSettings,
+  ProActiveSettings,
   SummaryActiveSettings,
   TranslationActiveSettings,
 } from "./preset";
@@ -142,6 +143,12 @@ export interface SessionMeta {
   /** 시리즈(다음화) 연결 — 없으면 단독 세션. */
   series?: SessionSeriesLink;
   mode: SessionMode;
+  /**
+   * 집필 프로(PRO) 세션 표시 — mode 는 "novel" 그대로 두고 이 플래그로만 구분한다.
+   * PRO 가 비활성인 환경(개인 플러그인 없음)에서는 무시되어 일반 소설 세션으로 열린다
+   * (우아한 강등, 집필 프로 스펙.md §2).
+   */
+  proWriting?: boolean;
   createdAt: number;
   modifiedAt: number;
   lastPlayedAt: number;
@@ -166,6 +173,8 @@ export interface SessionMeta {
   summarize?: SummaryActiveSettings;
   /** 로어북 확장 — 키워드/AI 매칭 스위치와 AI 선별 옵션. */
   lorebookPlus?: LorebookPlusActiveSettings;
+  /** 집필 프로(PRO) 활성 설정 — proWriting 세션의 한→영 집필 변환. */
+  pro?: ProActiveSettings;
   /** 선채팅(P1) 세션 설정 — 챗 리모컨 종 버튼으로 토글. 빈도/상한은 플러그인 설정. */
   proactive?: ProactiveSessionSettings;
   /** NAI 형식으로 보내기 — 텍스트 컴플리션 전송 시 <|system|>/<|user|>/<|assistant|> 턴으로 감싼다. */
@@ -176,6 +185,12 @@ export interface SessionMeta {
   memory?: string;
   /** 작가노트 — chatHistory 끝에서 3 메시지 앞에 system 으로 삽입. */
   authorNote?: string;
+  /**
+   * 작가노트 전용 프레이밍 프롬프트 id (mediaPrompts.authorNote 참조).
+   * 지정 시 작가노트 원문을 그 프롬프트의 {{MAIN}} 자리에 넣어 감싼다.
+   * 미지정(없음)이면 작가노트를 그대로 삽입한다 — 기본값.
+   */
+  authorNoteTemplateId?: string;
   /** @deprecated 세션 요약은 summaries.json (노드 앵커 누적) 으로 대체됨. 읽지 않는다. */
   summary?: string;
   /** @deprecated summaries.json 으로 대체됨. */
