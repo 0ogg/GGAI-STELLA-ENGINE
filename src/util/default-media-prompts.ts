@@ -18,7 +18,8 @@ export type MediaPromptBucket =
   | "phoneSns"
   | "phoneTube"
   | "authorNote"
-  | "proConvert";
+  | "proConvert"
+  | "translationGlossary";
 
 /**
  * 삭제 불가능한 기본(내장) 미디어 프롬프트.
@@ -234,10 +235,12 @@ A poster with no inner life is a failure. Before writing any line, know WHO this
 
 If you could swap two posters' lines and nothing feels off, you've failed. Each voice must be unmistakably theirs.
 
-## GROUNDING — ANCHORED IN REAL EVENTS (STRICT)
-- EVERY activity must be recognizably tied to a listed world's recent events: direct reactions, rumors, sightings, aftermath, side-effects on daily life, or involved characters posting about what they just lived through.
-- Reference CONCRETE specifics — the actual people, places, things that happened. A comment you could paste under any post ("omg so cool") is a FAILURE. Real netizens quote details, misremember them, argue about what *really* went down, bring receipts.
-- Plausible adjacent events welcome (the cafe next to the incident, the classmate who heard shouting, the mortician who got the body). Generic chatter tied to no world is NOT — if a post can't be anchored to a world's events, don't write it.
+## GROUNDING — ANCHORED, BUT ONLY IN WHAT EACH PERSON COULD KNOW (STRICT)
+The attached events are the PRIVATE lived experience of the people who were there — raw material for what THOSE people might post about their own lives, NOT a broadcast the whole network watched. Ground every activity, but ground it in what its author could actually know:
+- **The people who lived it** (named characters and bystanders from that world's events) post from the inside: what they saw, felt, survived, or can't stop thinking about — but only the slice they'd actually put in public. They do not narrate their own secrets or private moments for a crowd.
+- **Everyone else** (other worlds, uninvolved accounts) has NOT seen the events and has NOT read anyone's profile. They know ONLY what has actually been posted to the feed, plus at most a vague public rumor. They react to what a POST says — never to session details, backstory, or lore they had no way to witness. An outsider quoting private specifics they couldn't have learned is the exact failure to kill: the drama-audience-watching-a-play voice.
+- A reaction you could paste under any post ("omg so cool") is still a failure — but the cure is a specific PERSON with a specific stake, NOT omniscient knowledge of what happened off-feed.
+- Plausible adjacent knowledge welcome (the cafe next to the incident, the classmate who heard shouting) — but as public exposure, never as private insight.
 
 ## WHO IS POSTING
 - NAMED characters from the events are the stars: about HALF of all activities come from named characters, posting/commenting in their own established voice about what they themselves just experienced.
@@ -289,7 +292,9 @@ Stella Network is not a normal social network. It is a liminal space where the p
 - Match each world's setting: fantasy → medieval-style chatter (with that era's own brand of lewd jokes and gallows humor), idol world → fan/anti/press/sasaeng accounts, modern city → everyday netizens including the creeps and doomers, noir/crime world → rubberneckers, tipsters, and true-crime hounds, sci-fi → that culture. Judge whether the subjects are actually PUBLIC FIGURES — if the people involved are ordinary, write ordinary people talking about their lives, NOT crowds worshipping a protagonist.
 
 ## WHAT IS PUBLIC (CRITICAL)
-- Posters only know PUBLICLY observable things: public events, sightings, rumors, public image, official statements, police reports. They do NOT know private/secret events, {{user}}'s hidden relationships, or behind-closed-doors happenings. At most a vague unconfirmed rumor with no real details — and rumors, being rumors, are often wrong, exaggerated, or pulled out of thin air.`,
+- The attached events, profiles, and lore are NOT public. Treat them as the private reality BEHIND the feed — the source you draw on to voice the people who lived it. Only the slices those people actually post become public. Nobody has "read the session."
+- The people involved know their own experience. Everyone else knows only what is visible in the feed (the posts and comments shown) plus public sightings, rumors, and official statements.
+- No one — not even the people involved — posts private/secret events, {{user}}'s hidden relationships, or behind-closed-doors happenings for the public. At most a vague unconfirmed rumor with no real details — and rumors, being rumors, are often wrong, exaggerated, or pulled out of thin air.`,
     },
   ],
 
@@ -353,6 +358,28 @@ Whatever the broadcast shows — sex, violence, crime, threats, a stream the per
         "- Preserve the author's meaning, events, and nuance. Do not add new events, drop details, or reinterpret intent.\n" +
         "- Keep character names and terminology consistent with the manuscript and the reference notes.\n" +
         "Conversion: ```json\n",
+    },
+  ],
+
+  translationGlossary: [
+    {
+      id: "builtin:translationGlossary:1",
+      title: "Default",
+      prompt:
+        "New paired passages (en = the English manuscript, ko = the author's own Korean):\n" +
+        "{{main}}\n\n" +
+        "Already recorded entries:\n" +
+        "{{lorebook}}\n\n" +
+        "You maintain the bilingual glossary that keeps this novel's Korean/English rendering consistent.\n" +
+        "From the new pairs, extract only terms worth recording:\n" +
+        "- Proper nouns (people, places, organizations, items, titles): the exact EN ↔ KO spelling pair.\n" +
+        "- Distinctive speech styles or recurring phrases: how they are rendered in each language.\n" +
+        "Do not repeat anything already recorded. If nothing new, return [].\n" +
+        "Respond with a JSON array only:\n" +
+        '[{"title": string, "keys": string[], "content": string}]\n' +
+        "- keys: surface forms in BOTH languages (used for matching).\n" +
+        '- content: one or two lines, e.g. "EN: Stella Row / KO: 스텔라 로 — always this spelling. Speaks archaic polite Korean."\n' +
+        "Entries: ```json\n",
     },
   ],
 

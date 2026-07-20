@@ -1390,6 +1390,112 @@ input.ggai-vs-slider[type="range"] {
   opacity: 1;
 }
 
+/* ── 세션창 하단 확장 트레이(퍼즐) — 아이콘 그리드 팝오버 ── */
+.ggai-ext-tray {
+  position: fixed;
+  z-index: var(--layer-menu, 1000);
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 14px;
+  box-shadow: 0 8px 28px rgb(0 0 0 / 0.28);
+  padding: 10px;
+}
+.ggai-ext-tray-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 216px;
+}
+.ggai-ext-tray-item {
+  width: 64px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 2px;
+  border-radius: 10px;
+  cursor: pointer;
+  color: var(--text-muted);
+  user-select: none;
+}
+.ggai-ext-tray-item:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+.ggai-ext-tray-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--background-modifier-border);
+  color: var(--text-normal);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.15);
+  transition: transform 0.08s ease;
+}
+.ggai-ext-tray-item:active .ggai-ext-tray-icon {
+  transform: scale(0.94);
+}
+.ggai-ext-tray-icon svg {
+  width: 21px;
+  height: 21px;
+}
+.ggai-ext-tray-label {
+  font-size: var(--font-ui-smaller);
+  line-height: 1.15;
+  text-align: center;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ggai-ext-tray-empty {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  padding: 4px 8px;
+}
+
+/* ── 작가노트 빠른 입력 팝오버 (퍼즐 트레이 진입) ── */
+.ggai-anote-quick {
+  position: fixed;
+  z-index: var(--layer-menu, 1000);
+  display: flex;
+  flex-direction: column;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 14px;
+  box-shadow: 0 8px 28px rgb(0 0 0 / 0.28);
+  padding: 10px;
+  gap: 8px;
+}
+.ggai-anote-quick-header {
+  display: flex;
+  align-items: center;
+}
+.ggai-anote-quick-title {
+  font-size: var(--font-ui-small);
+  font-weight: 600;
+  color: var(--text-normal);
+}
+.ggai-anote-quick-input {
+  flex: 1;
+  min-height: 80px;
+  resize: vertical;
+  font-size: var(--font-ui-small);
+  font-family: inherit;
+  line-height: 1.4;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+.ggai-anote-quick-footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .ggai-session-viewer-options {
   position: relative;
   z-index: 5;
@@ -9141,4 +9247,81 @@ body.is-mobile .ggai-phone-homebar {
 .ggai-tr-paragraph.is-pro-converting,
 .ggai-tr-propending-lock {
   opacity: 0.55;
+}
+
+/* ─── 집필 프로(PRO) — 집중 설정 뷰 ─── */
+.ggai-pro-focus {
+  padding: var(--size-4-2, 0.5rem) var(--size-4-3, 0.75rem);
+  overflow-y: auto;
+}
+.ggai-focus-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.ggai-focus-target {
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ggai-focus-edit-btn,
+.ggai-focus-pin-move {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: var(--radius-s, 6px);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.ggai-focus-edit-btn:hover,
+.ggai-focus-pin-move:hover:not(:disabled) {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+.ggai-focus-pin-move:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.ggai-focus-item {
+  padding: 4px 0 8px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.ggai-focus-item:last-child {
+  border-bottom: none;
+}
+.ggai-focus-placeholder {
+  color: var(--text-faint);
+  font-size: var(--font-ui-small);
+  padding: 8px 0;
+}
+.ggai-focus-textarea {
+  width: 100%;
+  min-height: 90px;
+  resize: vertical;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border-radius: var(--radius-m, 8px);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  line-height: 1.5;
+}
+.ggai-focus-pin-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px;
+}
+.ggai-focus-pin-title {
+  flex: 1;
+  min-width: 0;
 }

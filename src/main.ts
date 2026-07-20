@@ -15,6 +15,7 @@ import {
   VIEW_TYPE_DASHBOARD,
   VIEW_TYPE_DETAIL,
   VIEW_TYPE_ILLUSTRATION_OUTPUT,
+  VIEW_TYPE_PRO_FOCUS,
   VIEW_TYPE_PRO_SESSION,
   VIEW_TYPE_SESSION,
   VIEW_TYPE_SIDEBAR,
@@ -94,6 +95,7 @@ import {
 } from "./views/session-host";
 import { SessionView, type SessionViewCommand } from "./views/session-view";
 import { ProSessionView } from "./views/pro-session-view";
+import { ProFocusView } from "./views/pro-focus-view";
 import { SidebarView } from "./views/sidebar-view";
 
 /**
@@ -129,6 +131,8 @@ export interface StellaPluginData {
   lastDashboardEditor?: EditorRoute | null;
   sidebarCardLayout?: "compact" | "cover";
   lastActiveSessionFile?: string | null;
+  /** 집필 프로 집중 설정 뷰의 핀 목록(순서 = 표시 순서). 미설정 시 기본 구성. */
+  proFocusPins?: string[];
   /** 분기(노드) 화면 번역 표시 토글 — 전역 영속(다시 열어도 유지). */
   branchShowTranslation?: boolean;
   /** 세션별 마지막 읽던 위치 — 보던 노드 기준 앵커. key = sessionFile. 재실행 복원용. */
@@ -360,6 +364,10 @@ export default class StellaEnginePlugin extends Plugin {
       (leaf: WorkspaceLeaf) => new ProSessionView(leaf, this)
     );
     this.registerView(
+      VIEW_TYPE_PRO_FOCUS,
+      (leaf: WorkspaceLeaf) => new ProFocusView(leaf, this)
+    );
+    this.registerView(
       VIEW_TYPE_DASHBOARD,
       (leaf: WorkspaceLeaf) => new DashboardView(leaf, this)
     );
@@ -488,6 +496,12 @@ export default class StellaEnginePlugin extends Plugin {
       } else if (this.data.installOnboardingShown !== true) {
         void this.savePluginData({ installOnboardingShown: true });
       }
+      // 의존 플러그인(개인 PRO 등)에 "엔진 로드 완료" 신호 — BRAT/hot-reload 로
+      // 엔진만 리로드되면 새 인스턴스가 휴면으로 시작하고 옛 인스턴스의 설정 패널·
+      // 라우팅이 통째로 사라진다. window 이벤트는 의존 플러그인의 리스너가 살아남아
+      // 새 엔진에 다시 배선(pro.activate 등)할 수 있게 하는 재활성화 핸드셰이크다.
+      // onLayoutReady 는 리로드 시 이미 레이아웃이 준비돼 있어 즉시 실행되므로 신호도 즉시 나간다.
+      window.dispatchEvent(new CustomEvent("ggai-stella-engine-ready"));
     });
 
     this.registerEvent(

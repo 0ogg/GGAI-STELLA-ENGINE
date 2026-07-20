@@ -496,6 +496,12 @@ function createPhoneSettingsPanel(): SettingsPanel {
           selectedIds: translation.lorebookIds ?? [],
           onToggle: (lorebookIds) => void patchTranslation({ lorebookIds }),
         });
+        renderEnableToggle({
+          parent: body,
+          label: "로어북 AI 선별 — 번역 전 관련 항목 자동 고르기",
+          checked: translation.aiMatching === true,
+          onChange: (aiMatching) => void patchTranslation({ aiMatching }),
+        });
       }
 
       // ── 갱신 타이밍 (PH2) — 캐릭터/엑스트라가 먼저 문자·SNS를 갱신하는 타이밍(공용). ──

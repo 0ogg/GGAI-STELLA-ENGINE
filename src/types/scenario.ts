@@ -76,6 +76,12 @@ export interface StellaScenarioExtension {
   translationLorebookIds?: string[];
 
   /**
+   * 집필 프로 — 번역 용어집 자동 수집(P6)이 만든 시나리오 전용 용어집 로어북 id.
+   * 생성 시 translationLorebookIds 에도 등록되어 번역/집필 변환 경로에 자동 합류한다.
+   */
+  translationGlossaryLorebookId?: string;
+
+  /**
    * 삽화 확장용 로어북 (UUID 배열) — **이 시나리오의 모든 세션이 공유**한다.
    * 삽화 프롬프트 생성 시 활성 설정의 삽화 로어북과 합쳐(중복 제거) 적용된다.
    * 디테일뷰 시나리오 탭에서 선택 (삽화 사용 중일 때만 노출).

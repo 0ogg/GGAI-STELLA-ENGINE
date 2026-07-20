@@ -1,4 +1,6 @@
+import { Notice } from "obsidian";
 import type { SettingsPanel, SettingsPanelContext } from "../../../services/settings-panel-registry";
+import { DEFAULT_GLOSSARY_INTERVAL } from "../../../services/pro-glossary-service";
 import type { ProActiveSettings } from "../../../types/preset";
 import { PRO_STYLE_TAIL_CHARS_DEFAULT } from "../../../services/pro-service";
 import { PRO_STYLE_PAIRS_DEFAULT } from "../../../util/pro-convert";
@@ -32,6 +34,14 @@ export function createProSettingsPanel(): SettingsPanel {
           });
           return;
         }
+        // 집중 설정 뷰(핀 카탈로그) 진입 — PRO 활성 표면 안에서만 노출.
+        const openRow = body.createDiv({ cls: "ggai-media-block" });
+        const openBtn = openRow.createEl("button", {
+          cls: "ggai-preset-btn",
+          text: "집중 설정 열기",
+        });
+        openBtn.addEventListener("click", () => void plugin.pro.openFocusView());
+
         renderEnableToggle({
           parent: body,
           label: "이 세션을 집필 세션으로",
@@ -100,6 +110,69 @@ export function createProSettingsPanel(): SettingsPanel {
           step: 1,
           integer: true,
           onChange: (stylePairs) => void patchPro(ctx, { stylePairs }),
+        });
+
+        // ── 번역 용어집 자동 수집 (P6) — 내 문단 쌍에서 고유명사 표기/말투 수집.
+        renderEnableToggle({
+          parent: body,
+          label: "번역 용어집 자동 수집",
+          checked: settings.pro?.glossaryEnabled !== false,
+          onChange: (glossaryEnabled) => void patchPro(ctx, { glossaryEnabled }),
+        });
+        renderNumberRow({
+          parent: body,
+          label: "용어집 스캔 주기(짝 수)",
+          value: settings.pro?.glossaryInterval ?? DEFAULT_GLOSSARY_INTERVAL,
+          fallback: DEFAULT_GLOSSARY_INTERVAL,
+          min: 1,
+          step: 1,
+          integer: true,
+          onChange: (glossaryInterval) => void patchPro(ctx, { glossaryInterval }),
+        });
+        renderMediaModelPicker({
+          plugin,
+          parent: body,
+          label: "용어집 모델",
+          profiles: plugin.ai.listGenerationProfiles(),
+          activeId: settings.pro?.glossaryModelProfileId,
+          onSelect: (glossaryModelProfileId) =>
+            void patchPro(ctx, { glossaryModelProfileId }),
+          emptyText: "Core 텍스트 모델이 없습니다.",
+        });
+        renderMediaPromptPicker({
+          plugin,
+          parent: body,
+          label: "용어집 프롬프트",
+          bucket: "translationGlossary",
+          activeId: settings.pro?.glossaryPromptId,
+          onSelect: (glossaryPromptId) =>
+            void patchPro(ctx, { glossaryPromptId }),
+          onChanged: () => ctx.rerender(),
+          onDeleted: (promptId) => {
+            if (settings.pro?.glossaryPromptId === promptId) {
+              void patchPro(ctx, { glossaryPromptId: undefined });
+            } else {
+              ctx.rerender();
+            }
+          },
+        });
+        const scanRow = body.createDiv({ cls: "ggai-media-block" });
+        const scanBtn = scanRow.createEl("button", {
+          cls: "ggai-preset-btn",
+          text: "용어집 지금 스캔",
+        });
+        scanBtn.addEventListener("click", () => {
+          scanBtn.disabled = true;
+          void plugin.pro.glossary
+            .scan(activeSessionFile)
+            .then((r) => {
+              if (!r.ok) new Notice("용어집 스캔 실패: " + (r.errors[0] ?? ""));
+              else if (r.skipped) new Notice("스캔할 새 문단 쌍이 없습니다.");
+              else if (r.added === 0) new Notice("새로 기록할 용어가 없습니다.");
+            })
+            .finally(() => {
+              scanBtn.disabled = false;
+            });
         });
       });
     },

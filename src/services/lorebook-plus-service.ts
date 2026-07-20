@@ -118,14 +118,26 @@ export class LorebookPlusService {
     taskPrompt: string;
     /** AI 호출 라벨용 작업 이름 (예: "번역"). */
     taskLabel: string;
+    /**
+     * 세션 무관 호출(폰 번역 등)이 자체 토글로 AI 선별을 직접 제어할 때.
+     * 이게 있으면 활성 설정 대신 이 값을 쓰고, 세션 전용 개념인 applyToExtensions
+     * 없이 aiMatching 만으로 켠다 — 이 override 자체가 그 컨텍스트의 opt-in.
+     */
+    lorebookPlusOverride?: LorebookPlusActiveSettings;
   }): Promise<string> {
     if (input.books.length === 0) return "";
 
+    const override = input.lorebookPlusOverride;
     const lp =
+      override ??
       (await this.plugin.resolveActiveSettings(input.sessionFile || null))
-        .lorebookPlus ?? {};
+        .lorebookPlus ??
+      {};
+    const aiSelectOn = override
+      ? lp.aiMatching === true
+      : lp.aiMatching === true && lp.applyToExtensions === true;
     let forcedEntryKeys: Set<string> | undefined;
-    if (lp.aiMatching === true && lp.applyToExtensions === true) {
+    if (aiSelectOn) {
       const catalog = buildLorebookCatalog(input.books);
       if (catalog.length > 0) {
         try {

@@ -39,6 +39,8 @@ export interface MediaPromptLibrary {
   authorNote?: MediaPromptItem[];
   /** 집필 프로 — 한국어 입력을 영어판 문체를 이어받은 영어 문단으로 변환. */
   proConvert?: MediaPromptItem[];
+  /** 집필 프로 — 문단 쌍에서 번역 용어(고유명사 표기/말투) 자동 수집. */
+  translationGlossary?: MediaPromptItem[];
 }
 
 /**
@@ -175,6 +177,14 @@ export interface ProActiveSettings {
   styleTailChars?: number;
   /** 양방향 변환에 예시로 첨부할 문단 쌍(내 한국어↔영어판) 수. 0 = 끄기. */
   stylePairs?: number;
+  /** 번역 용어집 자동 수집 — 미지정 = 켬 (false 만 끔). */
+  glossaryEnabled?: boolean;
+  /** 용어집 스캔 주기 — 미스캔 authored 짝이 이 수만큼 쌓이면 실행. 미지정 시 기본값. */
+  glossaryInterval?: number;
+  /** 용어집 수집 모델 프로필. 미지정 시 기본 생성 프로필. */
+  glossaryModelProfileId?: string;
+  /** translationGlossary 버킷 프롬프트 id. 미지정 시 기본 프롬프트. */
+  glossaryPromptId?: string;
 }
 
 export interface ActiveSettings {

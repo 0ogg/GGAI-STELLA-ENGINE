@@ -17,6 +17,12 @@ export const VIEW_TYPE_CHAT_SESSION = "ggai-stella-chat-session";
  */
 export const VIEW_TYPE_PRO_SESSION = "ggai-stella-pro-session";
 
+/**
+ * 집필 프로(PRO) 집중 설정 뷰 — 자주 쓰는 설정만 골라 순서대로 나열하는 우측 패널.
+ * 뷰 타입은 상시 등록(레이아웃 복원 대비), 진입은 PRO 활성화 표면에서만.
+ */
+export const VIEW_TYPE_PRO_FOCUS = "ggai-stella-pro-focus";
+
 export const VIEW_TYPE_DASHBOARD = "ggai-stella-dashboard";
 
 /** 우측 사이드바 detail 뷰. R3 에서 뼈대 + 탭, R4/R5 에서 내용. */

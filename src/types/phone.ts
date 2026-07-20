@@ -534,8 +534,15 @@ export interface PhonePluginData {
    * auto = 생성 직후 자동 번역 (v2 개편, 기본 꺼짐) — 켜면 문자/SNS 생성이
    * 끝나는 대로 번역을 돌려 번역본을 바로 보여준다(항목별 버튼 대체).
    * 로어북은 폰 전용 — 세션 번역 설정과 독립. 프롬프트/모델은 전역 번역 설정 재사용.
+   * aiMatching = 번역 전 로어북 AI 선별(폰 전용 토글, 세션 [확장] 탭과 독립). 선별
+   * 모델/프롬프트는 전역 로어북 확장 설정을 재사용(없으면 기본값).
    */
-  translation?: { enabled?: boolean; auto?: boolean; lorebookIds?: string[] };
+  translation?: {
+    enabled?: boolean;
+    auto?: boolean;
+    lorebookIds?: string[];
+    aiMatching?: boolean;
+  };
   /** 문자 답장 프롬프트 (phoneText 버킷) — 미지정 = 기본. */
   textPromptId?: string;
   /** 모르는 번호 문자 프롬프트 (phoneExtra 버킷). */

@@ -38,7 +38,7 @@ import {
   formatStylePairs,
   PRO_STYLE_PAIRS_DEFAULT,
 } from "../util/pro-convert";
-import type { MediaPromptItem } from "../types/preset";
+import type { LorebookPlusActiveSettings, MediaPromptItem } from "../types/preset";
 import type { TranslationUndoItem } from "../types/media";
 
 /** 청크당 최대 문단 수 / 원문 글자 수 — 먼저 차는 기준으로 끊는다. */
@@ -202,7 +202,9 @@ export class TranslationService {
    */
   async translateItems(
     items: { id: string; source: string }[],
-    lorebookIds: string[] | undefined
+    lorebookIds: string[] | undefined,
+    /** 로어북 AI 선별을 호출자가 직접 제어할 때(폰 전용 토글) — 허브로 그대로 전달. */
+    lorebookPlusOverride?: LorebookPlusActiveSettings
   ): Promise<{ ok: boolean; results: Map<string, string>; error?: string }> {
     const results = new Map<string, string>();
     const targets = items.filter((i) => i.source.trim() !== "");
@@ -249,6 +251,7 @@ export class TranslationService {
         scanText: segments.map((s) => s.source).join("\n"),
         taskPrompt: prompt.prompt,
         taskLabel: "번역",
+        lorebookPlusOverride,
       });
       try {
         const responseText = await this.callModel(

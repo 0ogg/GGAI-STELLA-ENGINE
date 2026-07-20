@@ -145,6 +145,17 @@ const IDLE_COMMIT_MS = 1500;
 
 /** 집필 프로 — 초고/문단 수정이 멈춘 뒤 영어판 반영(집필 변환)까지의 대기. */
 const PRO_CONVERT_IDLE_MS = 3000;
+
+/** 번역 뷰의 문단 편집 블록 하나 (translationBlocks 항목). */
+interface TranslationBlock {
+  hash: string;
+  source: string;
+  baseline: string;
+  /** 이 문단의 baseline 본문 시작 char offset (노드 앵커 계산용). */
+  offset: number;
+  el: HTMLElement;
+  timer: number | null;
+}
 /** 일괄 번역이 이 분량을 넘으면 실행 전 확인 다이얼로그 (실수로 전체 텍스트 전송 방지). */
 const TRANSLATE_CONFIRM_PARAGRAPHS = 6;
 const TRANSLATE_CONFIRM_CHARS = 2000;
@@ -283,15 +294,7 @@ export class SessionView extends ItemView {
    * 새 번역 variant 로 저장된다. 같은 내용 문단이 여러 번 나오면 블록도 여러 개
    * (번역은 해시로 공유). 배열 순서 = 문서 순서.
    */
-  private translationBlocks: Array<{
-    hash: string;
-    source: string;
-    baseline: string;
-    /** 이 문단의 baseline 본문 시작 char offset (노드 앵커 계산용). */
-    offset: number;
-    el: HTMLElement;
-    timer: number | null;
-  }> = [];
+  private translationBlocks: TranslationBlock[] = [];
   /** 번역 뷰 단일 편집 영역 (문단을 넘는 드래그 선택 + 직접 편집). */
   private translationEditEl: HTMLElement | null = null;
   /** 번역 편집 커밋 디바운스 타이머 (편집 영역 전체 공용). */
@@ -3508,6 +3511,10 @@ export class SessionView extends ItemView {
       if (this.proWritingMode()) this.onProPendingInput();
     });
     editEl.addEventListener("blur", () => this.flushTranslationEdits());
+    // 집필 프로 — 여러 문단에 걸친 선택 삭제를 영어판 구조 삭제로 연동.
+    editEl.addEventListener("keydown", (e) => {
+      if (this.proWritingMode()) this.onProDeleteKeydown(e);
+    });
 
     let docOffset = 0;
     for (const token of tokenizeParagraphs(this.baselineText)) {
@@ -3910,6 +3917,201 @@ export class SessionView extends ItemView {
     }
     this.updateToolbar();
     this.updateViewToggleBtn();
+  }
+
+  /** el 전체가 range 에 완전히 포함되는가. */
+  private rangeCoversElement(range: Range, el: HTMLElement): boolean {
+    const er = document.createRange();
+    er.selectNodeContents(el);
+    return (
+      range.compareBoundaryPoints(Range.START_TO_START, er) <= 0 &&
+      range.compareBoundaryPoints(Range.END_TO_END, er) >= 0
+    );
+  }
+
+  /** range 와 el 의 교차 구간을 el 내부 표시 텍스트 offset 으로 (양끝 클램프). */
+  private selectionOffsetsWithin(
+    range: Range,
+    el: HTMLElement
+  ): { start: number; end: number } {
+    const er = document.createRange();
+    er.selectNodeContents(el);
+    const len = er.toString().length;
+    let start = 0;
+    if (range.compareBoundaryPoints(Range.START_TO_START, er) > 0) {
+      const pre = er.cloneRange();
+      pre.setEnd(range.startContainer, range.startOffset);
+      start = pre.toString().length;
+    }
+    let end = len;
+    if (range.compareBoundaryPoints(Range.END_TO_END, er) < 0) {
+      const pre = er.cloneRange();
+      pre.setEnd(range.endContainer, range.endOffset);
+      end = pre.toString().length;
+    }
+    return {
+      start: Math.max(0, Math.min(start, len)),
+      end: Math.max(0, Math.min(end, len)),
+    };
+  }
+
+  /**
+   * 집필 프로 — 한국어 보기의 "여러 문단 선택 → 삭제"를 영어판과 연동한다
+   * (AI 소설 편집의 기본기: 마음에 드는 곳까지 남기고 뒤를 지우기).
+   *  - 통째로 선택된 문단 = 영어판 해당 구간 구조 삭제 (AI 호출 없음, 노드라 undo 가능)
+   *  - 양끝의 부분 선택 문단 = 남은 한국어를 수정본으로 저장 → 대기→변환 흐름 합류
+   *  - 초고(pending) 영역에 걸친 선택 = 초고도 같이 잘림
+   * 한 문단 안에서만 이루어지는 부분 삭제는 기존 문단 편집 흐름(기본 동작)에 맡긴다.
+   */
+  private onProDeleteKeydown(e: KeyboardEvent): void {
+    if (e.key !== "Delete" && e.key !== "Backspace") return;
+    if (isImeComposing()) return; // 조합 중엔 개입하지 않는다 (입력 마비 회귀 방지)
+    const sel = document.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+    const range = sel.getRangeAt(0);
+    if (!this.translationEditEl?.contains(range.commonAncestorContainer)) return;
+
+    const hit = this.translationBlocks.filter((b) => range.intersectsNode(b.el));
+    const pendingHit =
+      !!this.proPendingEl && range.intersectsNode(this.proPendingEl);
+    if (
+      hit.length === 0 ||
+      (hit.length === 1 &&
+        !pendingHit &&
+        !this.rangeCoversElement(range, hit[0].el))
+    ) {
+      return;
+    }
+    e.preventDefault();
+    void this.performProStructuralDelete(range, hit, pendingHit);
+  }
+
+  private async performProStructuralDelete(
+    range: Range,
+    hit: TranslationBlock[],
+    pendingHit: boolean
+  ): Promise<void> {
+    if (!this.session || !this.sessionFile || !this.translations) return;
+    if (this.generation) return;
+    // 본문(영어판) 미커밋 편집 먼저 확정 — 블록 offset 은 커밋된 baseline 기준.
+    await this.commitPending({ force: true });
+    // 커밋/외부 변경으로 블록이 낡았으면(원문 불일치) 취소 — 어긋난 삭제 방지.
+    for (const b of hit) {
+      if (
+        this.baselineText.slice(b.offset, b.offset + b.source.length) !==
+        b.source
+      ) {
+        new Notice("본문이 방금 바뀌어 삭제를 취소했습니다. 다시 시도해주세요.");
+        return;
+      }
+    }
+
+    // 초고 영역 — 선택에 걸친 부분을 초고에서 잘라낸다.
+    if (pendingHit && this.proPendingEl) {
+      const draft = this.proPendingEl.textContent ?? this.proPendingDraft;
+      const { start, end } = this.selectionOffsetsWithin(range, this.proPendingEl);
+      this.proPendingDraft = draft.slice(0, start) + draft.slice(end);
+    }
+
+    // 문단 분류: 전부 선택 = 구조 삭제 / 부분 선택(양끝) = 한국어 수정본으로.
+    const fullyCovered: TranslationBlock[] = [];
+    let translationsChanged = false;
+    for (const b of hit) {
+      if (this.rangeCoversElement(range, b.el)) {
+        fullyCovered.push(b);
+        continue;
+      }
+      const display = b.el.textContent ?? b.baseline;
+      const { start, end } = this.selectionOffsetsWithin(range, b.el);
+      const remain = display.slice(0, start) + display.slice(end);
+      if (remain.trim() === "") {
+        fullyCovered.push(b); // 남는 게 없으면 통째 삭제로 승격
+      } else {
+        recordTranslationVariant(this.translations, {
+          source: b.source,
+          text: remain,
+          kind: "user-edit",
+        });
+        b.baseline = remain;
+        translationsChanged = true;
+      }
+    }
+
+    // 구조 삭제 — 인접 문단은 한 구간으로 병합하고 한쪽 구분자까지 지운다.
+    if (fullyCovered.length > 0) {
+      fullyCovered.sort((a, b) => a.offset - b.offset);
+      const ranges: Array<{ from: number; to: number }> = [];
+      for (const b of fullyCovered) {
+        const from = b.offset;
+        const to = b.offset + b.source.length;
+        const last = ranges[ranges.length - 1];
+        if (last && /^\n*$/.test(this.baselineText.slice(last.to, from))) {
+          last.to = to;
+        } else {
+          ranges.push({ from, to });
+        }
+      }
+      for (const r of ranges) {
+        // 앞쪽 구분자(개행 런)를 함께 제거 — 문서 첫머리면 뒤쪽 구분자를.
+        while (r.from > 0 && this.baselineText[r.from - 1] === "\n") r.from--;
+        if (r.from === 0) {
+          while (
+            r.to < this.baselineText.length &&
+            this.baselineText[r.to] === "\n"
+          ) {
+            r.to++;
+          }
+        }
+      }
+      const node: SessionNode = {
+        id: uuidv4(),
+        parent: this.session.meta.activeLeafId,
+        kind: "user-edit",
+        patches: ranges
+          .sort((a, b) => b.from - a.from)
+          .map((r) => ({ op: "delete" as const, from: r.from, to: r.to })),
+        createdAt: Date.now(),
+      };
+      this.session.nodes[node.id] = node;
+      this.session.meta.activeLeafId = node.id;
+      this.redoStack = [];
+      await this.persistSession("문단 삭제 저장 실패");
+    }
+    if (translationsChanged) await this.saveTranslationsSuppressed();
+
+    // 로컬 재구성 + 커서를 삭제 지점의 다음 문단 머리로.
+    const caretOffset = Math.min(...hit.map((b) => b.offset));
+    this.baselineSpans = buildSpans(this.session);
+    this.baselineText = spansToText(this.baselineSpans);
+    this.refreshDisplayBaseline();
+    this.suppressEvents = true;
+    this.preserveReadingPosition(() => this.renderBodySpans());
+    this.suppressEvents = false;
+    if (this.translationViewActive || this.outputMode === "split-h") {
+      this.renderTranslationBlocks();
+      this.setCaretAfterProDelete(caretOffset);
+    }
+    this.updateToolbar();
+    this.updateViewToggleBtn();
+    // 부분 선택으로 생긴 수정본은 대기 표시 → 변환 예약.
+    if (translationsChanged) this.scheduleProConvert();
+  }
+
+  /** 삭제 지점(raw offset) 이후 첫 문단 머리로 커서 이동 — 없으면 초고 영역으로. */
+  private setCaretAfterProDelete(rawOffset: number): void {
+    const target =
+      this.translationBlocks.find(
+        (b) => b.offset + b.source.length > rawOffset
+      ) ?? null;
+    const el = target?.el ?? this.proPendingEl;
+    if (!el) return;
+    const sel = window.getSelection();
+    if (!sel) return;
+    const r = document.createRange();
+    r.selectNodeContents(el);
+    r.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(r);
   }
 
   /** 재렌더된 초고 영역 안으로 커서 복원 (이어 쓰던 흐름 유지). */

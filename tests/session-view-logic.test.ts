@@ -3393,3 +3393,45 @@ function regexScript(overrides: Partial<RegexScript>): RegexScript {
   assert.ok(block.includes('"ko":"감마 한국어."'));
   assert.ok(block.includes("Korean voice"));
 }
+
+// ─── 집필 프로 — 용어집 스캔 대상 수집 (util/pro-convert) ───
+{
+  const {
+    collectUnscannedAuthoredPairs,
+  } = require("../src/util/pro-convert") as typeof import("../src/util/pro-convert");
+  const { hashText } = require("../src/util/translate-paragraphs") as typeof import("../src/util/translate-paragraphs");
+  const { createEmptySessionTranslations } = require("../src/types/media") as typeof import("../src/types/media");
+
+  const tr = createEmptySessionTranslations();
+  const put = (en: string, ko: string, kind: string, at: number) => {
+    const hash = hashText(en);
+    tr.paragraphs[hash] = {
+      source: en,
+      activeVariantId: "v1",
+      variants: {
+        v1: { id: "v1", kind: kind as any, sourceHash: hash, text: ko, createdAt: at, updatedAt: at },
+      },
+    };
+  };
+  put("One.", "하나.", "authored", 100);
+  put("Two.", "둘.", "authored", 200);
+  put("Three.", "셋 기계.", "ai-translation", 300); // authored 아님 — 제외
+  put("Four.", "넷.", "authored", 400);
+
+  // sinceAt 이후 authored 만, 오래된 것부터.
+  const all = collectUnscannedAuthoredPairs(tr, 0, 10);
+  assert.deepEqual(all.pairs.map((p) => p.ko), ["하나.", "둘.", "넷."]);
+  assert.equal(all.lastAt, 400);
+  assert.equal(all.remaining, 0);
+
+  // sinceAt 경계(<=)와 상한 초과분 remaining.
+  const later = collectUnscannedAuthoredPairs(tr, 100, 1);
+  assert.deepEqual(later.pairs.map((p) => p.ko), ["둘."]);
+  assert.equal(later.lastAt, 200);
+  assert.equal(later.remaining, 1);
+
+  // 새 짝 없음 — lastAt 은 sinceAt 유지.
+  const none = collectUnscannedAuthoredPairs(tr, 400, 10);
+  assert.equal(none.pairs.length, 0);
+  assert.equal(none.lastAt, 400);
+}

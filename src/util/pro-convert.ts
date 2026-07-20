@@ -183,6 +183,40 @@ export function formatStylePairs(
   ].join("\n");
 }
 
+export interface AuthoredPairScan {
+  /** 스캔 대상 짝 (오래된 것부터 — 상한 초과분은 다음 스캔으로 넘어간다). */
+  pairs: ProConvertPair[];
+  /** 포함된 마지막 짝의 createdAt — 성공 시 다음 scanAt. 짝이 없으면 sinceAt 그대로. */
+  lastAt: number;
+  /** 상한에 걸려 이번에 못 실은 미스캔 짝 수. */
+  remaining: number;
+}
+
+/**
+ * 번역 용어집 스캔 대상 수집 — active variant 가 `authored` 이고 sinceAt 이후에
+ * 만들어진 문단 짝. 오래된 것부터 max 개 (남은 분은 remaining 으로 보고).
+ */
+export function collectUnscannedAuthoredPairs(
+  translations: SessionTranslations,
+  sinceAt: number,
+  max: number
+): AuthoredPairScan {
+  const candidates: Array<ProConvertPair & { at: number }> = [];
+  for (const entry of Object.values(translations.paragraphs)) {
+    const active = entry.variants[entry.activeVariantId];
+    if (active?.kind !== "authored" || active.text.trim() === "") continue;
+    if (active.createdAt <= sinceAt) continue;
+    candidates.push({ en: entry.source, ko: active.text, at: active.createdAt });
+  }
+  candidates.sort((a, b) => a.at - b.at);
+  const take = max > 0 ? candidates.slice(0, max) : [];
+  return {
+    pairs: take.map((p) => ({ en: p.en, ko: p.ko })),
+    lastAt: take.length > 0 ? take[take.length - 1].at : sinceAt,
+    remaining: candidates.length - take.length,
+  };
+}
+
 /**
  * 영어판 꼬리를 문체 참조용으로 자른다 — maxChars 로 끝에서 자르고, 잘린 앞쪽
  * 부분 문단은 버린다(문단 경계 정렬). 본문 전체가 한 문단이면 그대로 쓴다.

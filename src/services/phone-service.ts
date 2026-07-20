@@ -52,6 +52,7 @@ import { composeInheritedSummary } from "../util/summarize-session";
 import { resolveActiveLorebooks } from "../util/resolve-active-lorebooks";
 import { matchLorebookEntries, type MatchedLorebookEntry } from "../util/lorebook-match";
 import type { StellaLorebook } from "../types/lorebook";
+import type { LorebookPlusActiveSettings } from "../types/preset";
 import type { StellaScenario } from "../types/scenario";
 import { uuidv4 } from "../util/uuid";
 import { getSessionHostLeaves, isSessionHostView } from "../views/session-host";
@@ -1683,6 +1684,19 @@ export class PhoneService {
 
   // ─────────────────────────── 번역 (PH5) ───────────────────────────
 
+  /**
+   * 폰 번역용 로어북 AI 선별 설정 — 폰 전용 토글(`phone.translation.aiMatching`)이
+   * on/off 를 정하고, 선별 모델/프롬프트/첨부량은 전역 로어북 확장 설정을 재사용한다
+   * (없으면 허브가 기본 생성 프로필 + 기본 확장 선별 프롬프트로 폴백). 세션 [확장]
+   * 탭의 applyToExtensions 와 무관 — override 자체가 폰 컨텍스트의 opt-in.
+   */
+  private phoneTranslationLorebookPlus(): LorebookPlusActiveSettings {
+    return {
+      ...(this.plugin.data.current?.lorebookPlus ?? {}),
+      aiMatching: this.plugin.data.phone?.translation?.aiMatching === true,
+    };
+  }
+
   /** 번역 실행 중 가드 키 — 같은 스레드/게시글에 번역이 겹치지 않게. */
   private translatingKeys = new Set<string>();
 
@@ -1715,7 +1729,8 @@ export class PhoneService {
       if (targets.length === 0) return { ok: true };
       const r = await this.plugin.translation.translateItems(
         targets.map((m, i) => ({ id: `m${i}`, source: m.text })),
-        this.plugin.data.phone?.translation?.lorebookIds
+        this.plugin.data.phone?.translation?.lorebookIds,
+        this.phoneTranslationLorebookPlus()
       );
       if (r.results.size > 0) {
         // 번역 중 새 문자가 왔을 수 있으니 다시 읽어 message id 로 매칭해 저장.
@@ -1777,7 +1792,8 @@ export class PhoneService {
       if (items.length === 0) return { ok: true };
       const r = await this.plugin.translation.translateItems(
         items,
-        this.plugin.data.phone?.translation?.lorebookIds
+        this.plugin.data.phone?.translation?.lorebookIds,
+        this.phoneTranslationLorebookPlus()
       );
       if (r.results.size > 0) {
         const fresh = await store.getSnsFeed();
@@ -2193,14 +2209,22 @@ export class PhoneService {
           : "") +
         (rosterBlock
           ? `\n[Worlds recently in play — each world/scenario with its description ` +
-            `and lore, so you know its setting and the PEOPLE in it. A world may ` +
-            `hold one character or many; treat each named person as their own ` +
-            `individual. About half of all activity should come from these named ` +
+            `and lore, GIVEN ONLY so you can voice the PEOPLE in it in their own ` +
+            `character. A world may hold one person or many; treat each named ` +
+            `person as their own individual. This is background for writing them, ` +
+            `NOT public knowledge — no one else on the network has read these ` +
+            `profiles. About half of all activity should come from these named ` +
             `people, each strictly in their own voice.]\n${rosterBlock}\n`
           : "") +
-        `\n[Recent events across the worlds — the feed reacts to THESE]\n` +
+        `\n[Recent events — the PRIVATE lived experience of the people in the ` +
+        `worlds below. This is the raw material for what THOSE people (and only ` +
+        `they) know and might choose to post about their own lives. It is NOT ` +
+        `public and the network did NOT watch it happen. Nothing here reaches ` +
+        `anyone else until someone actually posts it — everyone outside the ` +
+        `scene knows ONLY what appears in the feed. Never let an account narrate ` +
+        `private details it had no way to witness.]\n` +
         eventBlocks.join("\n\n") +
-        `\n\n[Recent feed — reply to items by their id]\n${feedLines}\n\n` +
+        `\n\n[Recent feed — the only PUBLIC surface; reply to items by their id]\n${feedLines}\n\n` +
         `${personaName} is the current viewer (their posts are marked [viewer]).\n\n` +
         buildSnsIoInstructions(cap, {
           minNewPosts,
@@ -2926,7 +2950,11 @@ export class PhoneService {
         }
       }
       if (tail) {
-        parts.push(`Recent events (what just happened — react to THIS):\n${tail}`);
+        parts.push(
+          `What ${world}'s people just lived through (PRIVATE — only those ` +
+            `present know this; anyone else learns it only if someone posts it):` +
+            `\n${tail}`
+        );
       }
       opts.usedSessions.set(sessionFile, world);
     }

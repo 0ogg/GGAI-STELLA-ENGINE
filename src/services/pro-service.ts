@@ -16,6 +16,8 @@
 
 import { Notice } from "obsidian";
 import type StellaEnginePlugin from "../main";
+import { VIEW_TYPE_PRO_FOCUS } from "../constants";
+import { ProGlossaryService } from "./pro-glossary-service";
 import type { Patch, SessionNode, TurnKind } from "../types/session";
 import { createProSettingsPanel } from "../views/detail/panels/pro-panel";
 import { isCancelledError } from "./ai-service";
@@ -93,8 +95,12 @@ export interface ProManuscript {
 export class ProService {
   private active = false;
   private disposeSurfaces: (() => void) | null = null;
+  /** 번역 용어집 자동 수집 (P6) — 집필 변환 성공 훅 + 패널 [지금 스캔]이 쓴다. */
+  readonly glossary: ProGlossaryService;
 
-  constructor(private plugin: StellaEnginePlugin) {}
+  constructor(private plugin: StellaEnginePlugin) {
+    this.glossary = new ProGlossaryService(plugin);
+  }
 
   isActive(): boolean {
     return this.active;
@@ -122,6 +128,21 @@ export class ProService {
     this.active = false;
     this.disposeSurfaces?.();
     this.disposeSurfaces = null;
+  }
+
+  /** 집중 설정 뷰를 우측 사이드바에 연다 (있으면 reveal — revealDetail 패턴). */
+  async openFocusView(): Promise<void> {
+    if (!this.active) return;
+    const workspace = this.plugin.app.workspace;
+    const existing = workspace.getLeavesOfType(VIEW_TYPE_PRO_FOCUS);
+    if (existing[0]) {
+      workspace.revealLeaf(existing[0]);
+      return;
+    }
+    const leaf = workspace.getRightLeaf(false);
+    if (!leaf) return;
+    await leaf.setViewState({ type: VIEW_TYPE_PRO_FOCUS, active: true });
+    workspace.revealLeaf(leaf);
   }
 
   /**
@@ -404,6 +425,8 @@ export class ProService {
     await this.plugin.store.saveSession(sessionFile, session, {
       origin: opts?.origin,
     });
+    // 용어집 자동 수집 — 방금 늘어난 짝을 보고 주기가 찼으면 백그라운드로 스캔.
+    void this.glossary.scanIfNeeded(sessionFile);
     return { ok: true, errors: [] };
   }
 

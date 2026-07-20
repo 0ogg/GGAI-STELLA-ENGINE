@@ -175,6 +175,11 @@ export interface SessionMeta {
   lorebookPlus?: LorebookPlusActiveSettings;
   /** 집필 프로(PRO) 활성 설정 — proWriting 세션의 한→영 집필 변환. */
   pro?: ProActiveSettings;
+  /**
+   * 집필 프로 — 번역 용어집 자동 수집이 마지막으로 스캔한 authored 짝의 createdAt.
+   * 이보다 새 짝이 주기만큼 쌓이면 다시 스캔한다 (실패 시 갱신하지 않아 재시도).
+   */
+  glossaryScanAt?: number;
   /** 선채팅(P1) 세션 설정 — 챗 리모컨 종 버튼으로 토글. 빈도/상한은 플러그인 설정. */
   proactive?: ProactiveSessionSettings;
   /** NAI 형식으로 보내기 — 텍스트 컴플리션 전송 시 <|system|>/<|user|>/<|assistant|> 턴으로 감싼다. */
