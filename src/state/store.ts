@@ -598,17 +598,18 @@ export class StellaStore extends Events {
   }
 
   /**
-   * 목록 표시용 재스캔. 디스크 내용을 반영하되 **캐시 객체의 identity 는 보존한다** —
-   * 세션창/디테일 뷰가 들고 있는 참조를 갈아치우면 그 뷰의 다음 저장이 옛 사본을
-   * 디스크에 덮어써 모델/파라미터/번역 설정이 직전 값으로 되돌아간다.
-   * (refreshSession 과 같은 제자리 갱신 규칙. 회귀금지.md 참조.)
+   * 목록 표시용 재스캔. **이미 캐시에 있는(=세션창/디테일 뷰가 편집·생성 중인) 세션
+   * 객체는 절대 건드리지 않는다** — 목록은 그 최신 객체를 그대로 쓴다. 디스크본으로
+   * 덮어쓰면 아직 저장이 디스크에 반영되기 전인 생성 노드/편집이 리셋돼 사라진다
+   * (좌측 목록 재스캔이 세션창의 활성 세션 데이터를 삭제하던 사고). 목록 표시엔
+   * meta(이름/즐겨찾기/시각)만 쓰므로 캐시 객체가 오히려 항상 같거나 더 최신이다.
+   * getSessions 의 "이미 있으면 안 덮어씀" 과 동일한 참조 보호 정책.
    */
   async refreshSessions(scenarioFolder: string): Promise<SessionListItem[]> {
     const list = await scanSessions(this.vault, scenarioFolder);
     for (const item of list) {
       const existing = this.sessionByFile.get(item.sessionFile);
       if (existing) {
-        assignSessionInPlace(existing, item.session);
         item.session = existing;
       } else {
         this.sessionByFile.set(item.sessionFile, item.session);
