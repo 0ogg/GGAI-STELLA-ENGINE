@@ -26,10 +26,13 @@ import {
   buildTranslationRequest,
   chunkParagraphs,
   collectParagraphs,
+  collectTranslationContext,
   collectUntranslatedParagraphs,
+  formatTranslationContext,
   parseTranslationResponse,
   pushTranslationUndoEntry,
   recordTranslationVariant,
+  TRANSLATION_CONTEXT_SETS_DEFAULT,
   TRANSLATION_IO_INSTRUCTIONS,
 } from "../util/translate-paragraphs";
 import { createExtensionRegexApplier } from "../util/session-regex";
@@ -39,7 +42,7 @@ import {
   PRO_STYLE_PAIRS_DEFAULT,
 } from "../util/pro-convert";
 import type { LorebookPlusActiveSettings, MediaPromptItem } from "../types/preset";
-import type { TranslationUndoItem } from "../types/media";
+import type { SessionTranslations, TranslationUndoItem } from "../types/media";
 
 /** 청크당 최대 문단 수 / 원문 글자 수 — 먼저 차는 기준으로 끊는다. */
 const CHUNK_PARAGRAPHS = 8;
@@ -79,7 +82,7 @@ export interface TranslationPreviewItem {
 
 export interface TranslatePreviewResult {
   ok: boolean;
-  /** hash 순서 = AI 가 돌려준 순서 (target + 문맥용 context 포함, 원본 로직과 동일). */
+  /** hash 순서 = AI 가 돌려준 순서 (재번역 대상 문단만 — 문맥 context 는 제외). */
   items: TranslationPreviewItem[];
   errors: string[];
   modelProfileId: string;
@@ -100,6 +103,8 @@ export class TranslationService {
         retry: boolean;
         /** 집필 프로 문체 예시 쌍 첨부 수 (authored 쌍이 없는 일반 세션은 무의미). */
         stylePairsMax: number;
+        /** 앞 문맥 첨부 세트 수 (1세트=6문단, 0=끄기). */
+        contextSets: number;
       }
     | { ok: false; error: string }
   > {
@@ -141,6 +146,7 @@ export class TranslationService {
       books,
       retry: translation.retryOnFormatError === true,
       stylePairsMax: settings.pro?.stylePairs ?? PRO_STYLE_PAIRS_DEFAULT,
+      contextSets: translation.contextSets ?? TRANSLATION_CONTEXT_SETS_DEFAULT,
     };
   }
 
@@ -238,6 +244,10 @@ export class TranslationService {
       CHUNK_PARAGRAPHS,
       CHUNK_CHARS
     );
+    // 청크 하나가 실패해도 나머지는 계속 번역한다 — 한 청크 실패로 뒤 청크를
+    // 통째로 버리면 "일부만 번역됨"이 크게 남는다(부분 성공 최대화). 못 된 항목은
+    // 다시 "번역 보기"를 켜거나 개별 재번역으로 채운다.
+    let lastError: string | undefined;
     for (const chunk of chunks) {
       const segments = chunk.map((c) => ({
         id: c.hash,
@@ -262,11 +272,8 @@ export class TranslationService {
         );
         const parsed = parseTranslationResponse(responseText);
         if (!parsed || parsed.length === 0) {
-          return {
-            ok: false,
-            results,
-            error: "번역 응답이 올바른 형식이 아닙니다.",
-          };
+          lastError = "번역 응답이 올바른 형식이 아닙니다.";
+          continue;
         }
         const valid = new Set(chunk.map((c) => c.hash));
         for (const r of parsed) {
@@ -275,14 +282,15 @@ export class TranslationService {
           }
         }
       } catch (err) {
-        // 취소는 오류가 아니다 — 남은 청크를 발사하지 않고 조용히 멈춘다.
+        // 취소는 오류가 아니다 — 남은 청크를 발사하지 않고 즉시 멈춘다.
         if (isCancelledError(err)) return { ok: results.size > 0, results };
-        return {
-          ok: false,
-          results,
-          error: `번역 호출 실패: ${err instanceof Error ? err.message : String(err)}`,
-        };
+        lastError = `번역 호출 실패: ${err instanceof Error ? err.message : String(err)}`;
+        // 이 청크만 건너뛰고 다음 청크로.
       }
+    }
+    // 하나라도 성공했으면 성공(부분 성공 보존). 전부 실패면 에러를 알린다.
+    if (results.size === 0 && lastError) {
+      return { ok: false, results, error: lastError };
     }
     return { ok: true, results };
   }
@@ -302,6 +310,10 @@ export class TranslationService {
     errorCount: { n: number },
     /** 확장 결과물 정규식(저장 원문 시점 + 번역 대상 전역 스크립트) — 없으면 null. */
     applyRegex: ((text: string) => string) | null,
+    /** 앞 문맥 참고 블록 재료 — 대상 앞 문단의 원문/번역을 함께 조회. */
+    translations: SessionTranslations,
+    /** 앞 문맥 첨부 세트 수 (0 = 끄기). */
+    contextSets: number,
     /** 집필 프로 문체 예시 쌍 블록 — 없으면 "" (일반 세션). */
     pairsText = ""
   ): Promise<{
@@ -321,6 +333,13 @@ export class TranslationService {
       taskPrompt: promptText,
       taskLabel: "번역",
     });
+    // 앞 문맥/앞 번역 — 로어북과 같은 참고자료 위치(로어북 슬롯)에 합류시킨다.
+    const contextBlock = formatTranslationContext(
+      collectTranslationContext(text, translations, chunk, contextSets)
+    );
+    const referenceText = [lorebookText, contextBlock]
+      .filter((s) => s)
+      .join("\n\n");
     let results: ReturnType<typeof parseTranslationResponse> = null;
     let lastError = "";
     let stoppedByLimit = false;
@@ -331,7 +350,7 @@ export class TranslationService {
           profile,
           promptText,
           segments,
-          lorebookText,
+          referenceText,
           pairsText
         );
         const parsed = parseTranslationResponse(responseText);
@@ -421,6 +440,8 @@ export class TranslationService {
         retry,
         errorCount,
         applyRegex,
+        previewTranslations,
+        setup.contextSets,
         pairsText
       );
       if (cancelled) break; // 취소 — 조용히 멈춤(오류로 처리하지 않음)
@@ -428,12 +449,17 @@ export class TranslationService {
         errors.push(reason);
         break;
       }
+      // 재번역 대상 문단만 미리보기에 담는다 — 연속성용 문맥 문단은 모델이 함께
+      // 돌려줘도 제외해, commitPreview 가 요청하지 않은(저자 원고 등) 문단을
+      // 덮어쓰지 않게 한다.
+      const chunkTargets = new Set(chunk.map((c) => c.hash));
       for (const item of results) {
         const source = sourceById.get(item.id);
         if (source === undefined) {
           errors.push(`입력에 없는 문단 응답: ${item.id}`);
           continue;
         }
+        if (!chunkTargets.has(item.id)) continue;
         if (!item.translation.trim()) continue;
         items.push({ hash: item.id, source, translation: item.translation });
       }
@@ -536,6 +562,8 @@ export class TranslationService {
         retry,
         errorCount,
         applyRegex,
+        translations,
+        setup.contextSets,
         pairsText
       );
 
@@ -549,6 +577,11 @@ export class TranslationService {
         break;
       }
 
+      // 이 청크가 실제로 번역을 요청한 대상 문단만 기록한다. buildTranslationRequest
+      // 가 연속성용으로 끼워 보낸 "문맥(context)" 문단은 모델이 개선 번역을 함께
+      // 돌려줘도 저장하지 않는다 — 요청하지 않은 문단(특히 집필 프로의 저자 원고
+      // authored)을 왕복 번역으로 덮어쓰는 사고를 막는다.
+      const chunkTargets = new Set(chunk.map((c) => c.hash));
       let chunkUpdated = 0;
       for (const item of results) {
         const source = sourceById.get(item.id);
@@ -556,6 +589,7 @@ export class TranslationService {
           errors.push(`입력에 없는 문단 응답: ${item.id}`);
           continue;
         }
+        if (!chunkTargets.has(item.id)) continue;
         if (!item.translation.trim()) continue;
         // 되돌리기용: 이 문단을 이번 실행에서 처음 건드릴 때의 이전 active 를 기록.
         const prevActive =

@@ -63,6 +63,8 @@ export interface TranslationActiveSettings {
   lorebookIds?: string[];
   /** 번역 오류(호출 실패/형식 깨짐) 시 자동 재시도. 같은 실행에서 누적 10회면 중단. */
   retryOnFormatError?: boolean;
+  /** 앞 문맥 첨부 세트 수 (1세트=직전 6문단, 0=끄기). 로어북 위치에 참고 블록으로 삽입. */
+  contextSets?: number;
 }
 
 /**

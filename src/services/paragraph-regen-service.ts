@@ -14,8 +14,10 @@ import type StellaEnginePlugin from "../main";
 import { resolveMediaPrompt } from "../util/default-media-prompts";
 import {
   buildParagraphRegenBody,
+  formatRegenContext,
   PARAGRAPH_REGEN_IO_INSTRUCTIONS,
 } from "../util/paragraph-regen";
+import { composeSummaryContextForPath } from "../util/summarize-session";
 
 export interface ParagraphRegenResult {
   ok: boolean;
@@ -33,6 +35,11 @@ export interface ParagraphRegenOptions {
   promptId?: string;
   /** 일회성 추가 지시 (프롬프트를 골랐을 때). */
   feedback?: string;
+  /**
+   * 세션 참고 맥락 — 대상 범위 앞/뒤 문단. 지정 시 요약과 합쳐 참고 블록으로 첨부한다
+   * ("세션 컨텍스트 첨부 끄기" 체크 시 호출자가 생략 → 기존 동작). 요약은 서비스가 로드.
+   */
+  context?: { before: string[]; after: string[] };
 }
 
 export class ParagraphRegenService {
@@ -68,8 +75,29 @@ export class ParagraphRegenService {
       this.plugin.ai.getDefaultGenerationProfile();
     if (!profile) return fail("문단 재생성에 사용할 모델 프로필이 없습니다.");
 
+    // 세션 참고 맥락 — 앞뒤 문단(호출자 수집) + 요약(여기서 로드)을 참고 블록으로.
+    let contextBlock = "";
+    if (opts.context && sessionFile) {
+      const session = await this.plugin.store.getSession(sessionFile);
+      let summary = "";
+      if (session) {
+        const summaries =
+          await this.plugin.store.getSessionSummaries(sessionFile);
+        summary = composeSummaryContextForPath(
+          session,
+          summaries,
+          session.meta.activeLeafId
+        );
+      }
+      contextBlock = formatRegenContext(
+        opts.context.before,
+        opts.context.after,
+        summary
+      );
+    }
     const body = buildParagraphRegenBody(instruction, opts.source, {
       feedback: opts.feedback,
+      context: contextBlock || undefined,
     });
     try {
       let text: string;

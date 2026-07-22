@@ -15,9 +15,8 @@ import {
   matchesStreamKeywords,
   type PhonePluginData,
   type PhoneTriggerSettings,
-  type SnsAuthor,
-  type SnsPost,
 } from "../types/phone";
+import { sawSnsPost } from "../util/phone-knows";
 import type { SettingsPanel } from "../services/settings-panel-registry";
 import {
   renderMediaLorebookPicker,
@@ -33,20 +32,8 @@ import { ScenarioSelectModal } from "../views/scenario-select-modal";
 
 /** 기억 주입에 넣는 최근 문자 수 (스레드 끝에서부터). */
 const INJECT_MESSAGE_LIMIT = 12;
-/** 직접 관여하지 않은 SNS 글을 "지나가다 봤을" 확률 (결정적 샘플). */
-const SNS_BROWSE_CHANCE = 0.3;
 /** 기억 주입에 넣는 SNS 게시글 상한. */
 const SNS_INJECT_LIMIT = 5;
-
-/** 문자열 → 0~1 결정적 해시 비율 (FNV-1a) — 미리보기·생성 byte 동일 유지용. */
-function hashRatio(s: string): number {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return (h >>> 0) / 0xffffffff;
-}
 
 export function registerPhoneExtension(plugin: StellaEnginePlugin): () => void {
   const disposeExt = plugin.extensions.register({
@@ -62,7 +49,7 @@ export function registerPhoneExtension(plugin: StellaEnginePlugin): () => void {
         },
       },
     ],
-    async contributeContext({ session, leafId }) {
+    async contributeContext({ session }) {
       const phone = plugin.data.phone;
       // 문자/SNS 연동은 별개 토글 — 둘 다 꺼져 있으면 기여 없음.
       const textOn = phone?.enabled !== false;
@@ -114,24 +101,17 @@ export function registerPhoneExtension(plugin: StellaEnginePlugin): () => void {
         }
       }
 
-      // ── SNS 기억 (PH3) — 직접 작성/답글 = 100%, 나머지는 확률적(결정적
-      // 샘플 — 같은 leaf 면 미리보기와 생성이 byte 동일해야 하므로 Math.random
-      // 대신 post.id+leafId 해시를 쓴다). ──
+      // ── SNS 기억 (PH3 + v2 §8.2) — 직접 작성/답글 = 100%, 나머지는 이슈
+      // 등급별 확률로 "봤는지" 판정(결정적 해시 — Math.random 이면 미리보기·생성
+      // byte 동일 대전제가 깨진다). 캐릭터(scenarioId) 기준이라 재생성해도 같은
+      // 글은 봤거나 못 봤거나 일관된다. ──
       const feed = snsOn
         ? await plugin.store.getSnsFeed().catch(() => null)
         : null;
       if (feed && feed.posts.length > 0) {
-        const isChar = (a: SnsAuthor) =>
-          (a.kind === "character" || a.kind === "scenario") &&
-          a.id === session.meta.scenarioId;
-        const involved = (p: SnsPost) =>
-          isChar(p.author) || p.replies.some((r) => isChar(r.author));
+        const scenarioId = session.meta.scenarioId;
         const recentPosts = feed.posts.slice(-20);
-        const chosen = recentPosts.filter(
-          (p) =>
-            involved(p) ||
-            hashRatio(`${p.id}:${leafId}`) < SNS_BROWSE_CHANCE
-        );
+        const chosen = recentPosts.filter((p) => sawSnsPost(p, scenarioId));
         const picked = chosen.slice(-SNS_INJECT_LIMIT);
         if (picked.length > 0) {
           const lines = picked.map((p) => {
@@ -297,6 +277,24 @@ function createPhoneSettingsPanel(): SettingsPanel {
         placeholder: "예: 한국어",
         onChange: (language) => void patch({ language }),
       });
+      renderEnableToggle({
+        parent: body,
+        label: "앱끼리 소식 공유 (문자·SNS·방송이 서로의 최근 일을 참고)",
+        checked: phone.sharedContextEnabled !== false,
+        onChange: (sharedContextEnabled) => void patch({ sharedContextEnabled }),
+      });
+      if (phone.sharedContextEnabled !== false) {
+        renderNumberRow({
+          parent: body,
+          label: "공유 소식 참고 분량 (토큰)",
+          value: phone.sharedContextTokens ?? 1000,
+          fallback: 1000,
+          min: 0,
+          integer: true,
+          onChange: (sharedContextTokens) =>
+            void patch({ sharedContextTokens }),
+        });
+      }
 
       // ── 문자 — 프롬프트 + 답장에 붙일 재료 분량 (문자 전용). ──
       section("문자");

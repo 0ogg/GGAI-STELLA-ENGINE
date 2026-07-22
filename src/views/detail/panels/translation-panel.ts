@@ -1,12 +1,17 @@
 import type { SettingsPanel, SettingsPanelContext } from "../../../services/settings-panel-registry";
 import type { TranslationActiveSettings, TranslationOutputMode } from "../../../types/preset";
 import { getDefaultPrompts } from "../../../util/default-media-prompts";
+import { TRANSLATION_CONTEXT_SETS_DEFAULT } from "../../../util/translate-paragraphs";
 import {
   renderMediaLorebookPicker,
   renderMediaModelPicker,
   renderMediaPromptPicker,
 } from "../media-prompt-panel";
-import { renderEnableToggle, renderOptionGrid } from "../setting-controls";
+import {
+  renderEnableToggle,
+  renderNumberRow,
+  renderOptionGrid,
+} from "../setting-controls";
 
 /**
  * 번역 설정 — 확장 탭 패널 (구 기본 탭 미디어 영역 `MediaSection` 에서 이관).
@@ -80,6 +85,18 @@ export function createTranslationSettingsPanel(): SettingsPanel {
         label: "로어북",
         selectedIds: settings.translation?.lorebookIds ?? [],
         onToggle: (lorebookIds) => void patchTranslation(ctx, { lorebookIds }),
+      });
+
+      // 앞 문맥/앞 번역 첨부 — 로어북과 같은 참고자료 위치에 삽입. 1세트=직전 6문단.
+      renderNumberRow({
+        parent: body,
+        label: "앞 문맥 첨부 (세트 · 1세트=직전 6문단, 0=끄기)",
+        value: settings.translation?.contextSets ?? TRANSLATION_CONTEXT_SETS_DEFAULT,
+        fallback: TRANSLATION_CONTEXT_SETS_DEFAULT,
+        min: 0,
+        step: 1,
+        integer: true,
+        onChange: (contextSets) => void patchTranslation(ctx, { contextSets }),
       });
     },
   };

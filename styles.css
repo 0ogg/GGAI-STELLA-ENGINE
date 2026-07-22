@@ -1062,6 +1062,19 @@
 .ggai-pr-gen-btn {
   flex: 0 0 auto;
 }
+/* 세션 컨텍스트 첨부 끄기 — 체크박스 + 라벨 한 줄. */
+.ggai-pr-ctx-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.ggai-pr-ctx-toggle input {
+  margin: 0;
+}
 /* 본문(.ggai-modal-body) 자체는 스크롤하지 않는다 — 안의 textarea(.ggai-pr-edit-ta)
    가 유일한 스크롤 영역. 셸 기본 overflow-y:auto 를 여기서 꺼서 이중 스크롤바를 막는다. */
 .ggai-pr-body {
@@ -8314,6 +8327,10 @@ body.is-mobile .ggai-phone-composer {
 }
 .ggai-phone-app-icon.is-sns {
   background: linear-gradient(160deg, #8a5cff, #5a8bff);
+}
+/* 외부 등록 앱 (v2 §9) — 전용 색이 없으므로 중립 그라데이션. */
+.ggai-phone-app-icon.is-ext {
+  background: linear-gradient(160deg, #6b7280, #4b5563);
 }
 .ggai-phone-app-label {
   font-size: 0.7em;

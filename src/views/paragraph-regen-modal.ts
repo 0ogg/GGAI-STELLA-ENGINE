@@ -25,7 +25,9 @@ import {
   isBuiltinMediaPrompt,
 } from "../util/default-media-prompts";
 import {
+  collectRegenContext,
   listParagraphRanges,
+  PARAGRAPH_REGEN_CONTEXT_SETS,
   type ParagraphRangeInfo,
 } from "../util/paragraph-regen";
 import { attachLongPress } from "../util/long-press";
@@ -174,6 +176,21 @@ export class ParagraphRegenModal extends Modal {
       text: "재생성",
     });
     this.generateBtn.addEventListener("click", () => void this.generate());
+
+    // ── 세션 컨텍스트 첨부 끄기 — 켜면(체크) 앞뒤 문단·요약 없이 대상 문장+지침만 보낸다. ──
+    const ctxLabel = toolbar!.createEl("label", {
+      cls: "ggai-modal-toolbar-row ggai-pr-ctx-toggle",
+    });
+    const ctxCheck = ctxLabel.createEl("input", {
+      attr: { type: "checkbox" },
+    });
+    ctxCheck.checked = this.plugin.data.paragraphRegenNoContext === true;
+    ctxLabel.createSpan({ text: "세션 컨텍스트 첨부 끄기" });
+    ctxCheck.addEventListener("change", () => {
+      void this.plugin.savePluginData({
+        paragraphRegenNoContext: ctxCheck.checked,
+      });
+    });
 
     // ── 편집 영역 (원문으로 시작 → 재생성하면 결과, 직접 수정 가능). 본문의 유일한 스크롤 영역. ──
     this.editTa = body.createEl("textarea", { cls: "ggai-pr-edit-ta" });
@@ -447,11 +464,22 @@ export class ParagraphRegenModal extends Modal {
     const rewriteOpts = promptId
       ? { promptId, feedback: direct || undefined }
       : { instruction: direct };
+    // 세션 컨텍스트 첨부(기본) — 대상 범위 앞뒤 문단. 요약은 서비스가 붙인다.
+    // "끄기" 체크 시 생략 → 기존 동작(대상 문장+지침만).
+    const context =
+      this.plugin.data.paragraphRegenNoContext === true
+        ? undefined
+        : collectRegenContext(
+            this.opts.baselineText,
+            this.startIndex,
+            this.opts.anchorIndex,
+            PARAGRAPH_REGEN_CONTEXT_SETS
+          );
     this.setBusy(true);
     try {
       const result = await this.plugin.paragraphRegen.rewrite(
         this.opts.sessionFile,
-        { source, ...rewriteOpts }
+        { source, ...rewriteOpts, context }
       );
       if (!result.ok) {
         new Notice(result.errors.join("\n") || "문단 재생성에 실패했습니다.");

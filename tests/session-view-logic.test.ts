@@ -86,6 +86,7 @@ import {
   buildTranslationRequest,
   chunkParagraphs,
   collectParagraphs,
+  collectTranslationContext,
   collectUntranslatedParagraphs,
   collectUntranslatedParagraphsFrom,
   getActiveTranslation,
@@ -97,6 +98,11 @@ import {
   setActiveTranslationVariant,
   tokenizeParagraphs,
 } from "../src/util/translate-paragraphs";
+import {
+  buildParagraphRegenBody,
+  collectRegenContext,
+  formatRegenContext,
+} from "../src/util/paragraph-regen";
 import {
   getRegexedString,
   regexFromString,
@@ -1243,8 +1249,40 @@ asyncTests.push((async () => {
   assert.equal(memoryIdx < beforeIdx, true);
   assert.equal(beforeIdx < noteIdx, true);
   assert.equal(noteIdx < afterIdx, true);
-  assert.equal(out.messages[beforeIdx].content, "P1");
+  assert.equal(out.messages[beforeIdx].content, "P1\n\n");
   assert.equal(out.messages[afterIdx].content, "P2\n\nP3\n\nP4\n\nP5");
+}
+
+// 회귀: 단일 줄바꿈(\n)으로 이어진 본문도 앱 공통 문단 정의(줄바꿈 하나 = 문단)를
+// 따라야 한다. 예전엔 빈 줄 기준으로 세서 본문 전체가 한 문단 → 작가노트가 맨 위에 붙었다.
+{
+  const out = buildContext({
+    preset: {
+      meta: { id: "p", name: "Preset", favorite: false },
+      prompts: [
+        { id: "an", kind: "marker", identifier: "authorNote", name: "AN", enabled: true },
+        { id: "chat", kind: "marker", identifier: "chatHistory", name: "Chat", enabled: true },
+      ],
+    },
+    scenario: { name: "Char" },
+    lorebooks: [],
+    mode: "novel",
+    sessionLog: [
+      { role: "assistant", content: ["P1", "P2", "P3", "P4", "P5"].join("\n") },
+    ],
+    authorNote: "Author note inside body.",
+    tokenBudget: 10000,
+    countTokens: (s) => s.length,
+  });
+  const beforeIdx = out.messages.findIndex(
+    (m) => m.source?.label === "Session body before author's note"
+  );
+  const afterIdx = out.messages.findIndex(
+    (m) => m.source?.label === "Session body after author's note"
+  );
+  // 끝에서 4번째 문단(P2) 앞에 삽입 — 맨 위가 아니다.
+  assert.equal(out.messages[beforeIdx].content, "P1\n");
+  assert.equal(out.messages[afterIdx].content, "P2\nP3\nP4\nP5");
 }
 
 {
@@ -1653,15 +1691,50 @@ asyncTests.push((async () => {
     ["\"BB.\"", "CC."]
   );
   const req = buildTranslationRequest(text, untranslated);
-  // 첫 대상 앞의 번역된 문단은 context 로 포함된다.
+  // {{main}} 에는 번역 대상만 담긴다 — 앞 문맥은 별도 참고 블록(collectTranslationContext).
   assert.deepEqual(
     req.map((seg) => [seg.role, seg.source]),
     [
-      ["context", "AA."],
       ["translate", "\"BB.\""],
       ["translate", "CC."],
     ]
   );
+
+  // 앞 문맥 수집 — 첫 대상("BB.") 앞의 문단(AA.)을 원문+번역 짝으로. sets=0 이면 없음.
+  assert.deepEqual(
+    collectTranslationContext(text, translations, untranslated, 1),
+    [{ source: "AA.", translation: "가가." }]
+  );
+  assert.deepEqual(
+    collectTranslationContext(text, translations, untranslated, 0),
+    []
+  );
+
+  // 문단 재생성 맥락 — 대상 범위 앞/뒤 문단 수집(각 방향 sets 문단). 대상 인덱스는 포함 제외.
+  const regenText = "p0\n\np1\n\np2\n\np3\n\np4";
+  assert.deepEqual(collectRegenContext(regenText, 2, 2, 1, 1), {
+    before: ["p1"],
+    after: ["p3"],
+  });
+  assert.deepEqual(collectRegenContext(regenText, 2, 3, 2, 1), {
+    before: ["p0", "p1"],
+    after: ["p4"],
+  });
+  // sets=0 이면 없음.
+  assert.deepEqual(collectRegenContext(regenText, 2, 2, 0, 1), {
+    before: [],
+    after: [],
+  });
+  // 참고 블록 — 있는 조각만, 전부 비면 "".
+  assert.equal(formatRegenContext([], [], ""), "");
+  const regenCtx = formatRegenContext(["p1"], ["p3"], "요약.");
+  assert.ok(regenCtx.includes("[Story so far]"));
+  assert.ok(regenCtx.includes("[Preceding paragraphs]"));
+  assert.ok(regenCtx.includes("[Following paragraphs]"));
+  // 참고 블록은 대상 passage/지침 앞에 놓인다. 맥락 없으면 기존 동작(지침만).
+  const regenBody = buildParagraphRegenBody("Gen:", "타겟", { context: regenCtx });
+  assert.ok(regenBody.startsWith(regenCtx));
+  assert.equal(buildParagraphRegenBody("Gen:", "타겟"), "타겟\n\nGen:");
 
   // 자동 번역 경계 — fromOffset 이후에 끝나는 미번역 문단만 (과거 본문 제외).
   // text = 'AA.\n\n"BB."\nCC.\n\n"BB."' 에서 CC. 는 offset 11~14.
@@ -3343,6 +3416,57 @@ function regexScript(overrides: Partial<RegexScript>): RegexScript {
   assert.equal(sliceStyleTail("short", 100), "short");
   assert.equal(sliceStyleTail("aaa\nbbb\nccc", 7), "ccc");
   assert.equal(sliceStyleTail("abcdef", 0), "");
+}
+
+// ─── 집필 프로 — 장면 전환(***)은 변환 없이 그대로 통과 (util/pro-convert) ───
+{
+  const {
+    isSceneBreakParagraph,
+    endsWithSceneBreak,
+    buildProSpliceRequest,
+    assembleProConversion,
+  } = require("../src/util/pro-convert") as typeof import("../src/util/pro-convert");
+
+  // 별표 3개 이상(공백 무시)만 장면 전환. 별표 2개/일반 문단은 대상 아님.
+  assert.equal(isSceneBreakParagraph("***"), true);
+  assert.equal(isSceneBreakParagraph("* * *"), true);
+  assert.equal(isSceneBreakParagraph("**"), false);
+  assert.equal(isSceneBreakParagraph("장면 전환"), false);
+
+  // 끝 문단이 장면 전환인지 — 뒤 줄바꿈 유무와 무관하게 마지막 문단 기준.
+  assert.equal(endsWithSceneBreak("***"), true);
+  assert.equal(endsWithSceneBreak("앞 문단.\n\n***"), true);
+  assert.equal(endsWithSceneBreak("***\n"), true);
+  assert.equal(endsWithSceneBreak("***\n\n뒤 문단."), false);
+  assert.equal(endsWithSceneBreak("보통 문단."), false);
+
+  // ***만 있는 op = write 세그먼트 0개 (AI 로 보낼 게 없음).
+  const only = buildProSpliceRequest(["***"], "");
+  assert.equal(only.segments.filter((s) => s.role === "write").length, 0);
+  assert.deepEqual(only.perOp[0].writeIds, []);
+  // 빈 map(=AI 미호출)으로도 원문 그대로 접합 + 짝은 en=ko.
+  const litOnly = assembleProConversion(only.perOp[0], new Map());
+  assert.equal(litOnly.ok, true);
+  assert.equal(litOnly.englishText, "***");
+  assert.deepEqual(litOnly.pairs, [{ en: "***", ko: "***" }]);
+
+  // 본문 사이에 낀 *** = 앞뒤 문단만 write, 장면 전환은 통과.
+  const mixed = buildProSpliceRequest(["앞 문단.\n\n***\n\n뒤 문단."], "");
+  assert.deepEqual(mixed.perOp[0].writeIds, ["w1_1", "w1_2"]);
+  const asm = assembleProConversion(
+    mixed.perOp[0],
+    new Map([
+      ["w1_1", "Before."],
+      ["w1_2", "After."],
+    ])
+  );
+  assert.equal(asm.ok, true);
+  assert.equal(asm.englishText, "Before.\n\n***\n\nAfter.");
+  assert.deepEqual(asm.pairs, [
+    { en: "Before.", ko: "앞 문단." },
+    { en: "***", ko: "***" },
+    { en: "After.", ko: "뒤 문단." },
+  ]);
 }
 
 // ─── 집필 프로 — 문체 예시 쌍 수집/포맷 (util/pro-convert) ───

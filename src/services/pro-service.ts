@@ -31,13 +31,16 @@ import {
   mergeLorebookIds,
 } from "../util/media-lorebook";
 import {
+  collectParagraphs,
   parseTranslationResponse,
   recordTranslationVariant,
+  resolvePendingEditVariants,
 } from "../util/translate-paragraphs";
 import {
   assembleProConversion,
   buildProSpliceRequest,
   collectStylePairs,
+  endsWithSceneBreak,
   formatStylePairs,
   PRO_CONVERT_IO_INSTRUCTIONS,
   PRO_STYLE_PAIRS_DEFAULT,
@@ -292,84 +295,96 @@ export class ProService {
       this.plugin.ai.getDefaultGenerationProfile();
     if (!profile) return fail("집필 변환에 사용할 모델 프로필이 없습니다.");
 
+    // 문체 맥락은 "가장 앞선 접합 지점" 앞을 기준으로 자른다. 끝쓰기(append)면
+    // earliestFrom === baseline.length 라 문서 끝(기존 동작 그대로), 중간 문단 수정이면
+    // 수정 지점 바로 앞이 참조가 된다(문서 끝 기준의 무관한 참조 방지).
+    const earliestFrom = sorted[0].from;
+    const styleHead = baseline.slice(0, earliestFrom);
     const styleTail = sliceStyleTail(
-      baseline,
+      styleHead,
       proSettings.styleTailChars ?? PRO_STYLE_TAIL_CHARS_DEFAULT
     );
     const request = buildProSpliceRequest(
       sorted.map((o) => o.ko),
       styleTail
     );
-    if (request.perOp.some((p) => p.writeIds.length === 0)) {
+    if (request.perOp.some((p) => !p.koTokens.some((t) => t.kind === "paragraph"))) {
       return fail("변환할 문단이 없습니다.");
     }
 
-    // 문체 예시 — 최근 authored 문단 쌍 (양방향 자기강화, 스펙 §3.4). 페어링 저장에도
-    // 같은 translations 객체를 쓴다 (store 캐시 공유).
+    // 페어링 저장/문체 예시에 같은 translations 객체를 쓴다 (store 캐시 공유).
     const translations =
       await this.plugin.store.getSessionTranslations(sessionFile);
-    const pairsText = formatStylePairs(
-      collectStylePairs(
-        baseline,
-        translations,
-        proSettings.stylePairs ?? PRO_STYLE_PAIRS_DEFAULT
-      ),
-      "koToEn"
-    );
 
-    // 로어북(용어집)은 번역 설정과 공유한다 — 고유명사 표기의 단일 소스 (스펙 §8).
-    const scanText = sorted.map((o) => o.ko).join("\n");
-    const scenarioIds = await getScenarioMediaLorebookIds(
-      this.plugin.store,
-      sessionFile,
-      "translation"
-    );
-    const books = await loadMediaLorebooks(
-      this.plugin.store,
-      mergeLorebookIds(settings.translation?.lorebookIds, scenarioIds)
-    );
-    const lorebookText = await this.plugin.lorebookPlus.buildTaskLorebookText({
-      sessionFile,
-      books,
-      scanText,
-      taskPrompt: prompt.prompt,
-      taskLabel: "집필 변환",
-    });
-
+    // 장면 전환(***) 등 리터럴 문단만 있으면 변환할 write 세그먼트가 없다 —
+    // AI 호출 없이 그대로 접합한다 (왕복 변환으로 씨름하지 않는다).
     let assemblies: ProConvertAssembly[] | null = null;
-    let lastError = "";
-    for (let attempt = 0; attempt < CONVERT_MAX_ATTEMPTS; attempt++) {
-      try {
-        const responseText = await this.callModel(
-          profile,
-          prompt.prompt,
-          request,
-          lorebookText,
-          pairsText
-        );
-        const parsed = parseTranslationResponse(responseText);
-        if (!parsed || parsed.length === 0) {
-          lastError = "변환 응답이 올바른 JSON 배열이 아닙니다.";
-          continue;
+    if (request.segments.some((s) => s.role === "write")) {
+      // 문체 예시 — 최근 authored 문단 쌍 (양방향 자기강화, 스펙 §3.4). 짝도 접합 지점 앞 기준.
+      const pairsText = formatStylePairs(
+        collectStylePairs(
+          styleHead,
+          translations,
+          proSettings.stylePairs ?? PRO_STYLE_PAIRS_DEFAULT
+        ),
+        "koToEn"
+      );
+
+      // 로어북(용어집)은 번역 설정과 공유한다 — 고유명사 표기의 단일 소스 (스펙 §8).
+      const scanText = sorted.map((o) => o.ko).join("\n");
+      const scenarioIds = await getScenarioMediaLorebookIds(
+        this.plugin.store,
+        sessionFile,
+        "translation"
+      );
+      const books = await loadMediaLorebooks(
+        this.plugin.store,
+        mergeLorebookIds(settings.translation?.lorebookIds, scenarioIds)
+      );
+      const lorebookText = await this.plugin.lorebookPlus.buildTaskLorebookText({
+        sessionFile,
+        books,
+        scanText,
+        taskPrompt: prompt.prompt,
+        taskLabel: "집필 변환",
+      });
+
+      let lastError = "";
+      for (let attempt = 0; attempt < CONVERT_MAX_ATTEMPTS; attempt++) {
+        try {
+          const responseText = await this.callModel(
+            profile,
+            prompt.prompt,
+            request,
+            lorebookText,
+            pairsText
+          );
+          const parsed = parseTranslationResponse(responseText);
+          if (!parsed || parsed.length === 0) {
+            lastError = "변환 응답이 올바른 JSON 배열이 아닙니다.";
+            continue;
+          }
+          const byId = new Map(parsed.map((r) => [r.id, r.translation]));
+          const candidates = request.perOp.map((p) =>
+            assembleProConversion(p, byId)
+          );
+          const bad = candidates.find((c) => !c.ok);
+          if (!bad) {
+            assemblies = candidates;
+            break;
+          }
+          lastError = bad.errors[0] ?? "변환 응답이 불완전합니다.";
+        } catch (err) {
+          if (isCancelledError(err)) return { ok: false, errors: [], cancelled: true };
+          lastError = `변환 호출 실패: ${
+            err instanceof Error ? err.message : String(err)
+          }`;
         }
-        const byId = new Map(parsed.map((r) => [r.id, r.translation]));
-        const candidates = request.perOp.map((p) =>
-          assembleProConversion(p, byId)
-        );
-        const bad = candidates.find((c) => !c.ok);
-        if (!bad) {
-          assemblies = candidates;
-          break;
-        }
-        lastError = bad.errors[0] ?? "변환 응답이 불완전합니다.";
-      } catch (err) {
-        if (isCancelledError(err)) return { ok: false, errors: [], cancelled: true };
-        lastError = `변환 호출 실패: ${
-          err instanceof Error ? err.message : String(err)
-        }`;
       }
+      if (!assemblies) return fail(lastError || "변환에 실패했습니다.");
+    } else {
+      assemblies = request.perOp.map((p) => assembleProConversion(p, new Map()));
     }
-    if (!assemblies) return fail(lastError || "변환에 실패했습니다.");
 
     // 짝 먼저 저장 — 세션 저장 직후 뷰가 번역 보기를 재구성할 때 authored 짝이
     // 이미 있어야 저자의 한국어가 곧바로 보인다 (영어가 스치듯 보이는 것 방지).
@@ -385,6 +400,17 @@ export class ProService {
         });
       }
     }
+    // 반영된 옛 영어 문단(교체 대상)의 "반영 대기"(active=user-edit) 표시 해제 —
+    // 나중에 그 문단이 있는 옛 노드로 되돌아가도 다시 재변환(재생성)되지 않게 한다
+    // (전 노드 복귀 사고). append(초고)는 옛 문단이 없으므로 대상 아님.
+    const reflectedHashes: string[] = [];
+    for (const op of sorted) {
+      if (op.from === baseline.length && op.to === baseline.length) continue;
+      for (const p of collectParagraphs(baseline.slice(op.from, op.to))) {
+        reflectedHashes.push(p.hash);
+      }
+    }
+    resolvePendingEditVariants(translations, reflectedHashes);
     await this.plugin.store.saveSessionTranslations(sessionFile, translations, {
       origin: opts?.origin,
     });
@@ -398,9 +424,13 @@ export class ProService {
       if (op.from === baseline.length && op.to === baseline.length) {
         const prefix =
           baseline.length === 0 || baseline.endsWith("\n") ? "" : "\n";
+        // 끝이 장면 전환(***)이면 문단 구분 줄바꿈 한 줄을 붙인다 — 뒤이을 생성/집필이
+        // 구분선에 한 문단으로 들러붙지 않고 새 문단으로 시작하게(끝 접합 전용).
+        // 일반 문단은 붙이지 않는다(대기영역이 이미 다음 줄이라, 붙이면 빈 줄만 생긴다).
+        const suffix = !en.endsWith("\n") && endsWithSceneBreak(en) ? "\n" : "";
         patches.push({
           op: "append",
-          spans: [{ author: "user", text: prefix + en }],
+          spans: [{ author: "user", text: prefix + en + suffix }],
         });
       } else {
         hasReplace = true;

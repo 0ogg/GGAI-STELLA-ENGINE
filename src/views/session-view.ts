@@ -3908,8 +3908,16 @@ export class SessionView extends ItemView {
     this.baselineSpans = buildSpans(this.session);
     this.baselineText = spansToText(this.baselineSpans);
     this.refreshDisplayBaseline();
+    // 스크롤은 "보던 픽셀 그대로" 유지한다 — 변환은 화면 위쪽 높이를 바꾸지 않으므로
+    // 스크롤을 건드릴 이유가 없다. 여기서 보던 지점을 화면 중앙으로 재정렬하면(구
+    // preserveReadingPosition) 아래로 내려가며 수정하던 사용자를 위로 튕겨 올린다
+    // (집필 프로 스크롤 튕김). renderTranslationBlocks 는 자체적으로 scrollTop 을
+    // 보존하므로, 여기서는 본문(원문) 스크롤만 재렌더 앞뒤로 지켜 준다.
+    const scroller = this.activeScroller();
+    const keepTop = scroller?.scrollTop ?? 0;
     this.suppressEvents = true;
-    this.preserveReadingPosition(() => this.renderBodySpans());
+    this.renderBodySpans();
+    if (scroller) scroller.scrollTop = keepTop;
     this.suppressEvents = false;
     if (this.translationViewActive || this.outputMode === "split-h") {
       this.renderTranslationBlocks();

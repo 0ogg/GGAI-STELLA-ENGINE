@@ -19,6 +19,7 @@ import type {
 } from "../types/prompt";
 import { MARKER_MACRO_TOKENS } from "../types/prompt";
 import { applyMacros, type MacroContext } from "./macros";
+import { tokenizeParagraphs } from "./translate-paragraphs";
 import {
   matchLorebookEntries,
   type EntryTimingState,
@@ -1049,10 +1050,20 @@ function storyToMessages(story: string, noteBlock: ChatMessage[]): ChatMessage[]
       contextKind: "history",
     }];
   }
-  const parts = splitParagraphs(story);
-  const insertAt = Math.max(0, parts.length - 4);
-  const before = parts.slice(0, insertAt).join("\n\n");
-  const after = parts.slice(insertAt).join("\n\n");
+  // 문단 정의는 앱 공통(tokenizeParagraphs)을 따른다 — 연속 줄바꿈은 하나의
+  // 구분자라, 엔터를 한 번 띄우든 두 번 띄우든 "내용 블록"만 문단으로 센다.
+  // 작가노트는 "내용 있는 끝에서 4번째 문단" 앞에 삽입. 공백만 있는 블록은 문단으로
+  // 세지 않는다. 원문 줄바꿈은 토큰째로 보존해 before + after 가 story 와 byte 동일.
+  const tokens = tokenizeParagraphs(story);
+  const paraTokenIdx = tokens
+    .map((t, i) => (t.kind === "paragraph" && t.source.trim() ? i : -1))
+    .filter((i) => i >= 0);
+  const insertOrdinal = Math.max(0, paraTokenIdx.length - 4);
+  const splitAt = paraTokenIdx[insertOrdinal] ?? tokens.length;
+  const tokenText = (t: (typeof tokens)[number]) =>
+    t.kind === "separator" ? t.text : t.source;
+  const before = tokens.slice(0, splitAt).map(tokenText).join("");
+  const after = tokens.slice(splitAt).map(tokenText).join("");
   const messages: ChatMessage[] = [];
   if (before.trim()) {
     messages.push({
@@ -1072,13 +1083,6 @@ function storyToMessages(story: string, noteBlock: ChatMessage[]): ChatMessage[]
     });
   }
   return messages;
-}
-
-function splitParagraphs(text: string): string[] {
-  return text
-    .split(/\n\s*\n/g)
-    .map((p) => p.trim())
-    .filter((p) => p.length > 0);
 }
 
 function requiredTailForBudget(

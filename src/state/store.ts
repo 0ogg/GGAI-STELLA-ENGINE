@@ -635,6 +635,14 @@ export class StellaStore extends Events {
   }
 
   async refreshSession(file: string): Promise<StellaSession | null> {
+    // 방금 이 앱이 저장한 세션이면 캐시가 디스크와 같거나 더 최신이다. 동기화 폴더/
+    // 느린 디스크에서는 vault.modify 가 아직 디스크에 안 내려갔을 수 있어, 창 포커스
+    // 복귀(handleExternalChange) 등으로 이 시점에 디스크를 다시 읽으면 방금 받은
+    // 생성 노드를 '외부 변경'으로 오인해 오래된 내용으로 덮어써 사라진다. 자기 write
+    // grace 내에는 캐시를 진실로 삼아 디스크 재읽기를 건너뛴다(onVaultChange 와 동일 규칙).
+    const cachedSelf = this.sessionByFile.get(file);
+    if (cachedSelf && this.isRecentSelfWrite(file)) return cachedSelf;
+
     const f = this.vault.getAbstractFileByPath(file);
     if (!(f instanceof TFile)) return null;
     try {

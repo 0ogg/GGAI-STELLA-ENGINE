@@ -47,6 +47,7 @@ import {
   buildTubeIoInstructions,
 } from "../util/phone-prompts";
 import { listPhoneContacts, type PhoneContact } from "../util/phone-contacts";
+import { sawSnsPost } from "../util/phone-knows";
 import { buildSpans, pathToLeaf, spansToText } from "../util/session-text";
 import { composeInheritedSummary } from "../util/summarize-session";
 import { resolveActiveLorebooks } from "../util/resolve-active-lorebooks";
@@ -69,6 +70,62 @@ export type PhoneSendResult =
 export type PhoneSendTarget =
   | { kind: "scenario"; scenarioId: string }
   | { kind: "extra"; threadId: string };
+
+// ─────────────────────── 폰 앱 등록 (v2 §9 확장 진입점) ───────────────────────
+
+/** 공유 다이제스트 공급자 컨텍스트 (§8.1). */
+export interface PhoneAppSharedContext {
+  /** 시나리오 id — 주어지면 그 캐릭터의 "봤는지" 판정(§8.2)으로 거른다(1:1 문자). */
+  knownBy?: string;
+}
+
+/** 외부 폰 앱 화면 렌더 컨텍스트. */
+export interface PhoneAppRenderContext {
+  personaId: string;
+  personaFile: string;
+  plugin: StellaEnginePlugin;
+  /** 앱 화면에서 홈으로 돌아가기. */
+  goHome(): void;
+}
+
+/**
+ * 폰 홈에 등록되는 앱 (§9). 내장 앱(메시지/네트워크/카메라/튜브)도 같은 레지스트리에
+ * 등록해 홈 그리드·공유 허브·갱신 틱 배관을 공유한다 — 내장은 `render` 없이 내부
+ * 화면으로 라우팅되고, 외부(서드파티) 앱만 `render` 로 자체 화면을 그린다.
+ */
+export interface PhoneApp {
+  /** 외부 앱은 플러그인 id 접두를 붙인다 (예: "my-plugin:notes"). */
+  id: string;
+  name: string;
+  /** Lucide 아이콘 이름. */
+  icon: string;
+  /**
+   * 외부 앱 화면 렌더. 반환한 함수는 화면을 떠날 때 호출된다(정리). 내장 앱은 생략.
+   */
+  render?(
+    container: HTMLElement,
+    ctx: PhoneAppRenderContext
+  ): void | (() => void);
+  /** 홈 아이콘 LIVE 배지(빨간 점) 표시 여부. */
+  liveBadge?(): boolean;
+  /** 공유 다이제스트 공급자 (§8.1) — excludeApp 이 자기면 호출되지 않는다. */
+  contributeSharedContext?(ctx: PhoneAppSharedContext): Promise<string>;
+  /** 폰 갱신 틱 참여 (§9) — caps 준수 책임은 앱에 있다. */
+  onRefresh?(reason: string): Promise<void>;
+}
+
+/** 내장 폰 앱 id — 홈 그리드 라우팅·공유 허브 excludeApp 키. */
+export const PHONE_APP_MESSAGES = "stella:messages";
+export const PHONE_APP_SNS = "stella:sns";
+export const PHONE_APP_TUBE = "stella:tube";
+export const PHONE_APP_CAMERA = "stella:camera";
+/** 내장 앱 id 집합 (외부 등록이 이 id 를 덮어쓰지 못하게). */
+const BUILTIN_APP_IDS = new Set([
+  PHONE_APP_MESSAGES,
+  PHONE_APP_SNS,
+  PHONE_APP_TUBE,
+  PHONE_APP_CAMERA,
+]);
 
 /** 답장 컨텍스트에 넣는 문자 이력 상한 기본값 (설정 `replyHistoryLimit`). */
 const REPLY_HISTORY_LIMIT = 60;
@@ -124,7 +181,72 @@ export class PhoneService {
   private periodicNextAt: number | null = null;
   private randomNextAt: number | null = null;
 
-  constructor(private plugin: StellaEnginePlugin) {}
+  /** 홈에 뜨는 폰 앱 (§9) — 삽입 순서 유지, 내장 먼저. */
+  private apps = new Map<string, PhoneApp>();
+
+  constructor(private plugin: StellaEnginePlugin) {
+    this.registerBuiltinApps();
+  }
+
+  // ─────────────────────── 폰 앱 레지스트리 (§9) ───────────────────────
+
+  /**
+   * 폰 홈에 앱을 등록한다 (§9). 반환 disposer 로 해제하면 홈에서 아이콘이 즉시
+   * 사라진다. 내장 id 충돌·중복 id 는 무시. 외부 앱은 `render` 로 자체 화면을 그린다.
+   */
+  registerApp(app: PhoneApp): () => void {
+    // 내장 id 예약, 중복 id 금지 (내장 앱은 registerBuiltinApps 가 직접 등록).
+    if (BUILTIN_APP_IDS.has(app.id) || this.apps.has(app.id)) {
+      console.warn(`[GGAI Stella] 폰 앱 id 중복/예약 무시: ${app.id}`);
+      return () => {};
+    }
+    this.apps.set(app.id, app);
+    this.plugin.store.trigger("phone-apps-changed");
+    return () => {
+      if (this.apps.get(app.id) === app) {
+        this.apps.delete(app.id);
+        this.plugin.store.trigger("phone-apps-changed");
+      }
+    };
+  }
+
+  /** 홈 그리드가 그릴 앱 목록 (내장 + 등록, 삽입 순서). */
+  listApps(): PhoneApp[] {
+    return [...this.apps.values()];
+  }
+
+  /** 진행 중 방송이 하나라도 있는가 (튜브 앱 LIVE 배지). */
+  hasLiveStream(): boolean {
+    return this.tubeLiveSessions.size > 0 || this.liveSessions.size > 0;
+  }
+
+  /** 내장 앱을 레지스트리에 등록 — 홈 그리드·공유 허브·배지 배관을 공유한다. */
+  private registerBuiltinApps(): void {
+    this.apps.set(PHONE_APP_MESSAGES, {
+      id: PHONE_APP_MESSAGES,
+      name: "메시지",
+      icon: "message-circle",
+      contributeSharedContext: () => this.sharedDigestMessages(),
+    });
+    this.apps.set(PHONE_APP_SNS, {
+      id: PHONE_APP_SNS,
+      name: "스텔라 네트워크",
+      icon: "sparkles",
+      contributeSharedContext: (ctx) => this.sharedDigestSns(ctx.knownBy),
+    });
+    this.apps.set(PHONE_APP_TUBE, {
+      id: PHONE_APP_TUBE,
+      name: "스텔라튜브",
+      icon: "tv",
+      liveBadge: () => this.hasLiveStream(),
+      contributeSharedContext: () => this.sharedDigestTube(),
+    });
+    this.apps.set(PHONE_APP_CAMERA, {
+      id: PHONE_APP_CAMERA,
+      name: "카메라",
+      icon: "camera",
+    });
+  }
 
   // ─────────────────────────── 로그인/모델/연락처 ───────────────────────────
 
@@ -517,8 +639,20 @@ export class PhoneService {
           notify: true,
         });
       }
+      // 등록 앱 갱신 참여 (§9) — caps 준수는 앱 책임, 실패는 격리.
+      await this.runAppRefresh(reason);
     } finally {
       this.refreshBusy = false;
+    }
+  }
+
+  /** 등록된 외부 폰 앱의 갱신 훅 실행 (내장 앱은 onRefresh 없음). */
+  private async runAppRefresh(reason: string): Promise<void> {
+    for (const app of this.listApps()) {
+      if (!app.onRefresh) continue;
+      await app.onRefresh(reason).catch((err) =>
+        console.warn(`[GGAI Stella] 폰 앱 갱신 실패(${app.id}):`, err)
+      );
     }
   }
 
@@ -548,6 +682,8 @@ export class PhoneService {
         console.warn("[GGAI Stella] 수동 새로고침 방송 실패:", err)
       );
     }
+    // 등록 앱 갱신 참여 (§9).
+    await this.runAppRefresh("manual");
     return { ok: true };
   }
 
@@ -762,6 +898,12 @@ export class PhoneService {
    */
   private liveSessions = new Set<string>();
   private tubeLiveSessions = new Set<string>();
+  /**
+   * 가장 최근 종료된 방송 (공유 다이제스트 "최근 방송" 소스용, v2 §8.1) —
+   * 볼트 스캔을 피하려고 in-memory 로만 추적한다(앱 재시작 시 리셋 = 무방).
+   */
+  private lastEndedStream: { sessionFile: string; streamer: string } | null =
+    null;
   /** 튜브 반응 생성 중 가드 — 노드 생성이 몰려도 1개씩. */
   private tubeBusy = false;
 
@@ -888,6 +1030,10 @@ export class PhoneService {
       stream.live = false;
       stream.endedAt = Date.now();
       await store.saveSessionStream(sessionFile, stream);
+      this.lastEndedStream = {
+        sessionFile,
+        streamer: stream.streamer.name,
+      };
     }
     this.tubeLiveSessions.delete(sessionFile);
     const feed = await store.getSnsFeed();
@@ -1044,10 +1190,17 @@ export class PhoneService {
       user: personaName,
       variables: {},
     }).trim();
+    // 앱 간 공유 허브 (§8.1) — 문자·SNS 최근 이슈(자기 앱 제외) = 시청자 잡담 재료.
+    const sharedDigest = await this.buildSharedDigest(PHONE_APP_TUBE);
+
     const language = plugin.data.phone?.language?.trim();
     const system =
       `${PHONE_TUBE_HEADER}\n\n` +
       `${behavior}\n` +
+      (sharedDigest
+        ? `\n[What viewers have been seeing elsewhere on their phones — ` +
+          `chat may bring these up:]\n${sharedDigest}\n`
+        : "") +
       `\n[Streamer]\n${stream.streamer.name}` +
       (streamerAcc
         ? ` — ${streamerAcc.followers} followers` +
@@ -1128,6 +1281,18 @@ export class PhoneService {
       )
     );
 
+    // 자동 번역 (§C) — 켜져 있으면 저장 전에 이번 채팅을 미리 번역해 둔다.
+    // 저장 후 번역하면 이미 그려진 채팅 줄이 원문으로 남으므로 인라인 처리.
+    if (this.isAutoTranslateOn()) {
+      const results = await this.runChatTranslation(chat, false).catch(
+        () => new Map<string, string>()
+      );
+      for (const c of chat) {
+        const t = results.get(c.id);
+        if (t) c.translation = { text: t };
+      }
+    }
+
     // 저장 — 생성 중 변경 대비 fresh 재읽기.
     const fresh = await store.getSessionStream(sessionFile);
     if (!fresh?.live) return;
@@ -1149,6 +1314,7 @@ export class PhoneService {
     if (engine.wasChanged()) await store.savePhoneAccounts(accountsFile);
     if (!fresh.live) {
       this.tubeLiveSessions.delete(sessionFile);
+      this.lastEndedStream = { sessionFile, streamer: fresh.streamer.name };
       new Notice("📺 스텔라튜브 방송이 끝났습니다 — 다시보기가 남았습니다.");
     }
   }
@@ -1824,6 +1990,142 @@ export class PhoneService {
     }
   }
 
+  /**
+   * 피드 전체(모든 게시글 + 답글)를 한 번의 호출로 번역해 저장한다 — "한번에 삭".
+   * force = 이미 번역된 것도 다시 번역(전체 재번역), 아니면 아직 안 된 것만
+   * (부분 성공 후 실패분 재시도에 그대로 씀). translateItems 가 청크 순차라
+   * 큰 피드도 부분 성공을 보존한다.
+   */
+  async translateFeed(opts?: { force?: boolean }): Promise<PhoneSendResult> {
+    const key = "tr:sns:feed";
+    if (this.translatingKeys.has(key)) {
+      return { ok: false, error: "이미 번역 중입니다." };
+    }
+    this.translatingKeys.add(key);
+    try {
+      const store = this.plugin.store;
+      const feed = await store.getSnsFeed();
+      const items: { id: string; source: string }[] = [];
+      /** 짧은 요청 id → 반영 대상 (게시글 id + 답글 id?). */
+      const applyTo = new Map<string, { postId: string; replyId?: string }>();
+      feed.posts.forEach((p, pi) => {
+        if ((opts?.force || !p.translation) && p.text.trim()) {
+          const id = `p${pi}`;
+          items.push({ id, source: p.text });
+          applyTo.set(id, { postId: p.id });
+        }
+        p.replies.forEach((rp, ri) => {
+          if ((opts?.force || !rp.translation) && rp.text.trim()) {
+            const id = `p${pi}r${ri}`;
+            items.push({ id, source: rp.text });
+            applyTo.set(id, { postId: p.id, replyId: rp.id });
+          }
+        });
+      });
+      if (items.length === 0) return { ok: true };
+      const r = await this.plugin.translation.translateItems(
+        items,
+        this.plugin.data.phone?.translation?.lorebookIds,
+        this.phoneTranslationLorebookPlus()
+      );
+      if (r.results.size > 0) {
+        // 번역 중 새 글/댓글이 왔을 수 있으니 다시 읽어 id 로 매칭해 저장.
+        const fresh = await store.getSnsFeed();
+        let changed = false;
+        for (const [reqId, translated] of r.results) {
+          const dest = applyTo.get(reqId);
+          if (!dest) continue;
+          const fp = fresh.posts.find((p) => p.id === dest.postId);
+          if (!fp) continue;
+          if (dest.replyId) {
+            const reply = fp.replies.find((rp) => rp.id === dest.replyId);
+            if (reply && (opts?.force || !reply.translation)) {
+              reply.translation = { text: translated };
+              changed = true;
+            }
+          } else if (opts?.force || !fp.translation) {
+            fp.translation = { text: translated };
+            changed = true;
+          }
+        }
+        if (changed) await store.saveSnsFeed(fresh);
+      }
+      return r.ok ? { ok: true } : { ok: false, error: r.error ?? "번역 실패" };
+    } finally {
+      this.translatingKeys.delete(key);
+    }
+  }
+
+  /**
+   * 방송(스텔라튜브) 채팅 번역 (v2) — 문자/SNS 와 같은 엔진 재사용. 방송 화면은
+   * 삽화+채팅뿐이라 번역 대상 = 시청자 채팅 텍스트만(장면 프로즈는 화면에 없음).
+   * force = 이미 번역된 것도 다시 번역. 볼트 동시 1방송이라 sessionFile 로 처리.
+   */
+  async translateStream(
+    sessionFile: string,
+    opts?: { force?: boolean }
+  ): Promise<PhoneSendResult> {
+    const key = `tr:stream:${sessionFile}`;
+    if (this.translatingKeys.has(key)) {
+      return { ok: false, error: "이미 번역 중입니다." };
+    }
+    this.translatingKeys.add(key);
+    try {
+      const store = this.plugin.store;
+      const stream = await store.getSessionStream(sessionFile);
+      if (!stream) return { ok: false, error: "방송을 찾을 수 없습니다." };
+      const allChat = Object.values(stream.nodes).flatMap((n) => n.chat);
+      const results = await this.runChatTranslation(allChat, opts?.force);
+      if (results.size > 0) {
+        // 번역 중 새 노드 반응이 왔을 수 있으니 다시 읽어 채팅 id 로 매칭해 저장.
+        const fresh = await store.getSessionStream(sessionFile);
+        if (fresh) {
+          let changed = false;
+          for (const node of Object.values(fresh.nodes)) {
+            for (const c of node.chat) {
+              const t = results.get(c.id);
+              if (t && (opts?.force || !c.translation)) {
+                c.translation = { text: t };
+                changed = true;
+              }
+            }
+          }
+          if (changed) await store.saveSessionStream(sessionFile, fresh);
+        }
+      }
+      return { ok: true };
+    } finally {
+      this.translatingKeys.delete(key);
+    }
+  }
+
+  /**
+   * 채팅 항목 번역 공통 엔진 — 번역 안 된 것만(또는 force 전부) 1회 호출로 번역해
+   * `채팅 id → 번역문` 맵을 돌려준다(항목을 직접 바꾸지 않음 — 저장/인라인 반영은 호출자).
+   */
+  private async runChatTranslation(
+    chat: StreamChatItem[],
+    force?: boolean
+  ): Promise<Map<string, string>> {
+    const targets = chat.filter(
+      (c) => c.text.trim() !== "" && (force || !c.translation)
+    );
+    if (targets.length === 0) return new Map();
+    // 짧은 요청 id(c0,c1…)를 쓴다 — 긴 uuid 를 그대로 넘기면 모델이 정확히
+    // 되돌려주지 못해 매칭이 전부 실패한다(문자 m{i}·SNS p{i} 와 같은 규칙).
+    const r = await this.plugin.translation.translateItems(
+      targets.map((c, i) => ({ id: `c${i}`, source: c.text })),
+      this.plugin.data.phone?.translation?.lorebookIds,
+      this.phoneTranslationLorebookPlus()
+    );
+    const out = new Map<string, string>();
+    targets.forEach((c, i) => {
+      const t = r.results.get(`c${i}`);
+      if (t) out.set(c.id, t);
+    });
+    return out;
+  }
+
   /** SNS 활동 실행 중 가드 — 갱신과 게시 직후 반응이 겹치지 않게. */
   private snsBusy = false;
 
@@ -2179,6 +2481,9 @@ export class PhoneService {
         })
         .join("\n");
 
+      // 앱 간 공유 허브 (§8.1) — 문자·진행 중 방송 등 피드 밖 소식(자기 앱 제외).
+      const sharedDigest = await this.buildSharedDigest(PHONE_APP_SNS);
+
       const language = plugin.data.phone?.language?.trim();
       // 행동 지시문 = 편집 가능한 phoneSns 프롬프트 ({{user}} = 뷰어 이름).
       // 엔진은 헤더/데이터 블록/JSON 프로토콜(파서와 짝)만 고정으로 붙인다.
@@ -2224,6 +2529,12 @@ export class PhoneService {
         `scene knows ONLY what appears in the feed. Never let an account narrate ` +
         `private details it had no way to witness.]\n` +
         eventBlocks.join("\n\n") +
+        (sharedDigest
+          ? `\n\n[Elsewhere on the phone — private texts and live broadcasts ` +
+            `happening off-feed. NOT public unless someone already posted it; ` +
+            `use only as ambient flavor a plugged-in netizen might reference.]\n` +
+            `${sharedDigest}`
+          : "") +
         `\n\n[Recent feed — the only PUBLIC surface; reply to items by their id]\n${feedLines}\n\n` +
         `${personaName} is the current viewer (their posts are marked [viewer]).\n\n` +
         buildSnsIoInstructions(cap, {
@@ -3058,6 +3369,141 @@ export class PhoneService {
     return null;
   }
 
+  /**
+   * 앱 간 공유 다이제스트 (v2 §8.1) — 문자/SNS/방송(+ 등록 앱)이 서로의 최근 소식을
+   * 맥락으로 나눈다. 각 앱의 `contributeSharedContext` 공급자를 순회하되 `excludeApp`
+   * (자기 앱)은 뺀다(자기 재료는 이미 프롬프트에 있음). `knownBy`(시나리오 id)가
+   * 주어지면 SNS 공급자가 그 캐릭터의 "봤는지" 판정(§8.2)으로 항목을 거른다(1:1 문자).
+   *
+   * 세션 전송본(planSessionRequest)이 아니라 폰 내부 생성에만 붙으므로 byte 동일
+   * 대전제와 무관하다(시간순 정렬 자유). 파생 데이터라 별도 캐시 파일 없이 매번
+   * store 캐시에서 조립한다(볼트 스캔 없음 — 진행 중 방송은 in-memory 추적).
+   */
+  private async buildSharedDigest(
+    excludeApp: string,
+    opts?: { knownBy?: string }
+  ): Promise<string> {
+    const plugin = this.plugin;
+    if (plugin.data.phone?.sharedContextEnabled === false) return "";
+    const budget = Math.max(
+      0,
+      Math.floor(plugin.data.phone?.sharedContextTokens ?? 1000)
+    );
+    if (budget === 0) return "";
+    const profile = this.resolvePhoneProfile();
+    if (!profile) return "";
+    const sections: string[] = [];
+    for (const app of this.listApps()) {
+      if (app.id === excludeApp || !app.contributeSharedContext) continue;
+      try {
+        const text = (
+          await app.contributeSharedContext({ knownBy: opts?.knownBy })
+        ).trim();
+        if (text) sections.push(text);
+      } catch {
+        /* 공급자 실패 — 스킵 */
+      }
+    }
+    if (sections.length === 0) return "";
+    const count = (s: string) => plugin.ai.countTokens(s, profile.id);
+    return trimToTokens(sections.join("\n\n"), budget, count, "tail");
+  }
+
+  /** 공유 허브 — 문자 소스(로그인 페르소나의 최근 스레드별 마지막 대화, 상위 5). */
+  private async sharedDigestMessages(): Promise<string> {
+    const store = this.plugin.store;
+    const { profile: persona } = await this.getLoginPersona();
+    const data = await store.getPhoneMessages(persona.id);
+    const now = Date.now();
+    const scenarios = await store
+      .getScenarios()
+      .catch((): Awaited<ReturnType<typeof store.getScenarios>> => []);
+    const nameById = new Map<string, string>();
+    for (const sc of scenarios) {
+      const id = sc.scenario.data?.extensions?.stella?.id;
+      const nm = sc.scenario.data?.name?.trim();
+      if (id && nm) nameById.set(id, nm);
+    }
+    const threads = data.threads
+      .map((t) => {
+        const delivered = t.messages.filter(
+          (m) => !m.deliverAt || m.deliverAt <= now
+        );
+        const last = delivered[delivered.length - 1];
+        return last ? { t, last } : null;
+      })
+      .filter((v): v is { t: PhoneThread; last: PhoneMessage } => !!v)
+      .sort((a, b) => b.last.createdAt - a.last.createdAt)
+      .slice(0, 5);
+    if (threads.length === 0) return "";
+    const lines = threads.map(({ t, last }) => {
+      const name =
+        t.kind === "scenario"
+          ? nameById.get(t.scenarioId ?? "") ?? "someone"
+          : t.extraName ?? "an unknown number";
+      const photo = last.image
+        ? ` [photo: ${last.image.caption || "photo"}]`
+        : "";
+      return `- Texts with ${name}: "${firstLine(last.text)}"${photo}`;
+    });
+    return `[Recent private texts]\n${lines.join("\n")}`;
+  }
+
+  /** 공유 허브 — SNS 소스(등급 내림차순 최근 이슈 상위 10, knownBy 면 saw() 필터). */
+  private async sharedDigestSns(knownBy?: string): Promise<string> {
+    const feed = await this.plugin.store.getSnsFeed();
+    const posts = knownBy
+      ? feed.posts.filter((p) => sawSnsPost(p, knownBy))
+      : feed.posts;
+    const top = [...posts]
+      .sort(
+        (a, b) =>
+          (b.issueScale ?? 2) - (a.issueScale ?? 2) ||
+          snsEffectiveAt(b) - snsEffectiveAt(a)
+      )
+      .slice(0, 10);
+    if (top.length === 0) return "";
+    const lines = top.map((p) => {
+      const world = p.author.world ? ` (${p.author.world})` : "";
+      const scale = Math.round(p.issueScale ?? 2);
+      const live = p.stream?.live ? " [LIVE]" : "";
+      return `- [buzz ${scale}] ${p.author.name}${world}${live}: ${firstLine(p.text)}`;
+    });
+    return `[Trending on Stella Network]\n${lines.join("\n")}`;
+  }
+
+  /** 공유 허브 — 방송 소스(진행 중 방송 + 최근 종료분). */
+  private async sharedDigestTube(): Promise<string> {
+    const store = this.plugin.store;
+    const lines: string[] = [];
+    const liveFile = [...this.tubeLiveSessions][0];
+    if (liveFile) {
+      try {
+        const stream = await store.getSessionStream(liveFile);
+        if (stream?.live) {
+          const nodeVals = Object.values(stream.nodes);
+          const viewers =
+            nodeVals.length > 0
+              ? nodeVals[nodeVals.length - 1].viewers
+              : stream.startViewers;
+          const scene = await this.sessionSceneText(liveFile);
+          lines.push(
+            `- ${stream.streamer.name} is LIVE-streaming right now ` +
+              `(${viewers} watching): ${firstLine(scene)}`
+          );
+        }
+      } catch {
+        /* 방송 소스 실패 — 스킵 */
+      }
+    }
+    if (this.lastEndedStream && this.lastEndedStream.sessionFile !== liveFile) {
+      lines.push(
+        `- ${this.lastEndedStream.streamer} finished a broadcast recently.`
+      );
+    }
+    return lines.length > 0 ? `[On Stella Tube]\n${lines.join("\n")}` : "";
+  }
+
   /** 시나리오 캐릭터 스레드용 시스템 지시문 (답장/선발신 공용). */
   private async buildScenarioSystemPrompt(opts: {
     personaId: string;
@@ -3118,6 +3564,17 @@ export class PhoneService {
           `unanswered message from ${personaName}.]`
       );
     }
+    // 앱 간 공유 허브 (§8.1) — 이 캐릭터가 "봤을" SNS 이슈·진행 중 방송을 맥락으로.
+    const digest = await this.buildSharedDigest(PHONE_APP_MESSAGES, {
+      knownBy: opts.scenarioId,
+    });
+    if (digest) {
+      parts.push(
+        `[Ambient buzz ${charName} may have noticed on their phone lately — ` +
+          `mention it only if it fits naturally, and only what they'd plausibly ` +
+          `have seen:]\n${digest}`
+      );
+    }
     const language = plugin.data.phone?.language?.trim();
     if (language) parts.push(`Write the text messages in ${language}.`);
     return { text: parts.join("\n\n"), charName };
@@ -3145,6 +3602,14 @@ export class PhoneService {
     const parts: string[] = [applyMacros(promptItem.prompt, macroCtx).trim()];
     if (sceneTail) {
       parts.push(`[${personaName}'s current situation]\n${sceneTail}`);
+    }
+    // 앱 간 공유 허브 (§8.1) — 스팸/사기범이 요즘 화제를 미끼로 쓸 수 있게 맥락 제공.
+    const digest = await this.buildSharedDigest(PHONE_APP_MESSAGES);
+    if (digest) {
+      parts.push(
+        `[What is currently going around on the phone/network — usable as ` +
+          `bait, pretext, or realism, if it fits:]\n${digest}`
+      );
     }
     const language = this.plugin.data.phone?.language?.trim();
     if (language) parts.push(`Write the text messages in ${language}.`);

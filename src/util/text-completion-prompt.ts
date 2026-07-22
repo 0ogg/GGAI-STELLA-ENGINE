@@ -77,6 +77,25 @@ function isBodyMessage(m: ChatMessage): boolean {
  */
 export const SESSION_START_MARKER = "[Start the new session]";
 
+/**
+ * 배경 설정과 세션 본문 사이에 `[Start the new session]` 마커 메시지를 끼운다.
+ * NAI 형식(자체 구분자 `NAI_BODY_SEPARATOR` 사용)이 아닌 모든 전송본 —
+ * 텍스트 컴플리션 평문 경로와 챗(메시지 배열) 경로가 공유한다. 본문이 없으면
+ * 원본을 그대로 돌려준다(불변).
+ */
+export function insertSessionStartMarker(messages: ChatMessage[]): ChatMessage[] {
+  const bodyStart = messages.findIndex(isBodyMessage);
+  if (bodyStart < 0) return messages;
+  const out = [...messages];
+  out.splice(bodyStart, 0, {
+    role: "system",
+    content: SESSION_START_MARKER,
+    source: { type: "marker", label: "Session start marker" },
+    contextKind: "prompt",
+  });
+  return out;
+}
+
 // ─────────────────────────── 평문(NAI 끔) ───────────────────────────
 
 /**
@@ -85,16 +104,7 @@ export const SESSION_START_MARKER = "[Start the new session]";
 export function buildTextCompletionSegments(
   messages: ChatMessage[]
 ): PromptSegment[] {
-  const parts = nonEmpty(messages);
-  const bodyStart = parts.findIndex(isBodyMessage);
-  if (bodyStart >= 0) {
-    parts.splice(bodyStart, 0, {
-      role: "system",
-      content: SESSION_START_MARKER,
-      source: { type: "marker", label: "Session start marker" },
-      contextKind: "prompt",
-    });
-  }
+  const parts = insertSessionStartMarker(nonEmpty(messages));
   const segs: PromptSegment[] = [];
   parts.forEach((m, i) => {
     if (i > 0) segs.push({ text: "\n", part: "token" });

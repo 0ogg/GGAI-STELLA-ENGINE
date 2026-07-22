@@ -25,6 +25,11 @@ import type StellaEnginePlugin from "../main";
 import {
   PhoneService,
   snsAuthorKey,
+  PHONE_APP_MESSAGES,
+  PHONE_APP_SNS,
+  PHONE_APP_TUBE,
+  PHONE_APP_CAMERA,
+  type PhoneApp,
   type PhoneSendTarget,
 } from "../services/phone-service";
 import { ConfirmModal } from "./modals";
@@ -52,18 +57,28 @@ import {
   type PickedPhoneImage,
 } from "./phone-image-picker";
 
-/** 폰 화면 — 홈 또는 앱. (사진 보기/업로드는 첨부 창과 대시보드 갤러리가 담당.) */
-type PhoneScreen = "home" | "messages" | "sns" | "camera" | "tube";
+/**
+ * 폰 화면 — 홈 / 내장 앱 / 외부 등록 앱(ext). 홈 그리드는 `plugin.phone.listApps()`
+ * (내장 + 등록)를 그린다 (v2 §9). 내장 앱은 아래 map 으로 내부 화면에 라우팅되고,
+ * 외부 앱은 "ext" 화면에서 자체 render 로 그려진다.
+ */
+type PhoneScreen = "home" | "messages" | "sns" | "camera" | "tube" | "ext";
 
-/** 홈 화면 앱 정의 — 새 기능은 여기에 아이콘을 추가한다. */
-const PHONE_APPS: { screen: PhoneScreen; icon: string; label: string }[] = [
-  { screen: "messages", icon: "message-circle", label: "메시지" },
-  { screen: "sns", icon: "sparkles", label: "스텔라 네트워크" },
-  { screen: "tube", icon: "tv", label: "스텔라튜브" },
-  { screen: "camera", icon: "camera", label: "카메라" },
-];
+/** 번역을 지원하는 앱 축 (v2) — 토글·재번역·표시가 이 축으로 공통 처리된다. */
+type PhoneTranslateKind = "messages" | "sns" | "tube";
 
-const APP_TITLES: Record<Exclude<PhoneScreen, "home">, string> = {
+/** 내장 앱 id → 내부 화면 (홈 그리드 클릭 라우팅). */
+const BUILTIN_SCREEN_BY_ID: Record<
+  string,
+  Exclude<PhoneScreen, "home" | "ext">
+> = {
+  [PHONE_APP_MESSAGES]: "messages",
+  [PHONE_APP_SNS]: "sns",
+  [PHONE_APP_TUBE]: "tube",
+  [PHONE_APP_CAMERA]: "camera",
+};
+
+const APP_TITLES: Record<"messages" | "sns" | "camera" | "tube", string> = {
   messages: "메시지",
   sns: "스텔라 네트워크",
   camera: "카메라",
@@ -96,6 +111,10 @@ class PhoneController extends Component {
   private messages: PhoneMessagesFile | null = null;
   /** 현재 화면 — 홈 / 앱. */
   private screen: PhoneScreen = "home";
+  /** 외부 등록 앱 화면(screen==="ext")에서 활성인 앱 (v2 §9). */
+  private activeExtApp: PhoneApp | null = null;
+  /** 외부 앱 render 가 반환한 정리 함수 — 화면을 떠날 때 호출. */
+  private extCleanup: (() => void) | null = null;
   /** 메시지 앱에서 열려 있는 스레드 대상 — null 이면 연락처 목록. */
   private openTarget: PhoneSendTarget | null = null;
   private feed: SnsFeedFile | null = null;
@@ -122,10 +141,11 @@ class PhoneController extends Component {
   private replyOpen: { postId: string; parentId?: string } | null = null;
   /**
    * 원문↔번역 표시 오버라이드 — null = 설정(자동 번역)을 따름, true = 번역 보기,
-   * false = 원문 보기. 햄버거 토글이 설정한다. 문자/SNS 각각.
+   * false = 원문 보기. 햄버거 토글이 설정한다. 문자/SNS/방송 공통(앱별 축).
    */
   private msgTrOverride: boolean | null = null;
   private snsTrOverride: boolean | null = null;
+  private tubeTrOverride: boolean | null = null;
   /** SNS 답글 알림 모아보기 화면 열림 여부. */
   private snsNotifOpen = false;
   /** SNS 좋아요(맘찍) 한 글 모아보기 화면 열림 여부. */
@@ -148,6 +168,8 @@ class PhoneController extends Component {
   private tubeViewersEl: HTMLElement | null = null;
   private tubeShownFile: string | null = null;
   private tubeRenderedChatIds = new Set<string>();
+  /** 자동 번역을 이미 시도한 방송 (열 때 1회, 루프 방지). */
+  private tubeAutoTried = new Set<string>();
 
   private screenEl!: HTMLElement;
   private statusClockEl!: HTMLElement;
@@ -330,6 +352,22 @@ class PhoneController extends Component {
         runWhenImeIdle(() => this.consumePendingShare());
       })
     );
+    // 폰 앱 등록/해제 (v2 §9) — 홈 그리드 갱신, 열린 외부 앱이 사라지면 홈으로.
+    this.registerEvent(
+      this.plugin.store.on("phone-apps-changed", () => {
+        runWhenImeIdle(() => {
+          if (
+            this.screen === "ext" &&
+            this.activeExtApp &&
+            !this.plugin.phone.listApps().includes(this.activeExtApp)
+          ) {
+            this.goHome();
+          } else if (this.screen === "home") {
+            this.renderBody();
+          }
+        });
+      })
+    );
     // 연락처는 세션 기록에서 파생 — 메시지 목록 화면일 때만 다시 계산.
     const refreshContactsIfListing = () => {
       if (this.screen !== "messages" || this.openTarget !== null) return;
@@ -344,6 +382,8 @@ class PhoneController extends Component {
 
     // 언로드 시 열려 있던 계정 전환 팝업 정리 (document keydown 리스너 포함).
     this.register(() => this.closePersonaSwitcher());
+    // 언로드 시 열려 있던 외부 앱 render 정리 (v2 §9).
+    this.register(() => this.clearExtApp());
 
     void this.reloadAll().then(() => {
       // 갱신 트리거: 폰을 켰을 때 (PH2) — 게이트/스로틀은 refresh 가 판정.
@@ -511,6 +551,7 @@ class PhoneController extends Component {
 
   private goHome(): void {
     if (this.screen === "home") return;
+    this.clearExtApp();
     this.screen = "home";
     this.snsDirty = false;
     this.snsAccountFilter = null;
@@ -522,6 +563,7 @@ class PhoneController extends Component {
   }
 
   private openApp(screen: PhoneScreen): void {
+    this.clearExtApp();
     this.screen = screen;
     this.snsAccountFilter = null;
     this.snsNotifOpen = false;
@@ -639,10 +681,12 @@ class PhoneController extends Component {
         this.goHome();
       }
     });
-    this.headerEl.createDiv({
-      cls: "ggai-phone-title",
-      text: inThread ? this.currentThreadName() : APP_TITLES[this.screen],
-    });
+    const title = inThread
+      ? this.currentThreadName()
+      : this.screen === "ext"
+        ? (this.activeExtApp?.name ?? "")
+        : APP_TITLES[this.screen];
+    this.headerEl.createDiv({ cls: "ggai-phone-title", text: title });
 
     // 답글 알림 벨 (SNS) — 내 게시글/댓글에 달린 답글 모아보기. 안 읽음 배지.
     if (this.screen === "sns") {
@@ -662,8 +706,15 @@ class PhoneController extends Component {
       bell.addEventListener("click", () => this.toggleNotifications());
     }
 
-    // 햄버거 메뉴 — 초기화/삭제 + 번역 보기 토글 (메시지·SNS 화면).
-    if (this.screen === "messages" || this.screen === "sns") {
+    // 햄버거 메뉴 — 초기화/삭제 + 번역 토글/재번역. 문자·SNS 는 항상, 방송은
+    // 방송이 열려 있고 번역이 켜진 경우(번역 항목만 있으므로 빈 메뉴 방지).
+    const showMenu =
+      this.screen === "messages" ||
+      this.screen === "sns" ||
+      (this.screen === "tube" &&
+        this.currentTranslateKind() === "tube" &&
+        this.phoneTranslationEnabled());
+    if (showMenu) {
       const menuBtn = this.headerEl.createEl("button", {
         cls: "ggai-phone-icon-btn",
         attr: { "aria-label": "메뉴" },
@@ -690,29 +741,119 @@ class PhoneController extends Component {
     }).open();
   }
 
-  /** 원문↔번역 표시 토글 메뉴 항목 (문자 스레드 / SNS 공용). */
-  private addTranslationToggleItem(
-    menu: Menu,
-    kind: "messages" | "sns"
-  ): void {
+  /**
+   * 번역 공통 메뉴 (v2 §C) — 원문↔번역 보기 토글. 문자/SNS/방송 어느 앱이든 같은
+   * 코드로 붙는다. "번역 보기"로 전환하면 아직 번역 안 된 항목을 그때 채우므로(각
+   * setter), 별도 "전체 다시 번역"은 두지 않는다 — 특정 글만 고치는 건 개별 재번역.
+   */
+  private addTranslationMenuItems(menu: Menu, kind: PhoneTranslateKind): void {
     if (!this.phoneTranslationEnabled()) return;
-    const showingTranslated =
-      kind === "messages" ? this.showMsgTranslated() : this.snsShowTranslated();
+    const showing = this.showTranslated(kind);
     menu.addItem((mi) =>
       mi
-        .setTitle(showingTranslated ? "원문 보기" : "번역 보기")
+        .setTitle(showing ? "원문 보기" : "번역 보기")
         .setIcon("languages")
-        .onClick(() => {
-          if (kind === "messages") void this.setMsgTranslated(!showingTranslated);
-          else this.setSnsTranslated(!showingTranslated);
-        })
+        .onClick(() => void this.setTranslated(kind, !showing))
     );
   }
 
-  /** SNS 원문↔번역 표시 전환 (햄버거). */
-  private setSnsTranslated(show: boolean): void {
-    this.snsTrOverride = show;
+  /** 그 앱의 번역본을 보여줄지 — 오버라이드(햄버거 토글) 우선, 없으면 자동 번역 설정. */
+  private showTranslated(kind: PhoneTranslateKind): boolean {
+    const ov =
+      kind === "messages"
+        ? this.msgTrOverride
+        : kind === "sns"
+          ? this.snsTrOverride
+          : this.tubeTrOverride;
+    return ov ?? this.plugin.phone.isAutoTranslateOn();
+  }
+
+  /** 원문↔번역 보기 전환 — 앱별 동작으로 디스패치. */
+  private async setTranslated(
+    kind: PhoneTranslateKind,
+    show: boolean
+  ): Promise<void> {
+    if (kind === "messages") await this.setMsgTranslated(show);
+    else if (kind === "sns") await this.setSnsTranslated(show);
+    else await this.setTubeTranslated(show);
+  }
+
+  /** 지금 화면에서 번역 메뉴를 붙일 앱 축 (없으면 null). */
+  private currentTranslateKind(): PhoneTranslateKind | null {
+    if (this.screen === "messages" && this.openTarget !== null) return "messages";
+    if (this.screen === "sns") return "sns";
+    if (this.screen === "tube" && this.currentTubeItem() !== null) return "tube";
+    return null;
+  }
+
+  /**
+   * SNS 원문↔번역 표시 전환 (햄버거) — 번역 보기로 갈 때 아직 번역 안 된 글/댓글이
+   * 있으면 **피드 전체를 한 번에** 먼저 번역한다(문자 스레드와 같은 동작). 이게
+   * 없으면 "번역 보기"를 눌러도 미번역 글이 원문으로 남아 토글이 먹통처럼 보인다.
+   */
+  private async setSnsTranslated(show: boolean): Promise<void> {
+    if (!show) {
+      this.snsTrOverride = false;
+      if (this.screen === "sns") this.renderBody();
+      return;
+    }
+    const key = "sns:feed";
+    const needs = (this.feed?.posts ?? []).some(
+      (p) =>
+        (!p.translation && p.text.trim() !== "") ||
+        p.replies.some((r) => !r.translation && r.text.trim() !== "")
+    );
+    if (needs && !this.translateBusy.has(key)) {
+      this.translateBusy.add(key);
+      new Notice("피드를 번역하는 중…");
+      const result = await this.plugin.phone.translateFeed();
+      this.translateBusy.delete(key);
+      if (!result.ok) new Notice(`스텔라 폰: ${result.error}`);
+      this.snsTrOverride = true;
+      await this.reloadFeed();
+      return;
+    }
+    this.snsTrOverride = true;
     if (this.screen === "sns") this.renderBody();
+  }
+
+  /**
+   * 방송 원문↔번역 표시 전환 (햄버거) — 번역 보기로 갈 때 아직 번역 안 된 채팅이
+   * 있으면 그 방송 채팅 전체를 먼저 번역한다(문자·SNS 와 동일).
+   */
+  private async setTubeTranslated(show: boolean): Promise<void> {
+    if (!show) {
+      this.tubeTrOverride = false;
+      if (this.screen === "tube") this.renderBody();
+      return;
+    }
+    const item = this.currentTubeItem();
+    if (item) {
+      const key = `tube:${item.sessionFile}`;
+      const needs = Object.values(item.stream.nodes).some((n) =>
+        n.chat.some((c) => !c.translation && c.text.trim() !== "")
+      );
+      if (needs && !this.translateBusy.has(key)) {
+        this.translateBusy.add(key);
+        new Notice("방송 채팅을 번역하는 중…");
+        const result = await this.plugin.phone.translateStream(item.sessionFile);
+        this.translateBusy.delete(key);
+        if (!result.ok) new Notice(`스텔라 폰: ${result.error}`);
+      }
+    }
+    this.tubeTrOverride = true;
+    await this.refreshStreamsAndRenderTube();
+  }
+
+  /**
+   * 방송 번역 후 화면 갱신 — `this.streams`(뷰 캐시)를 새로 읽어야 방금 저장한
+   * 번역이 반영된다(append 경로는 새 채팅 id 가 없어 번역 표시로 안 바뀌므로 전체 렌더).
+   */
+  private async refreshStreamsAndRenderTube(): Promise<void> {
+    this.streams = await this.plugin.store
+      .listSessionStreams()
+      .catch(() => this.streams);
+    if (this.screen === "tube") this.renderBody();
   }
 
   private openHeaderMenu(e: MouseEvent): void {
@@ -721,7 +862,7 @@ class PhoneController extends Component {
       const inThread = this.openTarget !== null;
       if (inThread) {
         const target = this.openTarget!;
-        this.addTranslationToggleItem(menu, "messages");
+        this.addTranslationMenuItems(menu, "messages");
         menu.addItem((mi) =>
           mi
             .setTitle("대화 내용 삭제")
@@ -798,7 +939,7 @@ class PhoneController extends Component {
             this.updateComposerState();
           })
       );
-      this.addTranslationToggleItem(menu, "sns");
+      this.addTranslationMenuItems(menu, "sns");
       menu.addItem((mi) =>
         mi
           .setTitle("좋아요 글 남기고 초기화")
@@ -825,6 +966,9 @@ class PhoneController extends Component {
             )
           )
       );
+    } else if (this.screen === "tube") {
+      // 방송 화면 — 번역 토글 + 전체 다시 번역 (공통 메뉴). 방송이 있을 때만.
+      this.addTranslationMenuItems(menu, "tube");
     }
     menu.showAtMouseEvent(e);
   }
@@ -931,6 +1075,9 @@ class PhoneController extends Component {
       case "tube":
         this.renderTube();
         return;
+      case "ext":
+        this.renderExtApp();
+        return;
       default:
         if (this.openTarget === null) this.renderContactList();
         else this.renderThread();
@@ -956,19 +1103,78 @@ class PhoneController extends Component {
     });
 
     const grid = this.bodyEl.createDiv({ cls: "ggai-phone-home-grid" });
-    const anyLive = this.streams.some((s) => s.stream.live);
-    for (const app of PHONE_APPS) {
+    // 내장 + 등록 앱 (v2 §9) — 레지스트리 순서대로.
+    for (const app of this.plugin.phone.listApps()) {
+      const builtinScreen = BUILTIN_SCREEN_BY_ID[app.id];
       const btn = grid.createEl("button", { cls: "ggai-phone-app" });
       const icon = btn.createDiv({ cls: "ggai-phone-app-icon" });
       setIcon(icon, app.icon);
-      icon.addClass(`is-${app.screen}`);
-      // 스텔라튜브 — 방송 중이면 빨간 LIVE 점 배지.
-      if (app.screen === "tube" && anyLive) {
+      icon.addClass(`is-${builtinScreen ?? "ext"}`);
+      // LIVE 점 배지 (스텔라튜브 등 — 앱이 liveBadge 로 판정).
+      if (app.liveBadge?.()) {
         icon.createDiv({ cls: "ggai-phone-app-badge-live" });
       }
-      btn.createDiv({ cls: "ggai-phone-app-label", text: app.label });
-      btn.addEventListener("click", () => this.openApp(app.screen));
+      btn.createDiv({ cls: "ggai-phone-app-label", text: app.name });
+      btn.addEventListener("click", () => {
+        if (builtinScreen) this.openApp(builtinScreen);
+        else this.openExtApp(app);
+      });
     }
+  }
+
+  /** 외부 등록 앱 화면 렌더 (v2 §9) — 앱이 bodyEl 에 자체 UI 를 그린다. */
+  private renderExtApp(): void {
+    const app = this.activeExtApp;
+    if (!app?.render) {
+      this.goHome();
+      return;
+    }
+    // 재렌더 전 이전 render 정리 (bodyEl 은 renderBody 가 이미 비웠으므로
+    // 앱이 붙인 전역 listener 만 정리하면 된다).
+    if (this.extCleanup) {
+      try {
+        this.extCleanup();
+      } catch {
+        /* 정리 실패 무시 */
+      }
+      this.extCleanup = null;
+    }
+    const personaId = this.loginProfile?.id ?? "";
+    const personaFile = this.loginUserFile ?? "";
+    const cleanup = app.render(this.bodyEl, {
+      personaId,
+      personaFile,
+      plugin: this.plugin,
+      goHome: () => this.goHome(),
+    });
+    this.extCleanup = typeof cleanup === "function" ? cleanup : null;
+  }
+
+  /** 외부 앱 화면 진입 — 이전 앱 정리 후 전환. */
+  private openExtApp(app: PhoneApp): void {
+    this.clearExtApp();
+    this.activeExtApp = app;
+    this.screen = "ext";
+    this.snsAccountFilter = null;
+    this.snsNotifOpen = false;
+    this.snsLikedOpen = false;
+    this.openStreamFile = null;
+    this.renderHeader();
+    this.renderBody();
+    this.updateComposerState();
+  }
+
+  /** 외부 앱 화면을 떠날 때 render 정리 함수 실행. */
+  private clearExtApp(): void {
+    if (this.extCleanup) {
+      try {
+        this.extCleanup();
+      } catch {
+        /* 정리 실패 무시 */
+      }
+      this.extCleanup = null;
+    }
+    this.activeExtApp = null;
   }
 
   // ─────────────────────────── 메시지 앱 ───────────────────────────
@@ -1873,17 +2079,14 @@ class PhoneController extends Component {
     window.setTimeout(() => rta.focus(), 0);
   }
 
-  /**
-   * SNS 번역본을 보여줄지 — 오버라이드(햄버거 원문/번역 토글)가 있으면 그것,
-   * 없으면 폰 설정의 "자동 번역"을 따른다.
-   */
+  /** SNS 번역본을 보여줄지 (공통 getter 위임). */
   private snsShowTranslated(): boolean {
-    return this.snsTrOverride ?? this.plugin.phone.isAutoTranslateOn();
+    return this.showTranslated("sns");
   }
 
-  /** 문자 번역본을 보여줄지 — 오버라이드 우선, 없으면 자동 번역 설정. */
+  /** 문자 번역본을 보여줄지 (공통 getter 위임). */
   private showMsgTranslated(): boolean {
-    return this.msgTrOverride ?? this.plugin.phone.isAutoTranslateOn();
+    return this.showTranslated("messages");
   }
 
   // ─────────────────────────── 답글 알림 (모아보기) ───────────────────────────
@@ -2265,6 +2468,49 @@ class PhoneController extends Component {
       });
     }
     chatWrap.scrollTop = chatWrap.scrollHeight;
+    // 자동 번역(또는 번역 보기)이면 여는 순간 아직 번역 안 된 채팅을 채운다 —
+    // 지난 방송(다시보기)은 생성 시점에 번역이 없어(또는 예전 버그로) 원문으로
+    // 남아 있었다. 방송은 한 번에 하나만 열려 비용이 바운드된다.
+    this.maybeAutoTranslateStream(item);
+  }
+
+  /**
+   * 방송이 열릴 때 자동 번역 채우기 — 번역 보기 상태(자동 번역 or 수동 토글)이고
+   * 아직 번역 안 된 채팅이 있으면 백그라운드로 번역한 뒤 갱신한다. 번역이 채워지면
+   * needs=false 가 되어 재호출되지 않는다(루프 없음).
+   */
+  private maybeAutoTranslateStream(item: {
+    sessionFile: string;
+    stream: SessionStreamFile;
+  }): void {
+    if (!this.phoneTranslationEnabled() || !this.showTranslated("tube")) return;
+    const key = `tube:${item.sessionFile}`;
+    // 방송당 자동 시도는 1회 — 실패해도 재렌더마다 다시 부르지 않게(루프 방지).
+    // 남은 미번역은 사용자가 원문↔번역 재토글로 다시 시도할 수 있다.
+    if (this.translateBusy.has(key) || this.tubeAutoTried.has(item.sessionFile)) {
+      return;
+    }
+    const needs = Object.values(item.stream.nodes).some((n) =>
+      n.chat.some((c) => !c.translation && c.text.trim() !== "")
+    );
+    if (!needs) return;
+    this.tubeAutoTried.add(item.sessionFile);
+    this.translateBusy.add(key);
+    void this.plugin.phone
+      .translateStream(item.sessionFile)
+      .then(() => {
+        this.translateBusy.delete(key);
+        // 아직 이 방송을 보고 있으면 번역본으로 갱신.
+        if (
+          this.screen === "tube" &&
+          this.currentTubeItem()?.sessionFile === item.sessionFile
+        ) {
+          void this.refreshStreamsAndRenderTube();
+        }
+      })
+      .catch(() => {
+        this.translateBusy.delete(key);
+      });
   }
 
   /** 방송 화면 그리기 — 활성 노드 삽화가 있으면 이미지, 없으면 이니셜 배경. */
@@ -2336,6 +2582,8 @@ class PhoneController extends Component {
 
   /** 채팅 줄 append — 실시간 채팅처럼 한 줄씩 계단식 등장 애니메이션. */
   private appendTubeChat(host: HTMLElement, chat: StreamChatItem[]): void {
+    // 번역 보기면 번역본, 원문 보기면 원문 (번역 없으면 원문 폴백).
+    const showTr = this.showTranslated("tube");
     let i = 0;
     for (const c of chat) {
       if (this.tubeRenderedChatIds.has(c.id)) continue;
@@ -2352,8 +2600,9 @@ class PhoneController extends Component {
           text: `💰 ${formatCount(c.donation)}`,
         });
       }
+      const text = showTr && c.translation ? c.translation.text : c.text;
       row.createSpan({ cls: "ggai-phone-tube-line-name", text: c.name });
-      row.createSpan({ cls: "ggai-phone-tube-line-text", text: ` ${c.text}` });
+      row.createSpan({ cls: "ggai-phone-tube-line-text", text: ` ${text}` });
     }
   }
 

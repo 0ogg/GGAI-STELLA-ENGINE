@@ -34,14 +34,18 @@ export const DEFAULT_MEDIA_PROMPTS: Record<MediaPromptBucket, MediaPromptItem[]>
       id: "builtin:translation:1",
       title: "Default",
       prompt:
-        "{{main}}\n\n" +
-        "번역 상세\n" +
+        "# 참고 자료 (번역 대상 아님 — 용어·문맥 참고용)\n" +
         "{{lorebook}}\n\n" +
+        "# 지침\n" +
         "You are a professional literary translator specializing in Korean.\n" +
-        "Translate each provided story paragraph into natural, high-quality Korean.\n" +
+        'Translate ONLY the JSON array under "# 번역할 텍스트" below into natural, high-quality Korean.\n' +
+        "The reference material above (glossary and preceding context) is for consistency only — never translate, copy, or echo it.\n" +
         "Preserve the original tone, narrative voice, character speech style, emotion, and pacing.\n" +
-        "Maintain consistent terminology and character names throughout the session.\n" +
-        "Do not add, omit, or reinterpret content. Output must be faithful to the source.\n" +
+        "Maintain consistent terminology and character names, following the reference material.\n" +
+        "Match the honorific level (존댓말/반말) between characters implied by the preceding context, and keep it consistent.\n" +
+        "Do not add, omit, or reinterpret content. Output must be faithful to the source.\n\n" +
+        "# 번역할 텍스트\n" +
+        "{{main}}\n\n" +
         "번역: ```json\n",
     },
   ],
@@ -426,9 +430,22 @@ SFW / NSFW (second item of sceneInfo)
 - otherwise: sfw
 
 =========================================
+SCENE + BACKGROUND (third & fourth items of sceneInfo)
+=========================================
+- scene = the central situation as ONE clear, accurate natural-language sentence,
+    so the composition reads correctly even without the character blocks:
+    who is doing what to whom, and the framing. Concrete visual facts only.
+      e.g.  two girls in a comedic fight, one being pointed at while the other scolds her
+- background = the place: natural language or word tags, as concrete as the
+    context allows (location, lighting, weather, time).
+      e.g.  inside an abandoned factory, dim industrial lights, foggy atmosphere
+- If a specific central pose/action has a known danbooru tag, add it here:
+    princess carry, full nelson, doggy style, pointing spider-man (meme), ice bucket challenge
+
+=========================================
 CHARACTER BLOCK
 =========================================
-Shape: gender, name, appearance + action
+Shape: gender, name, appearance tags, action
 
 gender -> boy | girl | other   (other = creature/robot/animal, no clear gender)
 
@@ -436,22 +453,33 @@ name:
   - Character from a REAL existing series (fan-art) ->  english name (english series)
         e.g.  haruno sakura (naruto)
         This name is used ONLY to borrow the model's known reference.
+        Do NOT invent looks the text does not give.
   - Your author's own created character (no source series) ->  original character
         ALWAYS write "original character" with NO name.
         A made-up name pollutes the model with a wrong reference.
         Even the main hero, if not fan-art, is "original character".
+        Spell out hair color, eye color, and hairstyle in detail.
+  - An unnamed extra with no described looks -> original character, plus a few
+        plain looks fitting their role so they don't blur with the main
+        characters. If the text does describe them, follow it exactly.
 
-appearance:
-  concrete visual words from the text — hair color, eye color, hairstyle,
-  clothes, expression, exposed body parts, wounds, torn clothing, pose, action.
-  For "original character" you MUST spell out hair/eye/hairstyle in detail.
-  For a real-series character, do NOT invent looks the text does not give.
+appearance = word tags (the details): hair color, eye color, hairstyle, each
+  clothing item, clothing state, expression, exposed body parts, wounds, torn
+  clothing. Short tags, one thing per tag — NOT sentences.
+    GOOD  green eyes, medium pink hair, red dress, torn dress, white gloves, angry
+    BAD   she has flowing pink hair and an angry look, her red dress torn open
+
+action = ONE accurate natural-language phrase at the END of the block: what this
+  character is physically doing in the last scene, more specific than the scene
+  line (e.g. "standing with hands on hips, being pointed at by the other girl").
 
 =========================================
 LANGUAGE RULES
 =========================================
 - lowercase english only.
 - separate with "," never "."
+- structure: central situation & each character's action = one accurate sentence;
+    all details (looks, clothes, props, pose/meme names) = short word tags.
 - no metaphors, no similes, no emotional adjectives.
     BAD  her eyes were like stars
     GOOD girl with blue eyes looking at the boy
@@ -468,7 +496,7 @@ offscreen: uzumaki naruto (naruto) ; onscreen: haruno sakura (naruto), original 
 =========================================
 EXAMPLE 2 (reference only — do NOT output this)
 =========================================
-offscreen: none ; onscreen: original character, original character ; sceneInfo: 1boy, 1girl, nsfw, uncensored, heavy rain at night, wet city street with neon reflections, boy carrying a girl, princess carry, soaked clothes | boy, original character, short black hair, dark brown eyes, white shirt soaked translucent, black trousers, serious expression, looking down at her, carrying her with both arms | girl, original character, long silver hair clinging to skin, blue eyes, torn white dress, left nipple exposed, wet skin, half-closed eyes, blushing, limp in his arms
+offscreen: none ; onscreen: original character, original character ; sceneInfo: 1boy, 1girl, nsfw, uncensored, heavy rain at night, wet city street with neon reflections, a boy carrying a girl through the rain, princess carry | boy, original character, short black hair, dark brown eyes, white shirt, wet clothes, see-through shirt, black trousers, serious expression, looking down at her, carrying her with both arms | girl, original character, long silver hair, wet hair, blue eyes, torn white dress, left nipple exposed, wet skin, half-closed eyes, blush, limp in his arms
 
 =========================================
 NOW DO IT

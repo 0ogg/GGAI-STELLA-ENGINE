@@ -604,6 +604,13 @@ export interface PhonePluginData {
    * (프로토콜에서 제외 + 엔진 무시). undefined = 켬.
    */
   snsPhotoEnabled?: boolean;
+  /**
+   * 앱 간 공유 허브 (v2 §8.1) — 문자/SNS/방송이 서로의 최근 소식을 맥락으로
+   * 공유한다(자기 앱 제외). undefined = 켬.
+   */
+  sharedContextEnabled?: boolean;
+  /** 공유 다이제스트로 각 생성에 붙일 최대 분량 (토큰, 기본 1000). */
+  sharedContextTokens?: number;
 }
 
 // ─────────────────────────── 폰 갤러리 (PH5) ───────────────────────────
@@ -664,6 +671,8 @@ export interface StreamChatItem {
   text: string;
   /** 도네이션 금액 (있으면 후원 채팅). */
   donation?: number;
+  /** 폰 안 번역 (v2) — 원문 불변, 표시 토글로 전환 (문자/SNS 와 동일). */
+  translation?: { text: string };
 }
 
 /** 세션 노드 1개에 대한 시청자 반응 배치. */
@@ -718,6 +727,7 @@ export function normalizeSessionStream(raw: unknown): SessionStreamFile | null {
         const cc = c as Partial<StreamChatItem>;
         if (typeof cc.id !== "string" || typeof cc.text !== "string") continue;
         if (typeof cc.name !== "string" || !cc.name) continue;
+        const tr = cc.translation as { text?: unknown } | undefined;
         chat.push({
           id: cc.id,
           name: cc.name,
@@ -727,6 +737,9 @@ export function normalizeSessionStream(raw: unknown): SessionStreamFile | null {
           text: cc.text,
           ...(typeof cc.donation === "number" && cc.donation > 0
             ? { donation: Math.round(cc.donation) }
+            : {}),
+          ...(tr && typeof tr.text === "string"
+            ? { translation: { text: tr.text } }
             : {}),
         });
       }

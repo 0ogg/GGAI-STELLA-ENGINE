@@ -107,6 +107,7 @@ import {
   applyChatTurnNames,
   buildNaiFormatSegments,
   buildTextCompletionSegments,
+  insertSessionStartMarker,
   segmentsToString,
   type ChatCompletionNames,
   type PromptSegment,
@@ -587,7 +588,11 @@ export async function planSessionRequest(
       chatNames,
     };
   } else {
-    const messages = normalizeMessagesForChat(output.messages);
+    // NAI 형식이 아닌 챗 전송본도 배경 설정과 본문 사이에 세션 시작 마커를 끼운다
+    // (텍스트 평문 경로와 같은 의미). 마커 삽입 후 역할 병합을 돌린다.
+    const messages = normalizeMessagesForChat(
+      insertSessionStartMarker(output.messages)
+    );
     // 이어쓰기 이음새 보정 — 마지막 문장 반복 지시문을 전송본 끝에 붙인다.
     // 미리보기도 이 payload 를 그대로 그리므로 지시문이 그대로 보인다.
     let anchor: string | undefined;

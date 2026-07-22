@@ -110,6 +110,8 @@ export interface StellaPluginData {
   mediaPrompts?: MediaPromptLibrary;
   /** 문단 재생성 패널에서 마지막으로 선택한 프롬프트 id. */
   paragraphRegenPromptId?: string;
+  /** 문단 재생성 시 세션 컨텍스트(앞뒤 문단+요약) 첨부를 끄는지. 기본 false(첨부). */
+  paragraphRegenNoContext?: boolean;
   activeUserProfileFile?: string;
   lastActivePresetId?: string;
   /** 이어쓸 때마다 즐겨찾기한 프리셋으로 자동 순환할지 (문체 고착/반복 방지). */

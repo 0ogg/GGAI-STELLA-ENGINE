@@ -21,6 +21,30 @@ import { tokenizeParagraphs, type ParagraphToken } from "./translate-paragraphs"
 /** 문체 예시로 첨부할 문단 쌍 수 기본값 (0 = 끄기). 설정 UI 로 조절. */
 export const PRO_STYLE_PAIRS_DEFAULT = 3;
 
+/**
+ * 장면 전환 구분선(`***` 류) 문단인가. 저자가 장면 전환용으로 넣은 별표 줄은
+ * 언어 중립이라 집필 변환이 필요 없다 — 영어판에도 같은 기호를 그대로 넣는다.
+ * 공백을 무시하고 별표 3개 이상(`***`, `* * *`)이면 참 (문단 토큰은 줄바꿈이 없다).
+ */
+export function isSceneBreakParagraph(source: string): boolean {
+  return /^\*{3,}$/.test(source.replace(/\s+/g, ""));
+}
+
+/**
+ * 접합 텍스트의 마지막 문단이 장면 전환(***)인가 — 끝(append)에 붙는데 뒤 줄바꿈이
+ * 없으면, 이어질 생성/집필이 그 구분선에 한 문단으로 들러붙는다. 호출자가 이 경우
+ * 문단 구분 줄바꿈을 덧붙여 다음 내용이 새 문단으로 시작하게 한다.
+ */
+export function endsWithSceneBreak(text: string): boolean {
+  const tokens = tokenizeParagraphs(text);
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    const token = tokens[i];
+    if (token.kind === "separator") continue;
+    return isSceneBreakParagraph(token.source);
+  }
+  return false;
+}
+
 /** 엔진 고정 IO 규약 — 사용자 프롬프트 앞(시스템 지시 자리)에 결합된다. */
 export const PRO_CONVERT_IO_INSTRUCTIONS = [
   "Input is a JSON array of segments:",
@@ -77,6 +101,8 @@ export function buildProSpliceRequest(
     const writeIds: string[] = [];
     for (const token of koTokens) {
       if (token.kind !== "paragraph") continue;
+      // 장면 전환(***) 문단은 변환 없이 그대로 통과 — write 세그먼트를 만들지 않는다.
+      if (isSceneBreakParagraph(token.source)) continue;
       const id = `w${opIdx + 1}_${writeIds.length + 1}`;
       writeIds.push(id);
       segments.push({ id, role: "write", source: token.source });
@@ -119,6 +145,12 @@ export function assembleProConversion(
       englishText += token.text;
       continue;
     }
+    // 장면 전환(***) — AI 변환 없이 원문 기호 그대로, 짝도 동일(en=ko).
+    if (isSceneBreakParagraph(token.source)) {
+      englishText += token.source;
+      pairs.push({ en: token.source, ko: token.source });
+      continue;
+    }
     const id = plan.writeIds[writeIndex++];
     const raw = id !== undefined ? translationById.get(id) : undefined;
     // 내부 줄바꿈은 공백으로 접는다 — 문단 해시/짝 구조 보존 (파일 상단 주석 참조).
@@ -154,6 +186,7 @@ export function collectStylePairs(
     const token = tokens[i];
     if (token.kind !== "paragraph" || seen.has(token.hash)) continue;
     seen.add(token.hash);
+    if (isSceneBreakParagraph(token.source)) continue; // 장면 전환은 문체 예시 대상 아님
     const entry = translations.paragraphs[token.hash];
     const active = entry ? entry.variants[entry.activeVariantId] : undefined;
     if (active?.kind !== "authored" || active.text.trim() === "") continue;

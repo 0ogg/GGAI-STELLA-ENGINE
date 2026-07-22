@@ -73,16 +73,67 @@ export const PARAGRAPH_REGEN_IO_INSTRUCTIONS = [
  *  - source: 재생성 대상 원문 (현재 편집 영역의 값 — 범위 원문, 사용자 직접 수정, 또는
  *    직전 AI 결과 중 현재 커서가 가리키는 단계의 텍스트).
  *  - feedback: 사용자의 일회성 추가 지시.
+ *  - context: 세션 참고 맥락(앞뒤 문단+요약) 블록 — 대상 passage/지침과 분리해 맨 앞에.
+ *    없으면 기존 동작(대상 문장 + 지침만) 그대로.
  */
 export function buildParagraphRegenBody(
   instruction: string,
   source: string,
-  opts?: { feedback?: string }
+  opts?: { feedback?: string; context?: string }
 ): string {
   const feedback = opts?.feedback?.trim() ?? "";
+  const context = opts?.context?.trim() ?? "";
   let text = composeMediaPrompt(instruction, source);
   if (feedback) {
     text += `\n\nAdditional instruction: ${feedback}`;
   }
-  return text;
+  return context ? `${context}\n\n${text}` : text;
+}
+
+/** 재생성 맥락 첨부 세트 수 (1세트=6문단, 앞·뒤 각 방향). 체크박스로 끄면 미첨부. */
+export const PARAGRAPH_REGEN_CONTEXT_SETS = 3;
+/** 1세트 = 6문단. */
+export const PARAGRAPH_REGEN_CONTEXT_SET_SIZE = 6;
+
+/**
+ * 재생성 대상 범위 앞/뒤 문단 원문 수집 — baseline 기준, 각 방향 sets*setSize 문단.
+ * sets<=0 이면 빈 배열. startIndex/endIndex 는 대상 범위의 문단 인덱스(포함).
+ */
+export function collectRegenContext(
+  baselineText: string,
+  startIndex: number,
+  endIndex: number,
+  sets: number,
+  setSize = PARAGRAPH_REGEN_CONTEXT_SET_SIZE
+): { before: string[]; after: string[] } {
+  if (sets <= 0) return { before: [], after: [] };
+  const ranges = listParagraphRanges(baselineText);
+  const span = sets * setSize;
+  return {
+    before: ranges
+      .slice(Math.max(0, startIndex - span), Math.max(0, startIndex))
+      .map((r) => r.source),
+    after: ranges.slice(endIndex + 1, endIndex + 1 + span).map((r) => r.source),
+  };
+}
+
+/**
+ * 재생성 참고 블록 — 대상 passage 와 확실히 구분해 "다시 쓰지/출력하지 말 것, 참고용"
+ * 을 명시한다. 요약/앞 문단/뒤 문단 중 있는 것만. 전부 비면 "".
+ */
+export function formatRegenContext(
+  before: string[],
+  after: string[],
+  summary: string
+): string {
+  const sections: string[] = [];
+  if (summary.trim()) sections.push(`[Story so far]\n${summary.trim()}`);
+  if (before.length) sections.push(`[Preceding paragraphs]\n${before.join("\n\n")}`);
+  if (after.length) sections.push(`[Following paragraphs]\n${after.join("\n\n")}`);
+  if (sections.length === 0) return "";
+  return [
+    "── Story context (reference only) ──",
+    "The passage to rewrite is given separately below. Everything here is the surrounding story and its current state, provided ONLY for continuity — do NOT rewrite, translate, repeat, or output any of it.",
+    ...sections,
+  ].join("\n\n");
 }

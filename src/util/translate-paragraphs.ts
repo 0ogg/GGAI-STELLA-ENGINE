@@ -166,9 +166,8 @@ export interface TranslationResultItem {
  */
 export const TRANSLATION_IO_INSTRUCTIONS = [
   "Input is a JSON array of story paragraphs in document order:",
-  '[{ "id": string, "role": "translate" | "context", "source": string }]',
-  'Translate the source of every "translate" segment according to the instructions above.',
-  '"context" segments are surrounding paragraphs provided for continuity; you may include an improved translation for them as well.',
+  '[{ "id": string, "role": "translate", "source": string }]',
+  "Translate the source of every segment according to the instructions above.",
   "Inside each translation you may freely restructure line breaks (e.g. separating dialogue and narration) — but never merge or omit segments.",
   "Respond with a JSON array only — no markdown fences, no commentary:",
   '[{ "id": string, "translation": string }]',
@@ -176,32 +175,85 @@ export const TRANSLATION_IO_INSTRUCTIONS = [
 ].join("\n");
 
 /**
- * 번역 요청 세그먼트 조립.
- *  - targets: 번역 대상 문단 (문서 순서).
- *  - 각 대상 바로 앞 문단이 대상이 아니면 context 로 끼워 연속성을 준다.
+ * 번역 요청 세그먼트 조립 — {{main}} 에는 번역 대상 문단만 담는다(문서 순서).
+ * 앞 문맥/앞 번역은 {{main}} 밖(로어북 위치)에 참고 블록으로 따로 붙는다
+ * (collectTranslationContext / formatTranslationContext) — {{main}} 과 섞지 않는다.
  */
 export function buildTranslationRequest(
   text: string,
   targets: SourceParagraph[]
 ): TranslationRequestSegment[] {
   const targetHashes = new Set(targets.map((t) => t.hash));
+  return collectParagraphs(text)
+    .filter((p) => targetHashes.has(p.hash))
+    .map((p) => ({ id: p.hash, role: "translate" as const, source: p.source }));
+}
+
+/** 1세트 = 직전 6문단. 앞 문맥 첨부의 단위. */
+export const TRANSLATION_CONTEXT_SET_SIZE = 6;
+/** 앞 문맥 첨부 기본 세트 수 (0 = 끄기). 디테일뷰 번역탭에서 조절. */
+export const TRANSLATION_CONTEXT_SETS_DEFAULT = 1;
+
+export interface TranslationContextPair {
+  source: string;
+  /** 이 문단의 active 번역 (없으면 ""). */
+  translation: string;
+}
+
+/**
+ * 번역 대상 앞의 맥락 문단 수집 — 문서 순서에서 "가장 앞선 대상" 바로 앞부터 거슬러
+ * setSize*sets 문단. 각 문단의 원문 + (있으면) active 번역을 짝으로 반환(문서 순서).
+ * sets<=0 이거나 앞에 문단이 없으면 빈 배열. 대상 자신/중복 해시는 제외한다.
+ * 배치 번역은 청크마다 translations 가 갱신되므로, 뒤 청크의 맥락에 방금 번역된
+ * 앞 청크가 자동으로 들어간다(연속성).
+ */
+export function collectTranslationContext(
+  text: string,
+  translations: SessionTranslations,
+  targets: SourceParagraph[],
+  sets: number,
+  setSize = TRANSLATION_CONTEXT_SET_SIZE
+): TranslationContextPair[] {
+  if (sets <= 0 || targets.length === 0) return [];
+  const targetHashes = new Set(targets.map((t) => t.hash));
   const ordered = collectParagraphs(text);
-  const segments: TranslationRequestSegment[] = [];
-  const included = new Set<string>();
-  for (let i = 0; i < ordered.length; i++) {
+  const firstIdx = ordered.findIndex((p) => targetHashes.has(p.hash));
+  if (firstIdx <= 0) return [];
+  const want = sets * setSize;
+  const out: TranslationContextPair[] = [];
+  for (let i = firstIdx - 1; i >= 0 && out.length < want; i--) {
     const p = ordered[i];
-    if (!targetHashes.has(p.hash)) continue;
-    const prev = ordered[i - 1];
-    if (prev && !targetHashes.has(prev.hash) && !included.has(prev.hash)) {
-      segments.push({ id: prev.hash, role: "context", source: prev.source });
-      included.add(prev.hash);
-    }
-    if (!included.has(p.hash)) {
-      segments.push({ id: p.hash, role: "translate", source: p.source });
-      included.add(p.hash);
-    }
+    if (targetHashes.has(p.hash)) continue;
+    out.push({
+      source: p.source,
+      translation: getActiveTranslation(translations, p.hash)?.text ?? "",
+    });
   }
-  return segments;
+  return out.reverse();
+}
+
+/**
+ * 앞 문맥 참고 블록 — 로어북 슬롯(참고자료 위치)에 합류시킨다. {{main}}(번역 대상)과
+ * 헷갈리지 않게 "번역 금지, 참고용" 을 명시하고, 경어 수준(존댓말/반말) 연속성을 지시한다.
+ * **JSON 이 아니라 일반 텍스트([원문]/[번역] 줄)로 만든다** — 번역 입력 JSON 배열과
+ * 나란히 놓여도 "둘 다 입력"으로 오인되지 않게. 짝이 없으면 "".
+ */
+export function formatTranslationContext(
+  pairs: TranslationContextPair[]
+): string {
+  if (pairs.length === 0) return "";
+  const blocks = pairs.map((p) =>
+    p.translation
+      ? `[원문] ${p.source}\n[번역] ${p.translation}`
+      : `[원문] ${p.source}`
+  );
+  return [
+    "── 앞 문맥 (이미 번역된 직전 문단 — 참고용, 번역 대상 아님) ──",
+    "번역할 텍스트 바로 앞 문단이 이미 어떻게 번역됐는지 보여주는 자료다. 용어·이름 표기,",
+    "말투, 인물 간 존댓말/반말 수준을 일관되게 잇는 데만 참고하고, 이 블록은 절대 번역·출력하지 않는다.",
+    "",
+    blocks.join("\n\n"),
+  ].join("\n");
 }
 
 /** 응답 텍스트에서 번역 JSON 배열 추출. 코드펜스/잡담 허용, 실패 시 null. */
@@ -318,6 +370,32 @@ export function listTranslationVariants(
   return Object.values(entry.variants).sort(
     (a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)
   );
+}
+
+/**
+ * 반영이 끝난 원문(옛 영어) 문단들의 "영어판 반영 대기"(active=user-edit) 표시를 해제한다.
+ *
+ * 집필 프로: 한국어 수정이 영어판에 반영되면 **새 영어 해시**가 생기고 그 active 는
+ * authored 가 되어 대기에서 벗어난다. 하지만 수정 전 문단(옛 영어)의 user-edit variant 는
+ * 그대로 남아, 나중에 그 문단이 있는 옛 노드로 되돌아가면 다시 "반영 대기"로 잡혀
+ * 영어판을 재변환(재생성)하는 회귀가 났다(전 노드 복귀 사고). → 반영 성공 시 옛 문단의
+ * active 를 직전 비-user-edit variant 로 되돌린다(없으면 미번역). variant 는 삭제하지
+ * 않는다("정리는 명시적 다이어트 기능의 몫" 원칙) — 되돌아가도 옛 상태가 보일 뿐이다.
+ */
+export function resolvePendingEditVariants(
+  translations: SessionTranslations,
+  hashes: string[]
+): void {
+  for (const hash of hashes) {
+    const entry = translations.paragraphs[hash];
+    if (!entry) continue;
+    const active = entry.variants[entry.activeVariantId];
+    if (active?.kind !== "user-edit") continue;
+    const fallback = listTranslationVariants(translations, hash)
+      .reverse()
+      .find((v) => v.id !== active.id && v.kind !== "user-edit");
+    entry.activeVariantId = fallback?.id ?? "";
+  }
 }
 
 /** active variant 를 지정 variant 로 이동. 대상이 없으면 false. */
