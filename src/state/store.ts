@@ -651,9 +651,19 @@ export class StellaStore extends Events {
       const fresh = JSON.parse(text) as StellaSession;
       const existing = this.sessionByFile.get(file);
       if (existing) {
-        // 제자리 갱신 — SessionView 등이 들고 있는 참조가 고아가 돼서
-        // 다른 뷰의 refresh 후 메타 변경(updateToolbar/auto 실행 등)이
-        // 누락되는 버그를 막기 위해 같은 객체에 덮어쓴다.
+        // 불변식: 메모리가 디스크와 같거나 더 새로우면 덮어쓰지 않는다.
+        // 생성 중에는 새 노드가 메모리에만 있고 저장은 종료 후라, 그 사이의
+        // 디스크 재읽기(디테일 뷰 로드/창 포커스 복귀 등 어떤 경로든)가 이
+        // 객체를 옛 디스크본으로 덮으면 진행 중 생성이 통째로 사라진다.
+        // 이때 메모리 modifiedAt == 디스크 modifiedAt(마지막 저장)이므로 아래
+        // 비교가 막아준다. 진짜 외부 변경(다른 기기 동기화 등)은 디스크가
+        // 엄격히 더 새로워 정상 반영되고, 외부 편집으로 파일이 바뀐 경우는
+        // onVaultChange 가 캐시를 지워 어차피 fresh 경로를 탄다.
+        const diskAt = fresh.meta?.modifiedAt ?? 0;
+        const memAt = existing.meta?.modifiedAt ?? 0;
+        if (diskAt <= memAt) return existing;
+        // 디스크가 더 새로움 = 외부 변경 — 제자리 갱신 (SessionView 등이 들고
+        // 있는 참조가 고아가 되지 않게 같은 객체에 덮어쓴다).
         assignSessionInPlace(existing, fresh);
         return existing;
       }
