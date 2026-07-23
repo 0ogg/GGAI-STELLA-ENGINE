@@ -1791,6 +1791,25 @@ asyncTests.push((async () => {
     [{ id: "a", translation: "안녕" }]
   );
   assert.equal(parseTranslationResponse("no json here"), null);
+
+  // 약한 모델이 대사 따옴표를 이스케이프하지 않아 JSON.parse 가 깨지는 실제 제보 케이스 —
+  // 구조 복구로 살려낸다(재생성 루프 원인). 내부 따옴표/줄바꿈 보존.
+  assert.deepEqual(
+    parseTranslationResponse(
+      '[{"id":"7dcbee97","translation":""——으윽!""},{"id":"e60394ba","translation":"밀어 넣을 때는 빨랐다."}]'
+    ),
+    [
+      { id: "7dcbee97", translation: '"——으윽!"' },
+      { id: "e60394ba", translation: "밀어 넣을 때는 빨랐다." },
+    ]
+  );
+  // 정상적으로 이스케이프된 응답은 빠른 경로(통짜 JSON.parse)로 그대로 통과.
+  assert.deepEqual(
+    parseTranslationResponse(
+      '[{"id":"a","translation":"\\"안녕\\"이라 말했다."}]'
+    ),
+    [{ id: "a", translation: '"안녕"이라 말했다.' }]
+  );
 }
 
 {
@@ -2288,6 +2307,39 @@ asyncTests.push((async () => {
   // 반복 없이 충분히 길어지면 0 으로 확정 (본문 표시 시작).
   assert.equal(anchorSkipStreaming("전혀 다른 내용".repeat(60), anchor), 0);
 
+  // ── 정규화 퍼지 중복 제거 — 모델이 앵커를 글자 그대로 안 쓰고 살짝 바꿔 재현한 경우 ──
+  // (A) 끝 구분선(***)을 빼먹고 이어씀 → 앞문장이 안 잘리던 중복 버그.
+  const scAnchor = "앞 문장이 끝났다.\n\n***";
+  const dropStar = "앞 문장이 끝났다. 이어지는 다음 문장.";
+  assert.equal(dropStar.slice(anchorSkipFinal(dropStar, scAnchor)), " 이어지는 다음 문장.");
+  // 구분선을 그대로 재현하면 엄격 경로가 *** 직후에서 자르고 뒤 줄바꿈은 보존.
+  const keepStar = "앞 문장이 끝났다.\n\n***\n\n다음 장면 첫 문장.";
+  assert.equal(keepStar.slice(anchorSkipFinal(keepStar, scAnchor)), "\n\n다음 장면 첫 문장.");
+  // (B) 여는 따옴표(「)를 빠뜨리고 대사를 닫아 이어감 → 남은 부분만 붙어 대사가 닫힘.
+  const quoteAnchor = "「行くぞ";
+  const dropOpen = "行くぞ」と彼は言った。";
+  assert.equal(dropOpen.slice(anchorSkipFinal(dropOpen, quoteAnchor)), "」と彼は言った。");
+  // (C) 곧은 따옴표 → 둥근 따옴표로 바꿔 재현.
+  const strAnchor = '"정말 갈 거야?"';
+  const curly = "“정말 갈 거야?” 그녀가 물었다.";
+  assert.equal(curly.slice(anchorSkipFinal(curly, strAnchor)), " 그녀가 물었다.");
+  // (C) 말줄임표 … → ... 로 바꿔 재현.
+  const ellAnchor = "그래서 말이야…";
+  const dots = "그래서 말이야... 그는 웃었다.";
+  assert.equal(dots.slice(anchorSkipFinal(dots, ellAnchor)), " 그는 웃었다.");
+  // (C) 전각 숫자 → 반각으로 정규화 비교.
+  const widthAnchor = "방 번호는 ３０５호다.";
+  const halfWidth = "방 번호는 305호다. 문을 두드렸다.";
+  assert.equal(
+    halfWidth.slice(anchorSkipFinal(halfWidth, widthAnchor)),
+    " 문을 두드렸다."
+  );
+  // 안전장치 — 실질 내용이 도중에 어긋나면(단어 교체) 잘라내지 않는다(정상 이어쓰기 보존).
+  assert.equal(
+    anchorSkipFinal("그는 이번엔 뒤를 돌아보았다.", "그는 천천히 문을 열었다."),
+    0
+  );
+
   // 이음새 줄바꿈 허용 판정 — 완결 문장/대사면 새 문단 가능(줄바꿈 보존).
   assert.equal(anchorEndsParagraph("彼は部屋を出た。"), true);
   assert.equal(anchorEndsParagraph("「もう行こう」"), true);
@@ -2302,6 +2354,14 @@ asyncTests.push((async () => {
   assert.equal(anchorEndsParagraph("「…ご主人様？"), false); // 대사 미종결
   assert.equal(anchorEndsParagraph('"Are you sure?'), false); // 큰따옴표 미종결
   assert.equal(anchorEndsParagraph("（…なんでこうなった"), false);
+  // 장면 구분선(***)으로 끝나는 앵커는 문단 끝 — 이음새 줄바꿈을 보존한다
+  // (구분선을 미완성 조각으로 오해해 뒤 문단이 ***에 들러붙던 버그 수정).
+  assert.equal(anchorEndsParagraph("긴 문장이 끝났다.\n\n***"), true);
+  assert.equal(anchorEndsParagraph("***"), true);
+  assert.equal(anchorEndsParagraph("* * *"), true);
+  // 별표 2개나 본문 속 강조 별표는 구분선이 아니다.
+  assert.equal(anchorEndsParagraph("강조된 **단어"), false);
+  assert.equal(anchorEndsParagraph("문장 끝 **"), false);
 }
 
 // ── 대형 첫 본문 분할 + 요약 앵커 경계 계산 ─────────────────────────

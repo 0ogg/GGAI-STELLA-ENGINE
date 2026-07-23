@@ -97,6 +97,17 @@ import { SessionView, type SessionViewCommand } from "./views/session-view";
 import { ProSessionView } from "./views/pro-session-view";
 import { ProFocusView } from "./views/pro-focus-view";
 import { SidebarView } from "./views/sidebar-view";
+import { openAuthorNoteQuickInput } from "./views/session-command-bar";
+import { NextEpisodeModal } from "./views/next-episode-modal";
+import { generateSessionTitleNow } from "./services/session-title-service";
+import { toggleProactiveSetting } from "./views/session-menu";
+import {
+  copySession,
+  exportSessionReading,
+  openGroupMemberManager,
+  openSessionByPath,
+} from "./views/entity-actions";
+import type { SessionListItem } from "./util/scan-sessions";
 
 /**
  * 플러그인 영속 데이터.
@@ -453,6 +464,11 @@ export default class StellaEnginePlugin extends Plugin {
     // 커맨드/단축키로도 노출. (활성 세션창이 있을 때만 동작.)
     this.registerSessionCommands();
 
+    // 세션 파일 단위 액션 — 소설/챗 공통. 활성(또는 마지막) 세션에 대해 동작하며,
+    // 챗/그룹 전용 항목은 실행 시점에 검증해 안내한다. (툴바 액션과 달리 세션창
+    // 클래스에 매이지 않아 챗 세션에서도 동작한다.)
+    this.registerSessionFileCommands();
+
     // 업데이트 뒤 옵시디언 도크에 남은 스텔라 유령/중복 탭을 즉시 정리.
     this.addCommand({
       id: "cleanup-stella-ghost-tabs",
@@ -494,7 +510,14 @@ export default class StellaEnginePlugin extends Plugin {
       this.updateStellaPanelActiveClass(this.app.workspace.activeLeaf);
       if (isFreshInstall) {
         void this.savePluginData({ installOnboardingShown: true });
-        void this.openStellaPanel();
+        // 처음 설치: 좌측 사이드바·우측 디테일뷰·대시보드를 모두 펼쳐서 보여준다.
+        // (reconcileStellaLeaves 는 active:false 로 꽂아만 두므로 접힌 사이드바가
+        //  안 펼쳐져 디테일뷰 존재를 모르는 사용자가 있었다 — 첫 실행만 명시 reveal.)
+        void (async () => {
+          await this.revealSidebar();
+          await this.revealDetail();
+          await this.openStellaPanel();
+        })();
       } else if (this.data.installOnboardingShown !== true) {
         void this.savePluginData({ installOnboardingShown: true });
       }
@@ -1300,6 +1323,38 @@ export default class StellaEnginePlugin extends Plugin {
         },
         { id: "session-open-gallery", name: "세션: 삽화 갤러리 열기", action: "gallery" },
         { id: "session-go-lobby", name: "세션: 나가기(로비로)", action: "lobby" },
+        { id: "session-undo", name: "세션: 되돌리기 (Undo)", action: "undo" },
+        { id: "session-redo", name: "세션: 다시 실행 (Redo)", action: "redo" },
+        {
+          id: "session-jump-end",
+          name: "세션: 최신 지점으로 이동",
+          action: "jump-end",
+        },
+        {
+          id: "session-para-regen",
+          name: "세션: 문단 재생성 (문단 고르기)",
+          action: "para-regen",
+        },
+        {
+          id: "session-auto-translate",
+          name: "세션: 자동 번역 켜기/끄기",
+          action: "auto-translate",
+        },
+        {
+          id: "session-auto-illustrate",
+          name: "세션: 자동 삽화 켜기/끄기",
+          action: "auto-illustrate",
+        },
+        {
+          id: "session-undo-translate",
+          name: "세션: 방금 번역 되돌리기",
+          action: "undo-translate",
+        },
+        {
+          id: "session-view-style",
+          name: "세션: 본문 글자·간격 조정 (읽기 화면)",
+          action: "view-style",
+        },
       ];
     for (const { id, name, action } of cmds) {
       this.addCommand({
@@ -1313,6 +1368,137 @@ export default class StellaEnginePlugin extends Plugin {
         },
       });
     }
+  }
+
+  /** 세션 파일 + 로드된 세션으로 공용 SessionListItem 을 구성한다 (내보내기/복제용). */
+  private async buildSessionListItem(
+    sessionFile: string
+  ): Promise<SessionListItem | null> {
+    const session = await this.store.getSession(sessionFile);
+    if (!session) return null;
+    const folder = sessionFile.replace(/\/session\.json$/, "");
+    return {
+      folder,
+      folderName: folder.split("/").pop() ?? folder,
+      sessionFile,
+      session,
+    };
+  }
+
+  /**
+   * 세션 파일 단위 커맨드 — 활성(또는 마지막) 세션에 대해 동작. 세션창 클래스에
+   * 매이지 않아 소설/챗 세션 모두에서 쓸 수 있다. 챗/그룹 전용 항목은 실행 시점에
+   * 세션 종류를 확인해 해당하지 않으면 안내만 한다.
+   */
+  private registerSessionFileCommands(): void {
+    // 세션이 하나라도 있어야 실행 가능 — checkCallback 은 파일 존재만 동기 확인한다.
+    const withSession = (
+      id: string,
+      name: string,
+      run: (sessionFile: string) => void
+    ): void => {
+      this.addCommand({
+        id,
+        name,
+        checkCallback: (checking: boolean) => {
+          const sessionFile = this.getActiveOrLastSessionFile();
+          if (!sessionFile) return false;
+          if (!checking) run(sessionFile);
+          return true;
+        },
+      });
+    };
+
+    // 작가노트 빠른 입력 — 진행 중 다음 전개 지시를 작은 창으로 바로 적는다.
+    withSession(
+      "session-author-note",
+      "세션: 작가노트 빠른 입력 (다음 전개 지시)",
+      (f) => openAuthorNoteQuickInput(this, f)
+    );
+
+    // 다음화 만들기 — 지금 세션을 물려받은 새 화를 만든다.
+    withSession("session-next-episode", "세션: 다음화 만들기", (f) =>
+      new NextEpisodeModal(this.app, this, f).open()
+    );
+
+    // 제목 AI 생성.
+    withSession("session-generate-title", "세션: 제목 AI 생성", (f) =>
+      void (async () => {
+        new Notice("제목 생성 중…");
+        const r = await generateSessionTitleNow(this, f);
+        new Notice(r.ok ? `제목 생성: ${r.title}` : `제목 생성 실패: ${r.error}`);
+      })()
+    );
+
+    // 즐겨찾기 켜기/끄기.
+    withSession("session-toggle-favorite", "세션: 즐겨찾기 켜기/끄기", (f) =>
+      void this.store.toggleSessionFavorite(f).catch((err) => {
+        new Notice(
+          `즐겨찾기 저장 실패: ${err instanceof Error ? err.message : String(err)}`
+        );
+      })
+    );
+
+    // 읽기용 문서로 내보내기.
+    withSession(
+      "session-export-reading",
+      "세션: 읽기용 문서로 내보내기",
+      (f) =>
+        void (async () => {
+          const item = await this.buildSessionListItem(f);
+          if (item) exportSessionReading(this, item);
+        })()
+    );
+
+    // 세션 복제.
+    withSession("session-copy", "세션: 세션 복제", (f) =>
+      void (async () => {
+        const item = await this.buildSessionListItem(f);
+        if (item)
+          await copySession(this, item, (nf) => openSessionByPath(this, nf));
+      })()
+    );
+
+    // 선채팅 켜기/끄기 (챗 세션 전용 — 실행 시 확인).
+    withSession("session-toggle-proactive", "세션: 선채팅 켜기/끄기 (챗)", (f) =>
+      void (async () => {
+        const item = await this.buildSessionListItem(f);
+        if (!item) return;
+        if (item.session.meta.mode !== "chat") {
+          new Notice("선채팅은 챗 세션에서만 켤 수 있습니다.");
+          return;
+        }
+        await toggleProactiveSetting(this, item, "enabled");
+      })()
+    );
+
+    // 실시간 채팅 켜기/끄기 (챗 세션 전용).
+    withSession(
+      "session-toggle-realtime",
+      "세션: 실시간 채팅 켜기/끄기 (챗)",
+      (f) =>
+        void (async () => {
+          const item = await this.buildSessionListItem(f);
+          if (!item) return;
+          if (item.session.meta.mode !== "chat") {
+            new Notice("실시간 채팅은 챗 세션에서만 켤 수 있습니다.");
+            return;
+          }
+          await toggleProactiveSetting(this, item, "realtime");
+        })()
+    );
+
+    // 그룹 채팅 관리 (그룹 세션 전용).
+    withSession("session-group-manager", "세션: 그룹 채팅 관리", (f) =>
+      void (async () => {
+        const session = await this.store.getSession(f);
+        if (!session?.meta.groupId) {
+          new Notice("그룹 세션이 아닙니다.");
+          return;
+        }
+        await openGroupMemberManager(this, f);
+      })()
+    );
   }
 
   /**

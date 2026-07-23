@@ -229,6 +229,9 @@ export class PromptSetEditorSection {
       const info = panel.createDiv({ cls: "ggai-prompt-edit-info" });
       info.createSpan({ text: "marker 항목 — identifier: " });
       info.createEl("code", { text: item.identifier });
+      if (item.identifier === "chatHistory") {
+        this.appendHistoryRoleField(panel, item, idx);
+      }
       this.appendMarkerWrapField(panel, item, idx);
       return;
     }
@@ -273,6 +276,34 @@ export class PromptSetEditorSection {
         e.preventDefault();
         input.blur();
       }
+    });
+  }
+
+  private appendHistoryRoleField(
+    panel: HTMLElement,
+    item: StellaPromptMarkerItem,
+    idx: number
+  ): void {
+    const row = panel.createDiv({ cls: "ggai-prompt-edit-row" });
+    row.createSpan({
+      cls: "ggai-prompt-edit-label",
+      text: "소설 본문 롤",
+    });
+    const sel = row.createEl("select", { cls: "ggai-prompt-edit-select" });
+    const current = item.historyRole ?? "assistant";
+    for (const [value, label] of [
+      ["assistant", "assistant (기본)"],
+      ["user", "user"],
+    ] as const) {
+      const opt = sel.createEl("option", { value, text: label });
+      if (current === value) opt.selected = true;
+    }
+    sel.addEventListener("change", () =>
+      void this.handleHistoryRoleEdit(idx, sel.value as "user" | "assistant")
+    );
+    panel.createDiv({
+      cls: "ggai-prompt-wrap-hint",
+      text: "소설모드에서만 적용 — 지금까지의 본문을 어느 역할로 보낼지. 챗 모드는 각 메시지가 제 역할대로 나가므로 영향 없습니다.",
     });
   }
 
@@ -390,6 +421,21 @@ export class PromptSetEditorSection {
     this.preset.prompts[idx] = next;
     await this.save();
     if (rerender) this.renderBody();
+  }
+
+  private async handleHistoryRoleEdit(
+    idx: number,
+    role: "user" | "assistant"
+  ): Promise<void> {
+    if (!this.preset) return;
+    const item = this.preset.prompts[idx];
+    if (item.kind !== "marker" || (item.historyRole ?? "assistant") === role) return;
+    const next = { ...item };
+    // 기본값(assistant)은 필드를 아예 두지 않아 파일을 깨끗하게 유지.
+    if (role === "assistant") delete next.historyRole;
+    else next.historyRole = role;
+    this.preset.prompts[idx] = next;
+    await this.save();
   }
 
   private async handleRoleEdit(idx: number, role: PromptRole): Promise<void> {

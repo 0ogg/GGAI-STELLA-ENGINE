@@ -1586,6 +1586,10 @@ input.ggai-vs-slider[type="range"] {
   outline: none;
   caret-color: var(--text-normal);
   min-height: 100%;
+  /* 옵시디언 앱 기본 user-select:none 을 상속하면 클릭으로 caret 을 놓을 수 없다
+     (JS 로 넣는 건 되지만 마우스 클릭이 막힘). 편집 영역이므로 명시적으로 되살린다. */
+  user-select: text;
+  -webkit-user-select: text;
 }
 .ggai-tr-edit:focus {
   outline: none;

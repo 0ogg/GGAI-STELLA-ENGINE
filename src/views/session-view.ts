@@ -176,7 +176,15 @@ export type SessionViewCommand =
   | "batch-translate"
   | "illustrate"
   | "gallery"
-  | "lobby";
+  | "lobby"
+  | "undo"
+  | "redo"
+  | "jump-end"
+  | "para-regen"
+  | "auto-translate"
+  | "auto-illustrate"
+  | "undo-translate"
+  | "view-style";
 
 export class SessionView extends ItemView {
   private sessionFile: string | null = null;
@@ -524,6 +532,30 @@ export class SessionView extends ItemView {
       case "lobby":
         await this.goToLobby();
         break;
+      case "undo":
+        await this.handleUndo();
+        break;
+      case "redo":
+        await this.handleRedo();
+        break;
+      case "jump-end":
+        await this.handleJumpEnd();
+        break;
+      case "para-regen":
+        await this.toggleParaSelectMode();
+        break;
+      case "auto-translate":
+        await this.handleAutoTranslateToggle();
+        break;
+      case "auto-illustrate":
+        await this.handleAutoIllustrateToggle();
+        break;
+      case "undo-translate":
+        await this.handleUndoTranslate();
+        break;
+      case "view-style":
+        this.handleViewStyle();
+        break;
     }
   }
 
@@ -540,11 +572,14 @@ export class SessionView extends ItemView {
       }
       case "toggle-translation":
       case "batch-translate":
+      case "auto-translate":
+      case "undo-translate":
         return (
           this.plugin.isExtensionEnabled("stella:translation") &&
           this.session.meta.translation?.enabled === true
         );
       case "illustrate":
+      case "auto-illustrate":
         return this.plugin.isExtensionEnabled("stella:illustration");
       case "gallery":
         return (

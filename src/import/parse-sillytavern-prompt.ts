@@ -38,6 +38,7 @@ interface RawSTPrompt {
   marker?: boolean;
   enabled?: boolean;
   stella_wrap?: string;
+  stella_history_role?: string;
   injection_position?: number;
   injection_depth?: number;
   injection_order?: number;
@@ -138,6 +139,9 @@ function toItem(
       name: str(src?.name) || defaultMarkerName(id),
       enabled,
       ...(typeof src?.stella_wrap === "string" ? { wrap: src.stella_wrap } : {}),
+      ...(src?.stella_history_role === "user" || src?.stella_history_role === "assistant"
+        ? { historyRole: src.stella_history_role }
+        : {}),
     };
   }
 

@@ -80,6 +80,13 @@ export interface StellaPromptMarkerItem {
    * 앞뒤 줄바꿈은 자동으로 넣지 않는다.
    */
   wrap?: string;
+  /**
+   * chatHistory 마커 전용 — **소설모드에서만** 본문 전체를 어느 롤로 보낼지.
+   * undefined | "assistant" = 지금까지 동작(본문을 어시스턴트 발화로 합쳐 전송).
+   * "user" = 본문을 유저 발화로 전송(모델이 자기 이전 문장을 흉내내 반복하는 걸
+   * 줄이려는 용도). 챗 모드는 각 메시지가 제 롤대로 나가므로 이 값과 무관.
+   */
+  historyRole?: "user" | "assistant";
 }
 
 export type StellaPromptItem = StellaPromptTextItem | StellaPromptMarkerItem;

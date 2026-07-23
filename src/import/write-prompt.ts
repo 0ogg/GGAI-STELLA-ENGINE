@@ -134,6 +134,8 @@ function serializeItem(item: StellaPromptItem): any {
     };
     // Stella 전용 본문 가공 템플릿 — ST 는 무시, 라운드트립 보존.
     if (item.wrap !== undefined) obj.stella_wrap = item.wrap;
+    // Stella 전용 소설모드 히스토리 롤 — ST 는 무시, 라운드트립 보존.
+    if (item.historyRole !== undefined) obj.stella_history_role = item.historyRole;
     return obj;
   }
   const text = item as StellaPromptTextItem;

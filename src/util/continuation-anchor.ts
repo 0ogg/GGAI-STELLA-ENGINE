@@ -32,6 +32,11 @@ const SELF_DELIM_TERMINATORS = /[。．！？।॥؟۔]/;
 const CLOSERS = /["'’”」』）】〕》〉］)\]»›]/;
 /** 문장 앞에 올 수 있는 여는 따옴표/괄호류(전각·CJK 포함). */
 const OPENERS = /["'“‘「『（【〔《〈［(\[«‹]/;
+/**
+ * 장면 구분선 한 줄 — 공백 무시 별표 3개 이상(`***`, `* * *`).
+ * util/pro-convert 의 isSceneBreakParagraph 와 같은 정의(순수 모듈 유지를 위해 로컬 상수).
+ */
+const SCENE_BREAK = /^\*{3,}$/;
 
 /**
  * 앵커 반복 앞에 올 수 있는 "서식 문자" — 공백/따옴표/괄호/대시/마크다운 마커.
@@ -51,6 +56,12 @@ const ANCHOR_MIN_CHARS = 4;
 const HEAD_SEARCH_WINDOW = 160;
 /** 폴백(부분 반복) 매칭이 유효하려면 필요한 최소 실질 글자 수 (한글 기준). */
 const FALLBACK_MIN_CHARS = 5;
+/**
+ * 퍼지(정규화) 접두 매칭이 유효하려면 재현돼야 하는 최소 실질(내용) 글자 수.
+ * 앵커 실질 전체를 재현했을 때만 인정하므로(부분 꼬리 매칭보다 강한 증거) 꼬리
+ * 폴백(5자)보다 낮게 둔다 — 「行くぞ 같은 짧은 대사 앵커(실질 3자)도 잡기 위함.
+ */
+const FUZZY_MIN_HARD = 3;
 /** 앵커가 속한 문단이 "이미 길다"고 보는 실질 글자 수 — 넘으면 곧 문단을 닫으라는 지시를 덧붙인다. */
 const PARAGRAPH_LONG_MIN = 200;
 
@@ -141,6 +152,11 @@ export function trailingWhitespaceRange(
 export function anchorEndsParagraph(anchor: string): boolean {
   const t = anchor.replace(/\s+$/, "");
   if (!t) return false;
+  // 장면 구분선(***, * * *)으로 끝나면 문단이 확실히 끝나는 자리 — 문장부호로
+  // 끝나지 않아도 새 문단이 올 수 있으므로 이음새 줄바꿈을 걷어내지 않고 보존한다.
+  // (구분선을 미완성 조각으로 오해해 뒤 문단이 ***에 들러붙던 버그 수정.)
+  const lastLine = t.slice(t.lastIndexOf("\n") + 1);
+  if (SCENE_BREAK.test(lastLine.replace(/\s+/g, ""))) return true;
   const last = t[t.length - 1];
   if (!TERMINATORS.test(last) && !CLOSERS.test(last)) return false;
   return !hasUnclosedOpener(t);
@@ -176,16 +192,21 @@ export function anchorSkipStreaming(raw: string, anchor: string): number | null 
   const end = findAnchorEnd(raw, anchor);
   if (end !== null) return end;
   if (raw.length < anchor.length + HEAD_SEARCH_WINDOW + 40) return null;
+  const fuzzy = fuzzyPrefixSkip(raw, anchor);
+  if (fuzzy > 0) return fuzzy;
   return fallbackSkip(raw, anchor);
 }
 
 /**
  * 종료 시 판정 — 항상 잘라낼 길이를 돌려준다.
- * 앵커 전체 → 부분 반복(앵커 꼬리) 순으로 찾고, 반복이 없으면 0 (그대로 사용).
+ * 앵커 전체(엄격) → 앵커 전체(정규화 퍼지) → 부분 반복(앵커 꼬리) 순으로 찾고,
+ * 반복이 없으면 0 (그대로 사용).
  */
 export function anchorSkipFinal(raw: string, anchor: string): number {
   const end = findAnchorEnd(raw, anchor);
   if (end !== null) return end;
+  const fuzzy = fuzzyPrefixSkip(raw, anchor);
+  if (fuzzy > 0) return fuzzy;
   return fallbackSkip(raw, anchor);
 }
 
@@ -365,4 +386,83 @@ function fallbackSkip(raw: string, anchor: string): number {
     }
   }
   return 0;
+}
+
+/**
+ * "서식/경계" 문자 — 공백 + 따옴표/괄호/대시/마크다운 + 문장 종결 부호(…포함).
+ * 퍼지 매칭에서 이 문자들은 양쪽 모두 자유롭게 건너뛴다: 모델이 재현하며 구분선
+ * `***`·마침표·닫는 따옴표를 빼먹거나, 여는 따옴표(「")를 빠뜨려도 실질 내용만
+ * 맞으면 반복으로 인정하기 위함이다.
+ */
+function isSoft(ch: string): boolean {
+  return LEAD_SKIPPABLE.test(ch) || TERMINATORS.test(ch);
+}
+
+/**
+ * 실질(내용) 글자 정규화 — 전각 ASCII(！？３ 등)를 반각으로 통일해 비교한다.
+ * 따옴표·말줄임표·대시는 isSoft 로 이미 흡수되므로 여기서 다루지 않는다.
+ */
+function normHard(ch: string): string {
+  const code = ch.charCodeAt(0);
+  if (code >= 0xff01 && code <= 0xff5e) return String.fromCharCode(code - 0xfee0);
+  return ch;
+}
+
+/**
+ * 퍼지(정규화) 접두 매칭 — 모델이 앵커를 글자 그대로가 아니라 살짝 바꿔 재현한
+ * 경우의 중복 제거. `findAnchorEnd`(엄격)가 실패한 뒤에만 쓴다.
+ *
+ * 앵커의 **실질 글자**가 응답 앞머리에서 전부 재현되면(서식/문장부호 차이·구분선
+ * 누락·전각 차이는 흡수) 재현된 만큼 잘라낼 위치를 돌려준다. 실질 글자가 도중에
+ * 어긋나면(모델이 단어를 바꿔 씀 등) 잘라내지 않는다(정상 이어쓰기 오삭제 방지).
+ */
+function fuzzyPrefixSkip(raw: string, anchor: string): number {
+  const limit = Math.min(HEAD_SEARCH_WINDOW, raw.length);
+  for (let s = 0; s <= limit; s++) {
+    const end = matchAnchorFuzzy(raw, s, anchor);
+    if (end !== null) return end;
+    if (s < raw.length && !LEAD_SKIPPABLE.test(raw[s])) break;
+  }
+  return 0;
+}
+
+/**
+ * raw[start..] 가 anchor 의 실질 글자를 전부 재현하는지 정규화 비교.
+ * 서식/문장부호(isSoft)는 양쪽에서 자유롭게 건너뛰고, 내용 글자는 normHard 로
+ * 통일해 비교한다. 앵커 실질 글자를 끝까지 재현했으면(최소 FUZZY_MIN_HARD 자)
+ * 재현이 끝난 raw 인덱스를 돌려주고, 도중에 어긋나면 null.
+ */
+function matchAnchorFuzzy(
+  raw: string,
+  start: number,
+  anchor: string
+): number | null {
+  let i = start;
+  let j = 0;
+  let matchedHard = 0;
+  for (;;) {
+    const jBefore = j;
+    while (j < anchor.length && isSoft(anchor[j])) j++;
+    if (j >= anchor.length) {
+      // 앵커 실질 끝. 앵커가 소프트(마침표/구분선/닫는 따옴표)로 끝났으면 모델이
+      // 재현한 꼬리 문장부호도 걷어낸다 — 단 공백은 분리자로 남긴다(다음 문단/문장이
+      // 붙지 않게). 앵커가 실질 글자로 끝났으면(뒤 `」` 등은 이어쓰기일 수 있어)
+      // raw 꼬리를 건드리지 않는다.
+      if (j > jBefore) {
+        while (i < raw.length && isSoft(raw[i]) && !WS.test(raw[i])) i++;
+      }
+      break;
+    }
+    while (i < raw.length && isSoft(raw[i])) i++; // 다음 실질 글자에 정렬
+    if (i >= raw.length) return null; // raw 가 재현 도중에 끝남
+    if (normHard(raw[i]) === normHard(anchor[j])) {
+      i++;
+      j++;
+      matchedHard++;
+    } else {
+      return null; // 내용 글자가 어긋남 — 반복이 아니다
+    }
+  }
+  if (matchedHard < FUZZY_MIN_HARD) return null;
+  return i;
 }

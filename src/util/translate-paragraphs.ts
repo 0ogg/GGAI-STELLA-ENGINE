@@ -266,9 +266,10 @@ export function parseTranslationResponse(
   const start = candidate.indexOf("[");
   const end = candidate.lastIndexOf("]");
   if (start < 0 || end < start) return null;
+  const arrayText = candidate.slice(start, end + 1);
   try {
-    const parsed = JSON.parse(candidate.slice(start, end + 1));
-    if (!Array.isArray(parsed)) return null;
+    const parsed = JSON.parse(arrayText);
+    if (!Array.isArray(parsed)) return recoverTranslationItems(arrayText);
     const out: TranslationResultItem[] = [];
     for (const item of parsed) {
       if (
@@ -285,8 +286,59 @@ export function parseTranslationResponse(
     }
     return out;
   } catch {
-    return null;
+    // 약한 모델은 번역문 안의 대사 따옴표("…")를 이스케이프하지 않아 통짜 JSON.parse
+    // 가 깨진다(대사 많은 한국어에서 흔함). 스키마를 우리가 통제하므로 필드 단위로
+    // 구조 복구한다 — 정상 JSON 은 위 빠른 경로로, 깨진 응답만 여기로 온다.
+    return recoverTranslationItems(arrayText);
   }
+}
+
+/** JSON escape 한 겹 해제 — 모델이 올바로 넣은 이스케이프만 되돌리고 나머지는 그대로. */
+function unescapeJsonString(s: string): string {
+  return s.replace(/\\(["\\/bfnrt]|u[0-9a-fA-F]{4})/g, (_, esc: string) => {
+    switch (esc[0]) {
+      case '"':
+        return '"';
+      case "\\":
+        return "\\";
+      case "/":
+        return "/";
+      case "b":
+        return "\b";
+      case "f":
+        return "\f";
+      case "n":
+        return "\n";
+      case "r":
+        return "\r";
+      case "t":
+        return "\t";
+      case "u":
+        return String.fromCharCode(parseInt(esc.slice(1), 16));
+      default:
+        return esc;
+    }
+  });
+}
+
+/**
+ * 깨진(이스케이프 누락) 번역 배열에서 {id, translation} 짝을 구조 복구한다.
+ * id 는 우리가 만든 값(따옴표 없음)이라 안전하게 읽고, translation 본문은 다음
+ * 세그먼트 경계(`"},{` 또는 배열 끝 `"}]`)까지를 non-greedy 로 잡아 내부의
+ * 이스케이프 안 된 따옴표·줄바꿈을 그대로 살린다. 하나도 못 뽑으면 null.
+ */
+function recoverTranslationItems(arrayText: string): TranslationResultItem[] | null {
+  const re =
+    /"id"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"translation"\s*:\s*"([\s\S]*?)"\s*\}\s*(?=,\s*\{|\]\s*$|$)/g;
+  const out: TranslationResultItem[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(arrayText)) !== null) {
+    out.push({
+      id: unescapeJsonString(m[1]),
+      translation: unescapeJsonString(m[2]),
+    });
+  }
+  return out.length > 0 ? out : null;
 }
 
 // ─────────────────────────── variant 관리 ───────────────────────────

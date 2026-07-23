@@ -233,6 +233,8 @@ export function buildContext(
   const absoluteItems: StellaPromptTextItem[] = [];
   let chatHistoryIdx = -1;
   let chatHistoryWrap: string | undefined;
+  // 소설모드 본문 롤 — chatHistory 마커 설정(기본 assistant). 챗 모드는 무관.
+  let novelHistoryRole: "user" | "assistant" = "assistant";
   let memoryWrap: string | undefined;
   let authorNoteWrap: string | undefined;
 
@@ -257,6 +259,7 @@ export function buildContext(
         case "chatHistory": {
           chatHistoryIdx = fixedMessages.length;
           chatHistoryWrap = item.wrap;
+          if (item.historyRole === "user") novelHistoryRole = "user";
           fixedMessages.push({
             role: "system",
             content: CHAT_HISTORY_PLACEHOLDER,
@@ -462,6 +465,7 @@ export function buildContext(
   const chatHistory = buildChatHistoryMessages(
     macroSessionLog,
     input.mode ?? "novel",
+    novelHistoryRole,
     {
       memory:
         // Session memory is a fixed session field, not a prompt-list marker.
@@ -997,6 +1001,8 @@ function buildNoteBlock(inserts: {
 function buildChatHistoryMessages(
   log: { role: "user" | "assistant"; content: string }[],
   mode: "novel" | "textgame" | "chat",
+  // 소설모드 본문을 내보낼 롤 (chatHistory 마커 설정, 기본 assistant). 챗 모드 무관.
+  novelHistoryRole: "user" | "assistant",
   inserts: { memory?: string; authorNote?: string; summary?: string }
 ): ChatMessage[] {
   const noteBlock = buildNoteBlock(inserts);
@@ -1036,15 +1042,19 @@ function buildChatHistoryMessages(
       contextKind: "prompt",
     });
   }
-  messages.push(...storyToMessages(story, noteBlock));
+  messages.push(...storyToMessages(story, noteBlock, novelHistoryRole));
   return messages;
 }
 
-function storyToMessages(story: string, noteBlock: ChatMessage[]): ChatMessage[] {
+function storyToMessages(
+  story: string,
+  noteBlock: ChatMessage[],
+  role: "user" | "assistant"
+): ChatMessage[] {
   if (!story.trim()) return [];
   if (noteBlock.length === 0) {
     return [{
-      role: "assistant",
+      role,
       content: story,
       source: { type: "chat", label: "Session body" },
       contextKind: "history",
@@ -1067,7 +1077,7 @@ function storyToMessages(story: string, noteBlock: ChatMessage[]): ChatMessage[]
   const messages: ChatMessage[] = [];
   if (before.trim()) {
     messages.push({
-      role: "assistant",
+      role,
       content: before,
       source: { type: "chat", label: "Session body before author's note" },
       contextKind: "history",
@@ -1076,7 +1086,7 @@ function storyToMessages(story: string, noteBlock: ChatMessage[]): ChatMessage[]
   messages.push(...noteBlock);
   if (after.trim()) {
     messages.push({
-      role: "assistant",
+      role,
       content: after,
       source: { type: "chat", label: "Session body after author's note" },
       contextKind: "history",

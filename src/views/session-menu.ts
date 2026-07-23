@@ -142,7 +142,7 @@ export function buildSessionMenu(
 }
 
 /** 선채팅 세션 설정 토글 — store 경유 저장, 열린 세션창은 session-changed 로 동기화. */
-async function toggleProactiveSetting(
+export async function toggleProactiveSetting(
   plugin: StellaEnginePlugin,
   s: SessionListItem,
   key: "enabled" | "realtime"
