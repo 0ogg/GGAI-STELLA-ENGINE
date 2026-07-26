@@ -283,6 +283,13 @@ class PhoneController extends Component {
     // 상태 바 — 시계 + 로그인 페르소나 (어느 화면에서든 접근).
     const status = screen.createDiv({ cls: "ggai-phone-status" });
     this.statusClockEl = status.createSpan({ cls: "ggai-phone-status-clock" });
+    // 신호·와이파이·배터리 — 순수 장식(v2 §2.1). 진짜 폰처럼 보이게 하는 것이
+    // 목적이라 상태를 읽지 않는다(읽을 상태도 없다).
+    const indicators = status.createDiv({ cls: "ggai-phone-status-icons" });
+    const signal = indicators.createDiv({ cls: "ggai-phone-status-signal" });
+    for (let i = 0; i < 4; i++) signal.createSpan();
+    setIcon(indicators.createSpan({ cls: "ggai-phone-status-wifi" }), "wifi");
+    indicators.createDiv({ cls: "ggai-phone-status-battery" });
     this.statusPersonaEl = status.createEl("button", {
       cls: "ggai-phone-persona",
       attr: { "aria-label": "폰 로그인 페르소나 전환" },
@@ -321,7 +328,8 @@ class PhoneController extends Component {
       cls: "ggai-phone-nav-btn is-home",
       attr: { "aria-label": "홈" },
     });
-    setIcon(homeNav, "circle");
+    // 홈 = 제스처 바 알약 (아이콘 대신 — v2 §2.1).
+    homeNav.createSpan({ cls: "ggai-phone-home-pill" });
     homeNav.addEventListener("click", () => {
       if (this.screen === "home") this.closeHost();
       else this.goHome();

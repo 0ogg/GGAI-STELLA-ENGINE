@@ -7637,6 +7637,62 @@ textarea.ggai-regex-mono {
   height: 100%;
   padding: 0;
   overflow: hidden;
+
+  /* ── 폰 디자인 토큰 (v2 §2.1) — 라이트 기본, 아래에 다크 한 벌 ──
+     폰은 옵시디언 문서가 아니라 "화면 속의 다른 기기"다. 색·서체·분리선을
+     테마에서 떼어내 여기 한 곳에서 정한다. 개별 규칙은 이 토큰만 쓴다. */
+  --phone-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Pretendard,
+    "Apple SD Gothic Neo", "Malgun Gothic", Roboto, "Helvetica Neue", sans-serif;
+  --phone-bezel: #16171b;
+  --phone-screen-bg: #f2f2f7;
+  --phone-surface: #ffffff;
+  --phone-surface-alt: #e8e8ee;
+  --phone-hover: rgba(0, 0, 0, 0.05);
+  --phone-hover-strong: rgba(0, 0, 0, 0.09);
+  --phone-text: #14161a;
+  --phone-text-muted: #6e7178;
+  --phone-text-faint: #a3a6ad;
+  --phone-accent: #2f7bf6;
+  --phone-hairline: rgba(0, 0, 0, 0.12);
+  --phone-radius: 14px;
+  --phone-radius-lg: 20px;
+  --phone-shadow: 0 6px 18px rgba(0, 0, 0, 0.1);
+}
+/* 다크 — OLED 검정 화면. 옵시디언 테마 모드를 따라간다. */
+.theme-dark .ggai-phone-root {
+  --phone-bezel: #0b0b0d;
+  --phone-screen-bg: #000000;
+  --phone-surface: #15161a;
+  --phone-surface-alt: #24262c;
+  --phone-hover: rgba(255, 255, 255, 0.07);
+  --phone-hover-strong: rgba(255, 255, 255, 0.12);
+  --phone-text: #f1f2f5;
+  --phone-text-muted: #9a9da6;
+  --phone-text-faint: #6b6e76;
+  --phone-accent: #4c8dff;
+  --phone-hairline: rgba(255, 255, 255, 0.13);
+  --phone-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+}
+
+/* 폰 화면 안에서는 테마 변수 자체를 폰 토큰으로 바꿔 끼운다 — 기존 규칙
+   (수백 개)을 한 줄씩 고치지 않고도 팔레트가 통째로 폰 것이 된다. 폰 밖
+   (옵시디언 메뉴·모달)은 이 서브트리 밖이라 영향 없음. */
+.ggai-phone-root .ggai-phone-screen {
+  --background-primary: var(--phone-surface);
+  --background-primary-alt: var(--phone-surface-alt);
+  --background-secondary: var(--phone-surface-alt);
+  --background-secondary-alt: var(--phone-surface-alt);
+  --background-modifier-border: var(--phone-hairline);
+  --background-modifier-hover: var(--phone-hover);
+  --background-modifier-active-hover: var(--phone-hover-strong);
+  --text-normal: var(--phone-text);
+  --text-muted: var(--phone-text-muted);
+  --text-faint: var(--phone-text-faint);
+  --text-accent: var(--phone-accent);
+  --interactive-accent: var(--phone-accent);
+  --text-on-accent: #ffffff;
+  /* 서체 고정 — 테마 서체(세리프·픽셀 폰트 등)에 오염되지 않게. */
+  font-family: var(--phone-font);
 }
 
 /* 테마 격리 — 폰 내부의 버튼/입력창은 어떤 테마를 써도 폰답게 보이도록,
@@ -7752,10 +7808,13 @@ body.is-mobile .ggai-phone-root.is-kb .ggai-phone-composer {
 .ggai-phone-frame {
   width: min(400px, 100%);
   height: min(780px, 100%);
-  border: 10px solid var(--background-modifier-border);
-  border-radius: 36px;
-  background: var(--background-primary);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  /* 베젤 = 기기 몸체. 테마 경계선이 아니라 항상 어두운 금속/유리색. */
+  border: 10px solid var(--phone-bezel);
+  border-radius: 40px;
+  background: var(--phone-bezel);
+  box-shadow:
+    0 18px 50px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(255, 255, 255, 0.06) inset;
   overflow: hidden;
   display: flex;
 }
@@ -7771,9 +7830,13 @@ body.is-mobile .ggai-phone-root.is-kb .ggai-phone-composer {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  background: var(--background-primary);
+  /* 화면 바탕은 카드(surface)보다 한 단 낮은 색 — 카드가 떠 보이게. */
+  background: var(--phone-screen-bg);
+  color: var(--phone-text);
+  border-radius: 30px;
 }
 .ggai-phone-screen.is-bare {
+  border-radius: 0;
   height: 100%;
   /* 넓은 뷰(태블릿/모바일 에뮬레이트/가로 화면)에서 폰 콘텐츠가 끝까지 늘어나
      갤러리·문자 목록의 가로 크기가 깨지지 않도록 폰 폭으로 고정하고 가운데 정렬. */
@@ -7790,8 +7853,9 @@ body.is-mobile .ggai-phone-root.is-kb .ggai-phone-composer {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--background-modifier-border);
+  padding: 10px 14px;
+  background: var(--phone-surface);
+  border-bottom: 1px solid var(--phone-hairline);
   flex: 0 0 auto;
 }
 .ggai-phone-title {
@@ -8567,7 +8631,8 @@ body.is-mobile .ggai-phone-root.is-kb .ggai-phone-composer {
   align-items: stretch;
   gap: 0;
   padding: 8px 10px;
-  border-top: 1px solid var(--background-modifier-border);
+  background: var(--phone-surface);
+  border-top: 1px solid var(--phone-hairline);
   flex: 0 0 auto;
 }
 body.is-mobile .ggai-phone-composer {
@@ -8648,13 +8713,76 @@ body.is-mobile .ggai-phone-composer {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 14px 4px;
+  gap: 8px;
+  padding: 8px 16px 4px;
   flex: 0 0 auto;
+  color: var(--phone-text);
 }
 .ggai-phone-status-clock {
-  font-size: 0.8em;
+  font-size: 0.78em;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+/* 신호·와이파이·배터리 — 장식(실제 상태 아님). 시계와 페르소나 칩 사이 가운데. */
+.ggai-phone-status-icons {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  opacity: 0.75;
+}
+.ggai-phone-status-signal {
+  display: flex;
+  align-items: flex-end;
+  gap: 1.5px;
+  height: 9px;
+}
+.ggai-phone-status-signal span {
+  width: 2.5px;
+  background: currentColor;
+  border-radius: 1px;
+}
+.ggai-phone-status-signal span:nth-child(1) { height: 30%; }
+.ggai-phone-status-signal span:nth-child(2) { height: 55%; }
+.ggai-phone-status-signal span:nth-child(3) { height: 78%; }
+.ggai-phone-status-signal span:nth-child(4) { height: 100%; }
+.ggai-phone-status-wifi {
+  display: flex;
+  align-items: center;
+}
+.ggai-phone-status-wifi svg {
+  width: 12px;
+  height: 12px;
+}
+.ggai-phone-status-battery {
+  position: relative;
+  width: 20px;
+  height: 10px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  padding: 1.5px;
+}
+/* 잔량 막대 + 오른쪽 단자. */
+.ggai-phone-status-battery::before {
+  content: "";
+  display: block;
+  width: 70%;
+  height: 100%;
+  background: currentColor;
+  border-radius: 1px;
+}
+.ggai-phone-status-battery::after {
+  content: "";
+  position: absolute;
+  right: -3px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 1.5px;
+  height: 4px;
+  background: currentColor;
+  border-radius: 0 1px 1px 0;
 }
 .ggai-phone-header.is-hidden {
   display: none;
@@ -8665,7 +8793,12 @@ body.is-mobile .ggai-phone-composer {
     radial-gradient(120% 90% at 20% 0%, rgba(120, 90, 255, 0.32), transparent 60%),
     radial-gradient(120% 90% at 90% 100%, rgba(64, 156, 255, 0.28), transparent 60%),
     radial-gradient(80% 60% at 60% 45%, rgba(255, 140, 200, 0.12), transparent 70%),
-    linear-gradient(180deg, var(--background-primary), var(--background-secondary));
+    linear-gradient(180deg, var(--phone-screen-bg), var(--phone-surface-alt));
+}
+/* 홈에서는 상태바·홈 바가 월페이퍼 위에 떠 있다 (판때기 배경 없이). */
+.ggai-phone-screen.is-home .ggai-phone-homebar {
+  background: none;
+  border-top: none;
 }
 .ggai-phone-body.is-home {
   display: flex;
@@ -8749,7 +8882,28 @@ body.is-mobile .ggai-phone-composer {
   justify-content: space-around;
   align-items: center;
   padding: 6px 12px 8px;
-  border-top: 1px solid var(--background-modifier-border);
+  background: var(--phone-surface);
+  border-top: 1px solid var(--phone-hairline);
+}
+/* 홈 = 제스처 바 알약 (아이콘 대신). 눌리면 살짝 밝아진다. */
+.ggai-phone-home-pill {
+  display: block;
+  width: 92px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--phone-text);
+  opacity: 0.45;
+  transition: opacity 0.12s ease;
+}
+.ggai-phone-screen .ggai-phone-nav-btn.is-home {
+  width: auto;
+  min-width: 110px;
+}
+.ggai-phone-screen .ggai-phone-nav-btn.is-home:hover {
+  background: none;
+}
+.ggai-phone-screen .ggai-phone-nav-btn.is-home:hover .ggai-phone-home-pill {
+  opacity: 0.8;
 }
 /* 홈 바 여백 — env(safe-area-inset-bottom) 을 0 으로 두는 안드로이드 옵시디언 기기가
    있어(회귀 금지) --ggai-home-inset(키보드 없는 순간에 측정한 순수 홈바 높이)와 큰 값을
@@ -8773,8 +8927,8 @@ body.is-mobile .ggai-phone-homebar {
   cursor: pointer;
 }
 .ggai-phone-screen .ggai-phone-nav-btn:hover {
-  background: var(--background-secondary);
-  color: var(--text-normal);
+  background: var(--phone-hover);
+  color: var(--phone-text);
 }
 .ggai-phone-screen .ggai-phone-nav-btn:active {
   transform: scale(0.92);
