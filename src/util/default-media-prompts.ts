@@ -19,6 +19,7 @@ export type MediaPromptBucket =
   | "phoneTube"
   | "phoneStreamDetect"
   | "phoneCast"
+  | "phoneVision"
   | "authorNote"
   | "proConvert"
   | "translationGlossary";
@@ -393,6 +394,23 @@ Below is the reference material for one world of the story: its description and 
 {{main}}
 
 Cast:`,
+    },
+  ],
+
+  // 사진 읽기 (v2 §5 출처 D) — 첨부한 이미지를 비전 모델이 1회 묘사한다. 결과는
+  // 그 사진의 캡션으로 저장돼, 이미지를 못 보는 모델에게는 이게 곧 사진이다.
+  phoneVision: [
+    {
+      id: "builtin:phoneVision:1",
+      title: "Default",
+      prompt: `You are looking at a photo someone is about to send in a text message or post on social media. Describe what is actually in it, for a reader who cannot see it.
+
+- Lead with the subject: who or what is in frame, how many, what they are doing, and how they are framed (selfie, close-up, wide shot, from behind).
+- Then the concrete details that carry meaning: expressions, posture, clothing, objects being held, text or signs visible in the image, the place, time of day, weather, light.
+- Note the mood the photo gives off and how it was taken (casual phone snap, careful shot, blurry, screenshot) — that tells the reader why someone would send it.
+- Write plain flowing prose, 2-4 sentences, no bullet points, no headings, no lead-in like "This image shows".
+- Describe ONLY what is visible. Do not guess names, relationships, or backstory, and do not judge whether it is real or generated.
+- If the image is text-heavy (a screenshot, a document, a chat log), transcribe the meaningful text instead of describing the layout.`,
     },
   ],
 

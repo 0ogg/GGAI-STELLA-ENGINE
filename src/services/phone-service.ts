@@ -2071,6 +2071,53 @@ export class PhoneService {
     await store.saveSnsFeed(feed);
   }
 
+  /**
+   * 첨부 사진을 비전 모델로 1회 읽어 캡션을 만든다 (v2 §5 출처 D).
+   * 캡션은 이미지를 못 보는 모델에게 그 사진의 전부이므로, 첨부 시점에 한 번만
+   * 돌리고 결과를 갤러리 캡션으로 저장한다(생성마다 반복하지 않는다).
+   *
+   * 게이트: 비전 프로필 미지정이면 항상 null. AI 생성 이미지(PNG 메타에서 생성
+   * 프롬프트를 이미 읽어낸 경우)는 `visionForAiImages` 를 켰을 때만 대체한다 —
+   * 원본 프롬프트가 대개 더 정확하고, 호출도 아낀다.
+   * 실패는 null (호출자가 메타/파일명 폴백).
+   */
+  async describeImage(
+    bytes: ArrayBuffer,
+    mediaType: string,
+    opts?: { hasMeta?: boolean }
+  ): Promise<string | null> {
+    const plugin = this.plugin;
+    const phone = plugin.data.phone;
+    const profileId = phone?.visionProfileId;
+    if (!profileId || !plugin.ai.isAvailable()) return null;
+    if (opts?.hasMeta) {
+      if (phone?.visionForAiImages !== true) return null;
+    } else if (phone?.visionForPhotos === false) return null;
+    const promptItem = resolveMediaPrompt(
+      "phoneVision",
+      phone?.visionPromptId,
+      plugin.data.mediaPrompts
+    );
+    if (!promptItem) return null;
+    try {
+      const res = await plugin.ai.chatWithImages({
+        profileId,
+        prompt: promptItem.prompt,
+        images: [
+          {
+            mediaType: mediaType || "image/png",
+            data: arrayBufferToBase64(bytes),
+          },
+        ],
+        label: "스텔라 폰 사진 읽기",
+      });
+      return res.text.trim() || null;
+    } catch (err) {
+      console.warn("[GGAI Stella] 사진 읽기 실패:", err);
+      return null;
+    }
+  }
+
   /** 첨부용 이미지 저장 (갤러리 등록 없이 에셋만) — 게시 시점에 갤러리에 등록된다. */
   async saveIncomingImage(bytes: ArrayBuffer, filename: string): Promise<string> {
     const ext = (filename.split(".").pop() || "png").toLowerCase();
@@ -4978,6 +5025,17 @@ function base64ToArrayBuffer(data: string): ArrayBuffer {
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes.buffer;
+}
+
+/** 비전 호출용 — 첨부 이미지 바이트를 base64 로 (큰 파일도 스택 안 터지게 청크). */
+function arrayBufferToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
 }
 
 /** 여러 줄 텍스트의 첫 줄 (피드 발췌용, 120자 캡). */

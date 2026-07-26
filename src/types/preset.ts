@@ -39,6 +39,8 @@ export interface MediaPromptLibrary {
   phoneStreamDetect?: MediaPromptItem[];
   /** 스텔라 폰 — 로어북에서 SNS 계정을 가질 인물 선별 (v3 계정 등급). */
   phoneCast?: MediaPromptItem[];
+  /** 스텔라 폰 — 첨부 사진을 비전 모델로 읽어 캡션 만들기 (v2 §5 출처 D). */
+  phoneVision?: MediaPromptItem[];
   /** 작가노트 전용 프레이밍 프롬프트 — 작가노트를 {{MAIN}} 자리에 감싼다. */
   authorNote?: MediaPromptItem[];
   /** 집필 프로 — 한국어 입력을 영어판 문체를 이어받은 영어 문단으로 변환. */

@@ -55,12 +55,18 @@ export class PhoneImagePickerModal extends Modal {
         // ComfyUI)면 PNG 메타의 생성 프롬프트를 캡션으로 재활용한다. 아니면
         // 파일명 폴백 (비전 모델 연동 전까지의 D 폴백).
         const meta = parseGeneratedImageMeta(new Uint8Array(bytes));
+        this.close();
+        // 출처 D — 메타가 없는 진짜 사진은 비전 모델이 읽어 캡션을 만든다
+        // (비전 모델 미지정/실패면 메타·파일명 폴백). 첨부 시점 1회.
+        const seen = await this.plugin.phone.describeImage(bytes, file.type, {
+          hasMeta: !!meta,
+        });
         this.onPick({
           path,
           isNewUpload: true,
-          caption: meta?.description ?? file.name.replace(/\.[^.]+$/, ""),
+          caption:
+            seen ?? meta?.description ?? file.name.replace(/\.[^.]+$/, ""),
         });
-        this.close();
       } catch (err) {
         new Notice(
           `업로드 실패: ${err instanceof Error ? err.message : String(err)}`

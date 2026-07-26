@@ -278,6 +278,47 @@ export class AIService extends Events {
   }
 
   /**
+   * 이미지를 함께 보내는 단발 chat (멀티모달) — Core 의 `content` 배열 형식으로
+   * 넘긴다. **vision 지원 모델의 chat 프로필**에서만 동작한다(아닌 프로필이면
+   * Core/프로바이더가 에러를 던지므로 호출자가 폴백을 준비할 것).
+   * 텍스트 전용 경로(`ChatMessage.content: string`)는 그대로 둔다.
+   */
+  async chatWithImages(req: {
+    profileId?: string;
+    prompt: string;
+    images: Array<{ mediaType: string; data: string }>;
+    paramsOverride?: Record<string, unknown>;
+    signal?: AbortSignal;
+    /** "생성 중" 토스트에 표시할 기능 이름. @see ChatRequest.label */
+    label?: string;
+  }): Promise<ChatResponse> {
+    const api = this.requireApi();
+    const r = await api.chat({
+      profileId: req.profileId,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: req.prompt },
+            ...req.images.map((img) => ({
+              type: "image" as const,
+              source: {
+                kind: "base64" as const,
+                mediaType: img.mediaType,
+                data: img.data,
+              },
+            })),
+          ],
+        },
+      ],
+      paramsOverride: req.paramsOverride,
+      signal: req.signal,
+      label: req.label,
+    } as any);
+    return normalizeChatResponse(r);
+  }
+
+  /**
    * 단발 텍스트 생성 — chat / text 프로필 둘 다 수용 (Core 가 자동 분기).
    * 스트리밍 X. text 프로필(NovelAI 등) 사용 시 호출.
    */

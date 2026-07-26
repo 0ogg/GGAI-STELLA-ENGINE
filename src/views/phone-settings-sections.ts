@@ -327,6 +327,41 @@ export function renderPhoneCommonSettings(ctx: PhoneSettingsCtx): void {
     onSelect: (imageProfileId) => void patch({ imageProfileId }),
     emptyText: "Core 이미지 프로필이 없습니다 (SNS 사진은 캡션으로만 표시).",
   });
+  // 사진 읽기 (v2 §5 출처 D) — 첨부 사진의 캡션이 곧 다른 모델에게는 그 사진의
+  // 전부다. 모델을 고르지 않으면 이 기능 자체가 돌지 않는다.
+  renderMediaModelPicker({
+    plugin,
+    parent,
+    label: "사진 읽기 모델 (첨부 사진 보기 — 비전 지원 모델)",
+    profiles: plugin.ai.listGenerationProfiles().filter((p) => p.kind === "chat"),
+    activeId: phone.visionProfileId,
+    onSelect: (visionProfileId) => void patch({ visionProfileId }),
+    emptyText: "Core 챗 모델이 없습니다.",
+  });
+  if (phone.visionProfileId) {
+    renderEnableToggle({
+      parent,
+      label: "찍은 사진·업로드 사진 읽기",
+      checked: phone.visionForPhotos !== false,
+      onChange: (visionForPhotos) => void patch({ visionForPhotos }),
+    });
+    renderEnableToggle({
+      parent,
+      label: "AI 그림도 다시 읽기 (끄면 그림에 담긴 생성 프롬프트를 사용)",
+      checked: phone.visionForAiImages === true,
+      onChange: (visionForAiImages) => void patch({ visionForAiImages }),
+    });
+    renderMediaPromptPicker({
+      plugin,
+      parent,
+      label: "사진 읽기 프롬프트",
+      bucket: "phoneVision",
+      activeId: phone.visionPromptId,
+      onSelect: (visionPromptId) => void patch({ visionPromptId }),
+      onChanged: rerender,
+      onDeleted: () => void patch({ visionPromptId: undefined }),
+    });
+  }
   renderTextRow({
     parent,
     label: "생성 언어 (비우면 자동)",

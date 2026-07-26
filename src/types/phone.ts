@@ -647,6 +647,20 @@ export interface PhonePluginData {
   snsCastScan?: boolean;
   /** 로어북 인물 선별 프롬프트 (phoneCast 버킷) — 미지정 = 기본. */
   castPromptId?: string;
+  /**
+   * 사진 읽기(비전) 모델 — vision 지원 chat 프로필. 미지정이면 사진 읽기를
+   * 아예 하지 않는다(캡션은 생성 프롬프트/파일명 폴백, v2 §5 출처 D).
+   */
+  visionProfileId?: string;
+  /** 사진 읽기 프롬프트 (phoneVision 버킷) — 미지정 = 기본. */
+  visionPromptId?: string;
+  /** AI 가 만들지 않은 사진에 비전 모델 사용 (기본 켬 — 비전 모델 지정 시). */
+  visionForPhotos?: boolean;
+  /**
+   * AI 생성 이미지도 비전으로 다시 읽기 (기본 끔). 끄면 PNG 메타에서 읽어낸
+   * 생성 프롬프트를 그대로 캡션으로 쓴다 — 대개 더 정확하고 호출도 아낀다.
+   */
+  visionForAiImages?: boolean;
   /** 한 세계에서 등록할 로어북 인물 수 상한 (기본 12). */
   snsCastCap?: number;
   /** 인물 선별에 첨부할 그 세계 로어북 분량 (토큰, 기본 4000). */
