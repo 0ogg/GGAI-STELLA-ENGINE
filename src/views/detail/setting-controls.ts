@@ -162,6 +162,7 @@ export function renderNumberRow(opts: {
   value: number;
   fallback: number;
   min?: number;
+  max?: number;
   step?: number;
   integer?: boolean;
   onChange: (value: number) => void;
@@ -170,6 +171,7 @@ export function renderNumberRow(opts: {
   row.createSpan({ cls: "ggai-media-label", text: opts.label });
   const attr: Record<string, string> = {};
   if (opts.min != null) attr.min = String(opts.min);
+  if (opts.max != null) attr.max = String(opts.max);
   if (opts.step != null) attr.step = String(opts.step);
   const input = row.createEl("input", {
     cls: "ggai-media-number-input",
@@ -182,7 +184,7 @@ export function renderNumberRow(opts: {
     // "|| fallback" 는 0 을 falsy 로 오인해 사용자가 의도적으로 입력한 0 을 지워버린다
     // (예: 삽화 자동 생성 주기의 "0 = 매번"). NaN 일 때만 fallback 으로 되돌린다.
     const raw = Number.isNaN(parsed) ? opts.fallback : parsed;
-    let v = Math.max(opts.min ?? -Infinity, raw);
+    let v = Math.min(opts.max ?? Infinity, Math.max(opts.min ?? -Infinity, raw));
     if (opts.integer) v = Math.round(v);
     input.value = String(v);
     opts.onChange(v);
@@ -209,6 +211,36 @@ export function renderTextRow(opts: {
   });
   input.value = opts.value;
   input.addEventListener("change", () => opts.onChange(input.value.trim()));
+  return input;
+}
+
+/**
+ * 라벨 + 여러 줄 텍스트 입력 (change 시점 커밋 — renderTextRow 와 같은 규칙).
+ * 라벨/입력/안내가 세로로 쌓이므로 값이 길거나 안내가 긴 항목에 쓴다.
+ */
+export function renderTextAreaRow(opts: {
+  parent: HTMLElement;
+  label: string;
+  value: string;
+  placeholder?: string;
+  /** 입력창 높이 (줄 수). 기본 3. */
+  rows?: number;
+  /** 입력창 아래 안내 문구 (기본값 목록 등). */
+  hint?: string;
+  onChange: (value: string) => void;
+}): HTMLTextAreaElement {
+  const block = opts.parent.createDiv({ cls: "ggai-media-block" });
+  block.createSpan({ cls: "ggai-media-label", text: opts.label });
+  const input = block.createEl("textarea", {
+    cls: "ggai-media-textarea",
+    attr: {
+      rows: String(opts.rows ?? 3),
+      ...(opts.placeholder ? { placeholder: opts.placeholder } : {}),
+    },
+  });
+  input.value = opts.value;
+  input.addEventListener("change", () => opts.onChange(input.value.trim()));
+  if (opts.hint) block.createDiv({ cls: "ggai-media-hint", text: opts.hint });
   return input;
 }
 

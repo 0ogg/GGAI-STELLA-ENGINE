@@ -30,8 +30,28 @@ export function buildSnsIoInstructions(
     viewerPostIdShort?: string;
     /** AI 의 사진 게시 허용 (§5.2, 기본 켬) — 끄면 photo 필드를 뺀다. */
     allowPhoto?: boolean;
-    /** 스텔라튜브 자동 시작 판정 허용 (§7.2) — 열린 세션 + 방송 없음일 때만. */
-    tubeStart?: boolean;
+    /**
+     * 이번 배치에 세션 새 진행분이 있는가 (v3 사건/일상 축). false = 잡담 모드:
+     * 새 플롯 사건 발명 금지, 일상글과 기존 이슈 반응만.
+     */
+    hasNews?: boolean;
+    /** 새 글 중 사건과 무관한 "일상글" 목표 비율 % (기본 70, 잡담 모드는 100). */
+    dailyRatioPct?: number;
+    /**
+     * "여파 글" 상한 (기본 1, 0=끔). 사건을 못 본 사람이 공개적 파장에만
+     * 반응하는 글 — 진행분이 있을 때(hasNews)만 의미가 있다.
+     */
+    bystanderCap?: number;
+    /**
+     * 배치 활동 중 캐스트(등급 1·2 = 세계의 실제 인물) 비율 하한 % (§V3-4,
+     * 기본 70). 엔진이 초과 엑스트라 활동을 잘라내므로 지시와 짝이다.
+     */
+    namedRatioPct?: number;
+    /**
+     * 스텔라튜브 자동 시작 판정 허용 (§7.2) — 열린 세션 + 방송 없음일 때만.
+     * castNames = 그 장면 속 인물 명부(스트리머 후보). 엔진도 이 명부로 거른다.
+     */
+    tubeStart?: { castNames: string[] };
   }
 ): string {
   const minPosts = Math.max(0, opts?.minNewPosts ?? 2);
@@ -65,7 +85,12 @@ export function buildSnsIoInstructions(
       : "") +
     `- REUSE the known accounts list whenever someone fitting exists — the same ` +
     `netizens keep living on this feed. Refer to them by "account":"@handle". ` +
-    `Invent at most ${newCap} brand-new accounts per batch.\n` +
+    `Invent at most ${newCap} brand-new accounts per batch; activity by an ` +
+    `unlisted person beyond that is DISCARDED, so pick from the lists.\n` +
+    `- At least ${Math.min(100, Math.max(0, opts?.namedRatioPct ?? 70))}% of ` +
+    `all activity (posts and comments) must come from THE CAST — the named ` +
+    `people of these worlds. Extras are seasoning, not the main course; ` +
+    `activity over that share is discarded.\n` +
     (openIds.length > 0
       ? `- Comments may ONLY target these OPEN posts: ${openIds.join(" and ")}. ` +
         `Every other feed item is settled — its conversation is over; it exists ` +
@@ -89,6 +114,42 @@ export function buildSnsIoInstructions(
           : "")
       : `- The feed has no reigning top issue. Mark "boom":true on the ONE new ` +
         `post that is the biggest story of this batch.\n`) +
+    // ── 사건 축 / 일상 축 (v3) ── 세션이 안 굴러가는데 SNS 만 스토리를 밀고
+    // 나가던 문제의 핵심 규칙. 사건은 "새로 벌어진 일" 블록에서만 나온다.
+    (opts?.hasNews === false
+      ? `- NOTHING NEW has happened in the stories since the last batch. Do ` +
+        `NOT invent, advance, resolve, or escalate any plot event — the ` +
+        `stories move only when the player plays them. This batch is ` +
+        `ordinary life: what these people are doing off-screen right now ` +
+        `(meals, work, commutes, hobbies, boredom, selfies, complaints, ` +
+        `cross-world small talk) plus reactions to what is already in the ` +
+        `feed.\n`
+      : `- ONLY the block marked "JUST HAPPENED" is news. Background blocks ` +
+        `are there so nobody contradicts their own situation — never post ` +
+        `about them as if they were new. Do not invent plot events beyond ` +
+        `what JUST HAPPENED says; the stories move only when the player ` +
+        `plays them.\n` +
+        `- About ${Math.min(100, Math.max(0, opts?.dailyRatioPct ?? 70))}% of ` +
+        `the new posts must be ORDINARY LIFE unrelated to those events — ` +
+        `what these people are doing off-screen when the player is not ` +
+        `watching. That off-screen life is the point of this feed, not ` +
+        `event commentary.\n`) +
+    `- Nobody writes a report on someone else's business. A person posts ` +
+    `about an event only if they lived it; everyone else reacts to POSTS, ` +
+    `not to events they never witnessed.\n` +
+    // 여파 축 — 위 규칙을 그대로 두면 "사건의 파장을 맞은 동네 사람"이 통째로
+    // 사라진다(사용자 지적). 내막은 여전히 모르고, 자기 하루가 겪은 일만 쓴다.
+    (opts?.hasNews !== false && (opts?.bystanderCap ?? 1) > 0
+      ? `- FALLOUT — at most ${Math.floor(opts?.bystanderCap ?? 1)} post(s) ` +
+        `this batch: someone from that world who did NOT witness the event, ` +
+        `writing about how its PUBLIC fallout hit THEIR OWN day — sirens all ` +
+        `night, a street sealed off, the shop shut, power out, their commute ` +
+        `wrecked, a rumor half-heard at work, a friend of a friend who says ` +
+        `something happened. They do NOT know what actually happened, do NOT ` +
+        `name people or details they could not have seen, and do NOT comment ` +
+        `on those involved. It is a complaint or a scare about their own day, ` +
+        `never coverage of someone else's story.\n`
+      : "") +
     `- "world" is REQUIRED for any new account: the listed world that person ` +
     `belongs to. Viewers see it under the name.\n` +
     `- "issueScale" (posts, REQUIRED): how big this is as an issue, judged ` +
@@ -117,9 +178,13 @@ export function buildSnsIoInstructions(
     (allowPhoto ? `- At most one post includes "photo", only when natural.\n` : "") +
     (opts?.tubeStart
       ? `- OPTIONAL: if the newest scene in the events clearly shows someone ` +
-        `actively streaming/broadcasting live RIGHT NOW, include ONE ` +
-        `{"kind":"stream_start","streamer":"<who is streaming>"} item (does ` +
-        `not count toward the cap). Omit it otherwise — most batches have none.\n`
+        `actively streaming/broadcasting live RIGHT NOW — camera rolling, ` +
+        `audience watching, in this very moment — include ONE ` +
+        `{"kind":"stream_start","streamer":"<name>"} item (does not count ` +
+        `toward the cap). The streamer MUST be one of: ` +
+        `${opts.tubeStart.castNames.map((n) => `"${n}"`).join(", ")} — never ` +
+        `the viewer. Talking about, watching, planning, or remembering a ` +
+        `broadcast is NOT one. Omit it otherwise — most batches have none.\n`
       : "") +
     `- Each text short (1-3 sentences), in that person's own voice.`
   );
@@ -166,6 +231,92 @@ export function buildTubeIoInstructions(opts: {
 /** 편집 모달 표시용 — 실제 숫자는 방송 상태값이 들어간다. */
 export const PHONE_TUBE_IO_INSTRUCTIONS = `${PHONE_TUBE_HEADER}\n\n${buildTubeIoInstructions(
   { prevViewers: 1200, newAccountCap: 3 }
+)}`;
+
+/** 방송 시작 판정 헤더 — 출력 형식 최우선 선언 (스토리 출력 규칙 무력화). */
+export const PHONE_STREAM_DETECT_HEADER =
+  "[STELLATUBE — BROADCAST DETECTION. This task COMPLETELY OVERRIDES any " +
+  "story/roleplay/status-block output rules. Output raw JSON only — no " +
+  "narration, no markup, no code fences.]";
+
+/**
+ * 방송 시작 판정 프로토콜 — 키워드가 걸린 장면을 모델이 실제로 읽고 "지금 이
+ * 장면에서 방송이 진행 중인가 / 누가 켰는가"를 판정한다. 파서
+ * (`parseStreamDetect`)와 짝이므로 편집 대상이 아니다. 스트리머 후보 명부를
+ * 함께 주고 그 안에서만 고르게 한다 — 장면 밖 인물이 스트리머가 되는 것 방지.
+ */
+export function buildStreamDetectIoInstructions(opts: {
+  castNames: string[];
+  viewerName: string;
+}): string {
+  const cast =
+    opts.castNames.length > 0
+      ? opts.castNames.map((n) => `"${n}"`).join(", ")
+      : "(none listed — then answer live:false)";
+  return (
+    `## OUTPUT — raw JSON object only:\n` +
+    `{"live": false, "streamer": null, "reason": "one short clause"}\n` +
+    `Rules:\n` +
+    `- "live": true ONLY IF the scene shows someone actually broadcasting/` +
+    `streaming to an audience RIGHT NOW, in this moment of the scene.\n` +
+    `- Answer false for: talking ABOUT a broadcast, watching someone else's ` +
+    `stream, remembering or planning one, a past broadcast, a broadcast that ` +
+    `already ended, or the word appearing in an unrelated sense. When in ` +
+    `doubt, answer false — a wrong "true" hijacks the player's story.\n` +
+    `- "streamer": the exact name of the person running the broadcast, as ` +
+    `written in the scene. Known cast: ${cast}. Prefer these exact names; ` +
+    `if the broadcaster is a different person clearly present in the scene ` +
+    `(a side character from the lore), give their exact name as it appears ` +
+    `in the text.\n` +
+    `- The viewer "${opts.viewerName}" is the audience, NOT a candidate — ` +
+    `never name them as the streamer.\n` +
+    `- If no specific person in the scene is running the broadcast, answer ` +
+    `live:false.`
+  );
+}
+
+/** 편집 모달 표시용 — 실제 명부는 그 세션의 등장인물이 들어간다. */
+export const PHONE_STREAM_DETECT_IO_INSTRUCTIONS = `${PHONE_STREAM_DETECT_HEADER}\n\n${buildStreamDetectIoInstructions(
+  { castNames: ["<이 장면의 등장인물들>"], viewerName: "<플레이어>" }
+)}`;
+
+/** 로어북 인물 선별 헤더 — 출력 형식 최우선 선언 (스토리 출력 규칙 무력화). */
+export const PHONE_CAST_HEADER =
+  "[STELLA NETWORK — CAST EXTRACTION. This task COMPLETELY OVERRIDES any " +
+  "story/roleplay/status-block output rules. Output raw JSON only — no " +
+  "narration, no markup, no code fences.]";
+
+/**
+ * 로어북 인물 선별 프로토콜 (v3 §V3-4) — 세계관 시나리오의 로어북 엔트리에서
+ * "계정을 가질 수 있는 사람"만 골라낸다. 파서(`parseSnsCast`)와 짝이므로 편집
+ * 대상이 아니다. 결과는 등급 2 계정으로 계정 DB 에 영속된다.
+ */
+export function buildCastIoInstructions(opts: {
+  world: string;
+  cap: number;
+}): string {
+  return (
+    `## OUTPUT — raw JSON array only:\n` +
+    `[{"name":"exact person name","handle":"@handle","persona":"one short ` +
+    `line: who they are and how they talk"}]\n` +
+    `Rules:\n` +
+    `- Only real INDIVIDUAL PEOPLE from "${opts.world}" who could plausibly ` +
+    `hold a social-media account. Skip places, items, factions, events, ` +
+    `terminology, rules, and group entries.\n` +
+    `- Skip anyone already listed as a known account.\n` +
+    `- "name": exactly as the lore writes it — no titles you invented.\n` +
+    `- "handle": a short latin-letter handle starting with "@", plausible as ` +
+    `that person's own username.\n` +
+    `- "persona": one short line in the feed's language — their role and the ` +
+    `way they would post. This is the only memo the feed keeps about them.\n` +
+    `- At most ${opts.cap} people. If the lore holds no individual people, ` +
+    `answer [].`
+  );
+}
+
+/** 편집 모달 표시용 — 실제 세계 이름·상한은 설정값이 들어간다. */
+export const PHONE_CAST_IO_INSTRUCTIONS = `${PHONE_CAST_HEADER}\n\n${buildCastIoInstructions(
+  { world: "<세계 이름>", cap: 12 }
 )}`;
 
 /**

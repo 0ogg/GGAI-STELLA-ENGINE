@@ -14,6 +14,8 @@ import { renderEditableTitle, renderIconActionButton } from "../editor-cover";
 import { exportPromptPreset } from "../entity-actions";
 import { ConfirmModal } from "../modals";
 
+const SAVE_DEBOUNCE_MS = 400;
+
 export interface PromptSetEditorSectionOpts {
   /** 삭제 후 편집 페이지를 벗어날 때(대시보드 뒤로가기). */
   onClose: () => void;
@@ -38,6 +40,13 @@ export class PromptSetEditorSection {
   /** 조합/포커스/자기저장 공용 가드 — 복붙 금지, edit-guard.ts 참조. */
   private guard = new EditGuard();
   private eventRef: EventRef | null = null;
+  /** 텍스트 편집(제목/이름/내용/가공) debounce 저장 타이머. */
+  private saveTimer: number | null = null;
+  private dirty = false;
+  private visibilityHandler = (): void => {
+    if (document.visibilityState === "hidden") void this.flushNow();
+  };
+  private blurHandler = (): void => void this.flushNow();
 
   constructor(
     container: HTMLElement,
@@ -57,18 +66,23 @@ export class PromptSetEditorSection {
       "prompt-preset-changed",
       (file: string) => {
         if (file !== this.presetFile) return;
-        if (this.guard.isSavingSelf || this.guard.isEditing()) return;
+        if (this.dirty || this.guard.isSavingSelf || this.guard.isEditing()) return;
         void this.reloadAndRender();
       }
     );
+    document.addEventListener("visibilitychange", this.visibilityHandler);
+    window.addEventListener("blur", this.blurHandler);
   }
 
-  /** 라우트 이동/뷰 종료 시 — 구독 해제. 편집은 각 액션에서 즉시 저장돼 flush 불필요. */
+  /** 라우트 이동/뷰 종료 시 — 구독 해제 + 미저장 텍스트 편집 확정 저장. */
   async dispose(): Promise<void> {
     if (this.eventRef) {
       this.plugin.store.offref(this.eventRef);
       this.eventRef = null;
     }
+    document.removeEventListener("visibilitychange", this.visibilityHandler);
+    window.removeEventListener("blur", this.blurHandler);
+    await this.flushNow();
   }
 
   private async reloadAndRender(): Promise<void> {
@@ -93,8 +107,7 @@ export class PromptSetEditorSection {
       preset.meta.name || this.presetFile.split("/").pop() || "프롬프트 세트",
       (next) => {
         preset.meta.name = next;
-        void this.save();
-        this.render();
+        this.queueSave();
       }
     );
     const actions = header.createDiv({ cls: "ggai-editor-actions" });
@@ -257,7 +270,9 @@ export class PromptSetEditorSection {
     ta.value = item.content ?? "";
     ta.rows = 6;
     ta.placeholder = "프롬프트 내용...";
-    ta.addEventListener("blur", () => void this.handleContentEdit(idx, ta.value));
+    // 글자마다 모델 반영(+debounce 저장). blur 가 안 오는 모바일 이탈에도 유실 없음.
+    ta.addEventListener("input", () => this.handleContentLive(idx, ta.value));
+    ta.addEventListener("blur", () => void this.flushNow());
 
     this.appendDeleteRow(panel, item, idx);
   }
@@ -270,7 +285,12 @@ export class PromptSetEditorSection {
     }) as HTMLInputElement;
     input.type = "text";
     input.value = name;
-    input.addEventListener("blur", () => void this.handleNameEdit(idx, input.value));
+    // 글자마다 모델 반영(+debounce 저장) — blur 미발생 시에도 유실 없음.
+    input.addEventListener("input", () => this.handleNameLive(idx, input.value));
+    input.addEventListener("blur", () => {
+      void this.flushNow();
+      this.renderBody(); // 접힌 row 의 이름 표시 갱신 (포커스는 이미 떠남).
+    });
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
@@ -327,9 +347,8 @@ export class PromptSetEditorSection {
     ta.rows = 3;
     ta.value = item.wrap ?? "";
     ta.placeholder = `예: (관련 설정: ${macro})`;
-    ta.addEventListener("blur", () =>
-      void this.handleMarkerWrapEdit(idx, ta.value, false)
-    );
+    ta.addEventListener("input", () => this.handleMarkerWrapLive(idx, ta.value));
+    ta.addEventListener("blur", () => void this.flushNow());
     taWrap.createDiv({
       cls: "ggai-prompt-wrap-hint",
       text: `${macro} 자리에 이 항목 내용이 들어갑니다. 매크로를 지우면 내용이 맨 뒤에 붙습니다. 앞뒤 줄바꿈은 자동으로 넣지 않습니다.`,
@@ -398,13 +417,13 @@ export class PromptSetEditorSection {
     this.renderBody();
   }
 
-  private async handleNameEdit(idx: number, rawName: string): Promise<void> {
+  /** 항목 이름 라이브 반영 — 모델 갱신 + debounce 저장만. 재렌더 없음. */
+  private handleNameLive(idx: number, rawName: string): void {
     if (!this.preset) return;
     const name = rawName.trim();
     if (!name || name === this.preset.prompts[idx].name) return;
     this.preset.prompts[idx] = { ...this.preset.prompts[idx], name };
-    await this.save();
-    this.renderBody();
+    this.queueSave();
   }
 
   private async handleMarkerWrapEdit(
@@ -447,12 +466,22 @@ export class PromptSetEditorSection {
     this.renderBody();
   }
 
-  private async handleContentEdit(idx: number, content: string): Promise<void> {
+  /** 항목 내용 라이브 반영 — 모델 갱신 + debounce 저장만. 재렌더 없음. */
+  private handleContentLive(idx: number, content: string): void {
     if (!this.preset) return;
     const item = this.preset.prompts[idx];
     if (item.kind !== "text" || content === item.content) return;
     this.preset.prompts[idx] = { ...item, content };
-    await this.save();
+    this.queueSave();
+  }
+
+  /** 마커 본문 가공 텍스트 라이브 반영 — 모델 갱신 + debounce 저장만. */
+  private handleMarkerWrapLive(idx: number, wrap: string): void {
+    if (!this.preset) return;
+    const item = this.preset.prompts[idx];
+    if (item.kind !== "marker" || item.wrap === wrap) return;
+    this.preset.prompts[idx] = { ...item, wrap };
+    this.queueSave();
   }
 
   private async handleReorder(from: number, to: number): Promise<void> {
@@ -530,6 +559,27 @@ export class PromptSetEditorSection {
         })();
       }
     ).open();
+  }
+
+  /** 텍스트 편집 debounce 예약 — blur 가 없어도 곧 저장된다. */
+  private queueSave(): void {
+    this.dirty = true;
+    if (this.saveTimer != null) window.clearTimeout(this.saveTimer);
+    this.saveTimer = window.setTimeout(() => {
+      this.saveTimer = null;
+      void this.flushNow();
+    }, SAVE_DEBOUNCE_MS);
+  }
+
+  /** 대기 중인 텍스트 편집을 즉시 확정 저장 (blur/dispose/앱 전환에서 호출). */
+  private async flushNow(): Promise<void> {
+    if (this.saveTimer != null) {
+      window.clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    if (!this.dirty) return;
+    this.dirty = false;
+    await this.save();
   }
 
   /** 이 세트 파일에만 저장한다 — 활성 설정/세션에는 손대지 않는다. */

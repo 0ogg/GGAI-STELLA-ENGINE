@@ -22,6 +22,7 @@ import type {
   ChatMessage,
 } from "./ai-service";
 import {
+  accountTier,
   clampIssueScale,
   snsAuthorKey,
   type PhoneAccountsFile,
@@ -32,6 +33,7 @@ import {
   type SnsAccount,
   type SnsAuthor,
   type SnsFeedFile,
+  type SnsList,
   type SnsPost,
   type StreamChatItem,
   type StreamNodeReaction,
@@ -40,12 +42,17 @@ import type { StellaUserProfile } from "../types/user";
 import { applyMacros } from "../util/macros";
 import { resolveMediaPrompt } from "../util/default-media-prompts";
 import {
+  PHONE_CAST_HEADER,
   PHONE_SNS_HEADER,
+  PHONE_STREAM_DETECT_HEADER,
   PHONE_TUBE_HEADER,
+  buildCastIoInstructions,
   buildSnsIoInstructions,
   buildPhoneTextIoInstructions,
+  buildStreamDetectIoInstructions,
   buildTubeIoInstructions,
 } from "../util/phone-prompts";
+import { composeMediaPrompt } from "../util/media-prompt-body";
 import { listPhoneContacts, type PhoneContact } from "../util/phone-contacts";
 import { sawSnsPost } from "../util/phone-knows";
 import { buildSpans, pathToLeaf, spansToText } from "../util/session-text";
@@ -53,7 +60,6 @@ import { composeInheritedSummary } from "../util/summarize-session";
 import { resolveActiveLorebooks } from "../util/resolve-active-lorebooks";
 import { matchLorebookEntries, type MatchedLorebookEntry } from "../util/lorebook-match";
 import type { StellaLorebook } from "../types/lorebook";
-import type { LorebookPlusActiveSettings } from "../types/preset";
 import type { StellaScenario } from "../types/scenario";
 import { uuidv4 } from "../util/uuid";
 import { getSessionHostLeaves, isSessionHostView } from "../views/session-host";
@@ -119,12 +125,14 @@ export const PHONE_APP_MESSAGES = "stella:messages";
 export const PHONE_APP_SNS = "stella:sns";
 export const PHONE_APP_TUBE = "stella:tube";
 export const PHONE_APP_CAMERA = "stella:camera";
+export const PHONE_APP_SETTINGS = "stella:settings";
 /** 내장 앱 id 집합 (외부 등록이 이 id 를 덮어쓰지 못하게). */
 const BUILTIN_APP_IDS = new Set([
   PHONE_APP_MESSAGES,
   PHONE_APP_SNS,
   PHONE_APP_TUBE,
   PHONE_APP_CAMERA,
+  PHONE_APP_SETTINGS,
 ]);
 
 /** 답장 컨텍스트에 넣는 문자 이력 상한 기본값 (설정 `replyHistoryLimit`). */
@@ -170,6 +178,14 @@ const RANDOM_RANGE_MS: [number, number] = [5 * 60_000, 30 * 60_000];
 const EXTRA_CHANCE = 0.2;
 /** 같은 엑스트라 스레드로 이어 보내는 시간 창 — 지나면 새 "모르는 번호". */
 const EXTRA_THREAD_REUSE_MS = 24 * 3_600_000;
+/** 로어북 인물 스캔 (§V3-4) — 한 세계에서 등록할 인물 수 상한 기본값. */
+const SNS_CAST_CAP = 12;
+/** 로어북 인물 스캔에 첨부하는 그 세계 로어북 토큰 상한 기본값. */
+const SNS_CAST_TOKENS = 4000;
+/** 방송 시작 판정 스로틀 — 키워드가 연달아 걸려도 이 간격 안엔 1회만 판정한다. */
+const STREAM_DETECT_MIN_GAP_MS = 3 * 60_000;
+/** 방송 시작 판정에 첨부하는 최근 장면 토큰. */
+const STREAM_DETECT_SCENE_TOKENS = 1200;
 
 export class PhoneService {
   /** 스레드별 실행 중 가드 — 같은 스레드에 생성이 겹치지 않게. */
@@ -245,6 +261,12 @@ export class PhoneService {
       id: PHONE_APP_CAMERA,
       name: "카메라",
       icon: "camera",
+    });
+    // 설정도 홈의 앱이다 (사용자 결정) — 모달이 아니라 다른 앱과 같은 화면.
+    this.apps.set(PHONE_APP_SETTINGS, {
+      id: PHONE_APP_SETTINGS,
+      name: "설정",
+      icon: "settings",
     });
   }
 
@@ -906,6 +928,9 @@ export class PhoneService {
     null;
   /** 튜브 반응 생성 중 가드 — 노드 생성이 몰려도 1개씩. */
   private tubeBusy = false;
+  /** 방송 시작 판정 가드 + 마지막 판정 시각 (키워드가 연달아 걸릴 때 스로틀). */
+  private streamDetectBusy = false;
+  private lastStreamDetectAt = 0;
 
   isSessionLive(sessionFile: string): boolean {
     return (
@@ -954,9 +979,12 @@ export class PhoneService {
       return { ok: false, error: "스텔라튜브가 꺼져 있습니다." };
     }
     const store = this.plugin.store;
-    const streams = await store.listSessionStreams();
-    if (streams.some((s) => s.stream.live)) {
-      return { ok: false, error: "이미 진행 중인 방송이 있습니다." };
+    // 방송은 **세션당 1개**다(파일이 세션 옆 stream.json 하나). 볼트 전체에 1개만
+    // 두던 제한은 없앴다 — 다른 시나리오 세션으로 옮겨 놀 때도 방송을 못 켜는
+    // 말이 안 되는 상황이 됐다(사용자 지적). 쉬고 있는 방송은 비용이 0이다
+    // (반응은 그 세션에 새 노드가 생길 때만 생성된다).
+    if (this.isSessionLive(sessionFile)) {
+      return { ok: false, error: "이 세션은 이미 방송 중입니다." };
     }
     const session = await store.getSession(sessionFile);
     if (!session) return { ok: false, error: "세션을 불러올 수 없습니다." };
@@ -1049,6 +1077,312 @@ export class PhoneService {
   }
 
   /**
+   * 그 세션 장면에 실제로 있는 인물 명부 — 자동 방송의 스트리머 후보다.
+   * 호스트 시나리오 + (그룹 세션이면) 멤버 전원 + 장면 본문에 이름이 실제로
+   * 등장하는 기존 계정(로어북 조연 등). 뷰어(로그인 페르소나)는 후보가 아니다 —
+   * 페르소나 방송은 수동 버튼 전용이다.
+   */
+  private async collectSceneCast(
+    sessionFile: string,
+    sceneText?: string
+  ): Promise<{
+    names: string[];
+    resolve: (name: string) => SessionStreamFile["streamer"] | null;
+  }> {
+    const store = this.plugin.store;
+    const session = await store.getSession(sessionFile);
+    const scenarios = await store
+      .getScenarios()
+      .catch((): Awaited<ReturnType<typeof store.getScenarios>> => []);
+    const accountsFile = await store.getPhoneAccounts();
+    const { profile: persona } = await this.getLoginPersona();
+    const viewerName = (persona.name ?? "").trim().toLowerCase();
+
+    const cast = new Map<string, { name: string; scenarioId?: string }>();
+    const addScenario = (id: string | undefined) => {
+      if (!id) return;
+      const name = scenarios
+        .find((i) => i.scenario.data?.extensions?.stella?.id === id)
+        ?.scenario.data?.name?.trim();
+      const key = name?.toLowerCase();
+      if (!name || !key || key === viewerName || cast.has(key)) return;
+      cast.set(key, { name, scenarioId: id });
+    };
+
+    addScenario(session?.meta.scenarioId);
+    const groupId = session?.meta.groupId;
+    if (groupId) {
+      const group = await store
+        .getGroupById(groupId)
+        .catch(() => null)
+        .then((g) => g?.group);
+      for (const m of group?.members ?? []) addScenario(m.scenarioId);
+    }
+    // 판정에 쓸 장면 텍스트 — 호출자가 안 주면 세션 본문 tail 로 만든다
+    // (SNS 배치 경로도 장면 등장 인물 매칭이 되도록).
+    let scene = sceneText ?? "";
+    if (!scene && session) {
+      try {
+        scene = spansToText(
+          buildSpans(session, session.meta.activeLeafId)
+        ).slice(-8000);
+      } catch {
+        scene = "";
+      }
+    }
+    const hay = scene.toLowerCase();
+    // 장면에 이름이 실제로 등장하는 기존 계정 — 카드가 없는 로어북 인물도
+    // 계정이 있으면 스트리머가 될 수 있다.
+    if (hay) {
+      for (const acc of accountsFile.accounts) {
+        if (acc.kind === "persona") continue;
+        const name = acc.name.trim();
+        const key = name.toLowerCase();
+        if (!name || key === viewerName || cast.has(key)) continue;
+        if (hay.includes(key)) {
+          cast.set(key, {
+            name,
+            ...(acc.scenarioId ? { scenarioId: acc.scenarioId } : {}),
+          });
+        }
+      }
+    }
+
+    const resolve = (raw: string): SessionStreamFile["streamer"] | null => {
+      const name = (raw ?? "").trim();
+      const key = name.toLowerCase();
+      const hit = cast.get(key);
+      if (hit) {
+        const acc = accountsFile.accounts.find(
+          (a) =>
+            a.kind !== "persona" &&
+            (hit.scenarioId
+              ? a.scenarioId === hit.scenarioId
+              : a.name.trim().toLowerCase() === hit.name.toLowerCase())
+        );
+        return {
+          kind: "character",
+          ...(acc ? { accountId: acc.id } : {}),
+          name: hit.name,
+        };
+      }
+      // 명부 밖이라도 **장면에 그 이름이 실제로 등장**하면 인정 — 계정이 아직
+      // 없는 로어북 조연이 방송을 켠 경우. 뷰어(페르소나)는 여전히 불가.
+      if (name.length >= 2 && key !== viewerName && hay.includes(key)) {
+        return { kind: "character", name };
+      }
+      return null;
+    };
+
+    return { names: [...cast.values()].map((c) => c.name), resolve };
+  }
+
+  /**
+   * 방송 판정 참고 자료 — 본문 생성에 들어가는 정보와 같은 축: 카드 설명(호스트 +
+   * 그룹 멤버) + 그 장면에서 활성화된 로어북 + 페르소나(뷰어) 설명. 장면 속
+   * 인물이 누구인지 모델이 알아야 스트리머를 제대로 지목한다.
+   */
+  private async buildStreamDetectReference(
+    session: Parameters<typeof buildSpans>[0],
+    scene: string,
+    personaName: string,
+    personaDesc: string,
+    count: (s: string) => number
+  ): Promise<string> {
+    const store = this.plugin.store;
+    const parts: string[] = [];
+    const scenarios = await store
+      .getScenarios()
+      .catch((): Awaited<ReturnType<typeof store.getScenarios>> => []);
+    const findSc = (id: string | undefined) =>
+      id
+        ? scenarios.find((i) => i.scenario.data?.extensions?.stella?.id === id)
+        : undefined;
+    const pushCard = (sc: ReturnType<typeof findSc>, budget: number) => {
+      const name = sc?.scenario.data?.name?.trim();
+      const descRaw = (sc?.scenario.data as { description?: string } | undefined)
+        ?.description;
+      if (!name || !descRaw) return;
+      const desc = trimToTokens(
+        applyMacros(descRaw, {
+          char: name,
+          user: personaName,
+          variables: {},
+        }).trim(),
+        budget,
+        count,
+        "head"
+      );
+      if (desc) parts.push(`### ${name}\n${desc}`);
+    };
+
+    const host = findSc(session.meta.scenarioId);
+    pushCard(host, 600);
+    const gid = session.meta.groupId;
+    if (gid) {
+      const group = await store
+        .getGroupById(gid)
+        .catch(() => null)
+        .then((g) => g?.group);
+      for (const m of group?.members ?? []) {
+        if (m.scenarioId === session.meta.scenarioId) continue;
+        pushCard(findSc(m.scenarioId), 300);
+      }
+    }
+
+    // 이 장면에서 활성화된 로어북 — 조연·설정 인물의 정체는 대부분 여기 있다.
+    if (host) {
+      const books = await resolveActiveLorebooks(
+        store,
+        host.scenario,
+        session
+      ).catch((): StellaLorebook[] => []);
+      if (books.length > 0) {
+        const matched = matchLorebookEntries(books, {
+          recentMessages: [scene],
+          activeText: scene,
+          keywordMatching: true,
+        });
+        const lore = renderMatchedLore(matched, {
+          char: host.scenario.data?.name?.trim() || "",
+          user: personaName,
+        });
+        const trimmed = trimToTokens(lore, 800, count, "head");
+        if (trimmed) parts.push(`[Active lore in this scene]\n${trimmed}`);
+      }
+    }
+
+    const pd = personaDesc.trim()
+      ? `\n${trimToTokens(personaDesc.trim(), 200, count, "head")}`
+      : "";
+    parts.push(
+      `[The player's persona — the VIEWER of this app, never the streamer]\n` +
+        `${personaName}${pd}`
+    );
+    return parts.join("\n\n");
+  }
+
+  /**
+   * 방송 자동 시작 (§7.2 자동 경로) — 세션 생성문에 방송 키워드가 걸렸을 때
+   * phone-extension 이 부른다. 키워드는 **판정 요청 신호일 뿐** 시작 스위치가
+   * 아니다: 모델이 장면을 읽고 "지금 실제로 방송 중인가 / 누가 켰는가"를 판정하고,
+   * 스트리머는 장면 속 인물 명부에서만 고른다. 판정이 애매하거나 인물을 못 찾으면
+   * 시작하지 않는다 (페르소나 폴백 없음 — 사용자 지적).
+   */
+  async tryAutoStartStream(sessionFile: string): Promise<void> {
+    const plugin = this.plugin;
+    const phone = plugin.data.phone;
+    if (phone?.streamAutoDetect !== true || phone?.tubeEnabled === false) return;
+    // 세션당 1개 — 이 세션이 이미 방송 중일 때만 건너뛴다(다른 세션의 방송은
+    // 무관하다. 볼트 전역 제한 폐지 — 사용자 지적).
+    if (this.isSessionLive(sessionFile)) return;
+    if (this.streamDetectBusy) return;
+    const now = Date.now();
+    if (now - this.lastStreamDetectAt < STREAM_DETECT_MIN_GAP_MS) return;
+    if (!plugin.ai.isAvailable()) return;
+    const profile = this.resolvePhoneProfile();
+    if (!profile) return;
+
+    this.streamDetectBusy = true;
+    this.lastStreamDetectAt = now;
+    try {
+      try {
+        await plugin.flushSessionEdits(sessionFile);
+      } catch {
+        /* flush 실패 — 캐시 본문으로 판정 */
+      }
+      const session = await plugin.store.getSession(sessionFile);
+      if (!session) return;
+      const count = (s: string) => plugin.ai.countTokens(s, profile.id);
+      const body = spansToText(
+        buildSpans(session, session.meta.activeLeafId)
+      ).trim();
+      const scene = trimToTokens(
+        body,
+        STREAM_DETECT_SCENE_TOKENS,
+        count,
+        "tail"
+      );
+      if (!scene) return;
+      const cast = await this.collectSceneCast(sessionFile, scene);
+      if (cast.names.length === 0) {
+        console.debug(
+          "[GGAI Stella] 방송 판정 스킵 — 장면 인물 명부가 비어 있음 " +
+            "(스트리머 후보 없음):",
+          sessionFile
+        );
+        return;
+      }
+      console.debug("[GGAI Stella] 방송 판정 시작 — 후보:", cast.names);
+
+      const { profile: persona } = await this.getLoginPersona();
+      const personaName = persona.name?.trim() || "User";
+      const promptItem = resolveMediaPrompt(
+        "phoneStreamDetect",
+        phone?.streamDetectPromptId,
+        plugin.data.mediaPrompts
+      );
+      if (!promptItem) return;
+      const behavior = applyMacros(promptItem.prompt, {
+        char: cast.names[0],
+        user: personaName,
+        variables: {},
+      }).trim();
+      // 판정 참고 자료 — 본문 생성과 같은 축의 정보(카드/로어북/페르소나).
+      const reference = await this.buildStreamDetectReference(
+        session,
+        scene,
+        personaName,
+        persona.description ?? "",
+        count
+      ).catch(() => "");
+      const system =
+        `${PHONE_STREAM_DETECT_HEADER}\n\n` +
+        `${behavior}\n\n` +
+        (reference ? `[Who is who — reference]\n${reference}\n\n` : "") +
+        `[Scene — the newest part of the story]\n${scene}\n\n` +
+        buildStreamDetectIoInstructions({
+          castNames: cast.names,
+          viewerName: personaName,
+        }) +
+        `\n[BEGIN JSON]`;
+
+      let raw = "";
+      try {
+        const res = await plugin.ai.chat({
+          profileId: profile.id,
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: "[Judge the broadcast now.]" },
+          ],
+          label: "방송 시작 판정",
+        });
+        raw = (res.text ?? "").trim();
+      } catch (err) {
+        console.warn("[GGAI Stella] 방송 시작 판정 실패:", err);
+        return;
+      }
+      const verdict = parseStreamDetect(raw);
+      console.debug("[GGAI Stella] 방송 판정 결과:", raw.slice(0, 300));
+      if (!verdict?.live || !verdict.streamer) return;
+      const streamer = cast.resolve(verdict.streamer);
+      if (!streamer) {
+        console.debug(
+          "[GGAI Stella] 방송 판정 — 지목 인물이 명부에 없어 시작 안 함:",
+          verdict.streamer
+        );
+        return;
+      }
+      const result = await this.startStream(sessionFile, streamer);
+      if (!result.ok) {
+        console.debug("[GGAI Stella] 방송 자동 시작 보류:", result.error);
+      }
+    } finally {
+      this.streamDetectBusy = false;
+    }
+  }
+
+  /**
    * 세션에 새 AI 노드가 생성 완료됐을 때 (phone-extension 이 부른다) —
    * 이 세션이 방송 중이면 그 노드의 시청자 반응 배치를 생성한다 (§7.3).
    */
@@ -1096,6 +1430,21 @@ export class PhoneService {
     if (!nodeId || (stream.nodes[nodeId] && !opts?.force)) return;
 
     const pathIds = pathToLeaf(session, nodeId).map((n) => n.id);
+    // 방송 시작 지점이 이 경로에 없다 = 방송을 켠 가지를 버리고 다른 길로 갔다.
+    // **노드 id 로 확정되는 종료 신호** — 여기서 끝내지 않으면 영영 안 끝나는
+    // 방송이 쌓인다(자동 종료는 closing 2연속뿐이라 그 가지로 안 돌아오면
+    // 판정 기회가 없다). 되감아 보기만 한 상태(생성 없음)는 화면만 "대기"이고
+    // 종료되지 않으며, 수동 새로고침(force)도 종료 판정을 하지 않는다.
+    if (stream.startedNodeId && !pathIds.includes(stream.startedNodeId)) {
+      if (!opts?.force) {
+        console.debug(
+          "[GGAI Stella] 방송 종료 — 방송 가지를 벗어나 새로 생성됨:",
+          sessionFile
+        );
+        await this.endStream(sessionFile);
+      }
+      return;
+    }
     const count = (s: string) => plugin.ai.countTokens(s, profile.id);
     const body = spansToText(buildSpans(session, nodeId)).trim();
     const scene = trimToTokens(body, 1600, count, "tail");
@@ -1136,7 +1485,7 @@ export class PhoneService {
     );
 
     // 세계 로스터 — 방송 세션의 세계(장면 속 인물)는 시청자 귀속에서 제외.
-    const excluded = new Set(plugin.data.phone?.snsExcludedScenarioIds ?? []);
+    const excluded = this.bannedScenarioIds();
     const scenarios = await store.getScenarios().catch(
       (): Awaited<ReturnType<typeof store.getScenarios>> => []
     );
@@ -1330,6 +1679,9 @@ export class PhoneService {
       const scene = await this.sessionSceneText(p.stream.sessionFile);
       if (scene && scene !== p.text) {
         p.text = scene;
+        // 본문이 바뀌었으면 예전 번역은 딴 장면이다 — 버려서 다시 번역되게 한다
+        // (안 버리면 번역 보기에서 옛 장면이 계속 보인다).
+        delete p.translation;
         changed = true;
       }
     }
@@ -1502,7 +1854,7 @@ export class PhoneService {
       );
 
       // 메인 캐릭터 귀속 맵 + 작성자 세계 자료 (그 글 작성자의 세계만 확정급).
-      const excluded = new Set(plugin.data.phone?.snsExcludedScenarioIds ?? []);
+      const excluded = this.bannedScenarioIds();
       const scenarios = await store.getScenarios().catch(
         (): Awaited<ReturnType<typeof store.getScenarios>> => []
       );
@@ -1851,16 +2203,11 @@ export class PhoneService {
   // ─────────────────────────── 번역 (PH5) ───────────────────────────
 
   /**
-   * 폰 번역용 로어북 AI 선별 설정 — 폰 전용 토글(`phone.translation.aiMatching`)이
-   * on/off 를 정하고, 선별 모델/프롬프트/첨부량은 전역 로어북 확장 설정을 재사용한다
-   * (없으면 허브가 기본 생성 프로필 + 기본 확장 선별 프롬프트로 폴백). 세션 [확장]
-   * 탭의 applyToExtensions 와 무관 — override 자체가 폰 컨텍스트의 opt-in.
+   * 폰 번역이 쓸 로어북 — 폰 전용 목록은 없앴다. 전역 번역 설정의 로어북을
+   * 그대로 쓴다(프롬프트/모델과 같은 출처).
    */
-  private phoneTranslationLorebookPlus(): LorebookPlusActiveSettings {
-    return {
-      ...(this.plugin.data.current?.lorebookPlus ?? {}),
-      aiMatching: this.plugin.data.phone?.translation?.aiMatching === true,
-    };
+  private phoneTranslationLorebookIds(): string[] | undefined {
+    return this.plugin.data.current?.translation?.lorebookIds;
   }
 
   /** 번역 실행 중 가드 키 — 같은 스레드/게시글에 번역이 겹치지 않게. */
@@ -1868,8 +2215,8 @@ export class PhoneService {
 
   /**
    * 스레드의 번역 안 된 문자를 일괄 번역해 각 문자의 translation 으로 저장한다.
-   * 원문은 불변 — 이미 번역된 문자는 건너뛴다 (재번역 방지). 프롬프트/모델은
-   * 전역 번역 설정, 로어북은 폰 설정의 폰 전용 로어북 (스펙: 세션 번역과 독립).
+   * 원문은 불변 — 이미 번역된 문자는 건너뛴다 (재번역 방지).
+   * 프롬프트/모델/로어북은 전역 번역 설정을 그대로 쓴다.
    */
   async translateThread(
     personaId: string,
@@ -1895,8 +2242,8 @@ export class PhoneService {
       if (targets.length === 0) return { ok: true };
       const r = await this.plugin.translation.translateItems(
         targets.map((m, i) => ({ id: `m${i}`, source: m.text })),
-        this.plugin.data.phone?.translation?.lorebookIds,
-        this.phoneTranslationLorebookPlus()
+        this.phoneTranslationLorebookIds(),
+        "번역 (스텔라 폰 문자)"
       );
       if (r.results.size > 0) {
         // 번역 중 새 문자가 왔을 수 있으니 다시 읽어 message id 로 매칭해 저장.
@@ -1958,8 +2305,8 @@ export class PhoneService {
       if (items.length === 0) return { ok: true };
       const r = await this.plugin.translation.translateItems(
         items,
-        this.plugin.data.phone?.translation?.lorebookIds,
-        this.phoneTranslationLorebookPlus()
+        this.phoneTranslationLorebookIds(),
+        "번역 (스텔라 폰 SNS 게시글)"
       );
       if (r.results.size > 0) {
         const fresh = await store.getSnsFeed();
@@ -2025,8 +2372,8 @@ export class PhoneService {
       if (items.length === 0) return { ok: true };
       const r = await this.plugin.translation.translateItems(
         items,
-        this.plugin.data.phone?.translation?.lorebookIds,
-        this.phoneTranslationLorebookPlus()
+        this.phoneTranslationLorebookIds(),
+        "번역 (스텔라 폰 SNS 피드)"
       );
       if (r.results.size > 0) {
         // 번역 중 새 글/댓글이 왔을 수 있으니 다시 읽어 id 로 매칭해 저장.
@@ -2115,8 +2462,8 @@ export class PhoneService {
     // 되돌려주지 못해 매칭이 전부 실패한다(문자 m{i}·SNS p{i} 와 같은 규칙).
     const r = await this.plugin.translation.translateItems(
       targets.map((c, i) => ({ id: `c${i}`, source: c.text })),
-      this.plugin.data.phone?.translation?.lorebookIds,
-      this.phoneTranslationLorebookPlus()
+      this.phoneTranslationLorebookIds(),
+      "번역 (스텔라튜브 채팅)"
     );
     const out = new Map<string, string>();
     targets.forEach((c, i) => {
@@ -2128,6 +2475,354 @@ export class PhoneService {
 
   /** SNS 활동 실행 중 가드 — 갱신과 게시 직후 반응이 겹치지 않게. */
   private snsBusy = false;
+
+  /**
+   * 현재 활성 리스트 (v3) — 없으면 null = "아직 팔로우한 계정이 없습니다"
+   * 상태이고 SNS 자동 생성이 돌지 않는다. 활성 id 를 못 찾으면 첫 리스트.
+   */
+  activeSnsList(): SnsList | null {
+    const phone = this.plugin.data.phone;
+    const lists = phone?.snsLists ?? [];
+    if (lists.length === 0) return null;
+    return lists.find((l) => l.id === phone?.activeSnsListId) ?? lists[0];
+  }
+
+  /** 활성 리스트의 밴 목록 (인물 축 제외) — 리스트가 없으면 빈 집합. */
+  private bannedScenarioIds(): Set<string> {
+    return new Set(this.activeSnsList()?.bannedScenarioIds ?? []);
+  }
+
+  /** 리스트 전체 (표시 순서). */
+  listSnsLists(): SnsList[] {
+    return this.plugin.data.phone?.snsLists ?? [];
+  }
+
+  /** 이 작성자가 그 계정인가 — accountId 우선, 다음 핸들, 다음 (엑스트라) 이름. */
+  private authorIsAccount(author: SnsAuthor, acc: SnsAccount): boolean {
+    if (author.accountId) return author.accountId === acc.id;
+    if (author.handle && acc.handle) {
+      return author.handle.toLowerCase() === acc.handle.toLowerCase();
+    }
+    if (acc.kind === "character" && acc.scenarioId) {
+      return author.kind === "character" && author.id === acc.scenarioId;
+    }
+    return (
+      author.kind === "extra" &&
+      author.name.trim().toLowerCase() === acc.name.trim().toLowerCase()
+    );
+  }
+
+  /**
+   * 계정 편집 (v3 계정 관리) — 이름/핸들/세계/성향 메모/팔로워. 피드에 이미
+   * 올라간 그 계정의 글·댓글 작성자 표기도 함께 바꾼다 (계정을 고쳤는데 옛
+   * 글만 옛 이름으로 남으면 "다른 사람"처럼 보인다).
+   */
+  async updateSnsAccount(
+    id: string,
+    patch: Partial<
+      Pick<SnsAccount, "name" | "handle" | "world" | "persona" | "followers">
+    >
+  ): Promise<void> {
+    const store = this.plugin.store;
+    const accounts = await store.getPhoneAccounts();
+    const acc = accounts.accounts.find((a) => a.id === id);
+    if (!acc) return;
+    if (patch.name !== undefined) acc.name = patch.name.trim() || acc.name;
+    if (patch.handle !== undefined) {
+      const h = patch.handle.trim();
+      if (h) acc.handle = h.startsWith("@") ? h : `@${h}`;
+      else delete acc.handle;
+    }
+    if (patch.world !== undefined) {
+      if (patch.world.trim()) acc.world = patch.world.trim();
+      else delete acc.world;
+    }
+    if (patch.persona !== undefined) {
+      if (patch.persona.trim()) acc.persona = patch.persona.trim();
+      else delete acc.persona;
+    }
+    if (patch.followers !== undefined && Number.isFinite(patch.followers)) {
+      acc.followers = Math.max(0, Math.round(patch.followers));
+    }
+    await store.savePhoneAccounts(accounts);
+
+    const feed = await store.getSnsFeed();
+    let changed = false;
+    const sync = (author: SnsAuthor) => {
+      if (!this.authorIsAccount(author, acc)) return;
+      author.name = acc.name;
+      if (acc.handle) author.handle = acc.handle;
+      else delete author.handle;
+      if (acc.world) author.world = acc.world;
+      else delete author.world;
+      author.accountId = acc.id;
+      changed = true;
+    };
+    for (const p of feed.posts) {
+      sync(p.author);
+      for (const r of p.replies) sync(r.author);
+    }
+    if (changed) await store.saveSnsFeed(feed);
+  }
+
+  /**
+   * 계정 승격 (§V3-4) — 엑스트라/로어북 인물을 **고정 캐릭터(등급 1)** 로 올린다.
+   * 시나리오와 연결되므로 그 뒤로는 세계 메인 캐릭터와 같은 자격(등장 우선·
+   * 세션 사건 귀속)을 갖는다. 피드의 옛 글 작성자 표기도 함께 맞춘다.
+   */
+  async promoteSnsAccount(id: string, scenarioId: string): Promise<void> {
+    const store = this.plugin.store;
+    const accounts = await store.getPhoneAccounts();
+    const acc = accounts.accounts.find((a) => a.id === id);
+    if (!acc) return;
+    const item = (await store.getScenarios()).find(
+      (sc) => sc.scenario.data.extensions?.stella?.id === scenarioId
+    );
+    if (!item) return;
+    acc.kind = "character";
+    acc.scenarioId = scenarioId;
+    acc.tier = 1;
+    delete acc.verified;
+    const world = item.scenario.data.name?.trim();
+    if (world) acc.world = world;
+    await store.savePhoneAccounts(accounts);
+
+    const feed = await store.getSnsFeed();
+    let changed = false;
+    const sync = (author: SnsAuthor) => {
+      if (!this.authorIsAccount(author, acc)) return;
+      author.kind = "character";
+      author.id = scenarioId;
+      if (acc.world) author.world = acc.world;
+      author.accountId = acc.id;
+      changed = true;
+    };
+    for (const p of feed.posts) {
+      sync(p.author);
+      for (const r of p.replies) sync(r.author);
+    }
+    if (changed) await store.saveSnsFeed(feed);
+  }
+
+  /**
+   * 계정 밴 (§V3-4) — 활성 리스트 피드에 이 인물이 더는 등장하지 않게 한다.
+   * 시나리오가 연결된 계정은 기존 세계 밴(`bannedScenarioIds`)으로, 그렇지
+   * 않은 인물은 계정 밴(`bannedAccountIds`)으로 — 같은 개념을 둘로 나누지 않는다.
+   * 이미 올라간 글은 지우지 않는다(삭제는 별도 메뉴).
+   */
+  async banSnsAccount(id: string): Promise<boolean> {
+    const list = this.activeSnsList();
+    if (!list) return false;
+    const acc = (await this.plugin.store.getPhoneAccounts()).accounts.find(
+      (a) => a.id === id
+    );
+    if (!acc) return false;
+    if (acc.scenarioId) {
+      const bannedScenarioIds = [
+        ...new Set([...(list.bannedScenarioIds ?? []), acc.scenarioId]),
+      ];
+      await this.updateSnsList(list.id, { bannedScenarioIds });
+    } else {
+      const bannedAccountIds = [
+        ...new Set([...(list.bannedAccountIds ?? []), acc.id]),
+      ];
+      await this.updateSnsList(list.id, { bannedAccountIds });
+    }
+    return true;
+  }
+
+  /** 이 계정이 활성 리스트에서 밴 상태인가 (세계 밴/계정 밴 둘 다). */
+  isSnsAccountBanned(acc: SnsAccount): boolean {
+    const list = this.activeSnsList();
+    if (!list) return false;
+    if (list.bannedAccountIds?.includes(acc.id)) return true;
+    return !!acc.scenarioId && !!list.bannedScenarioIds?.includes(acc.scenarioId);
+  }
+
+  /** 밴 해제 — 세계 밴이면 세계를, 계정 밴이면 계정을 목록에서 뺀다. */
+  async unbanSnsAccount(acc: SnsAccount): Promise<void> {
+    const list = this.activeSnsList();
+    if (!list) return;
+    const patch: Partial<Omit<SnsList, "id">> = {};
+    if (list.bannedAccountIds?.includes(acc.id)) {
+      patch.bannedAccountIds = list.bannedAccountIds.filter((i) => i !== acc.id);
+    }
+    if (acc.scenarioId && list.bannedScenarioIds?.includes(acc.scenarioId)) {
+      patch.bannedScenarioIds = list.bannedScenarioIds.filter(
+        (i) => i !== acc.scenarioId
+      );
+    }
+    if (Object.keys(patch).length > 0) await this.updateSnsList(list.id, patch);
+  }
+
+  /**
+   * 계정 삭제 (v3 계정 관리) — deletePosts 면 그 계정의 게시글과 (남는 글의)
+   * 댓글까지 지운다. 아니면 계정만 지우고 이미 올라간 글은 그대로 남는다.
+   */
+  async deleteSnsAccount(
+    id: string,
+    opts: { deletePosts: boolean }
+  ): Promise<void> {
+    const store = this.plugin.store;
+    const accounts = await store.getPhoneAccounts();
+    const acc = accounts.accounts.find((a) => a.id === id);
+    if (!acc) return;
+    accounts.accounts = accounts.accounts.filter((a) => a.id !== id);
+    await store.savePhoneAccounts(accounts);
+    if (!opts.deletePosts) return;
+
+    const feed = await store.getSnsFeed();
+    const before = feed.posts.length;
+    feed.posts = feed.posts.filter((p) => !this.authorIsAccount(p.author, acc));
+    let changed = feed.posts.length !== before;
+    // 최상단 이슈가 지워졌으면 boom 도 함께 정리.
+    if (feed.boom && !feed.posts.some((p) => p.id === feed.boom!.postId)) {
+      delete feed.boom;
+      changed = true;
+    }
+    for (const p of feed.posts) {
+      const kept = p.replies.filter((r) => !this.authorIsAccount(r.author, acc));
+      if (kept.length !== p.replies.length) {
+        // 지워진 댓글에 달려 있던 대댓글은 최상위로 승격 (고아 parentId 방지).
+        const keptIds = new Set(kept.map((r) => r.id));
+        for (const r of kept) {
+          if (r.parentId && !keptIds.has(r.parentId)) delete r.parentId;
+        }
+        p.replies = kept;
+        changed = true;
+      }
+    }
+    if (changed) await store.saveSnsFeed(feed);
+  }
+
+  /** 리스트 목록 저장 + 활성 id 정리 — 화면 갱신은 phone-lists-changed 로 전파. */
+  private async saveSnsLists(
+    lists: SnsList[],
+    activeId?: string
+  ): Promise<void> {
+    const phone = { ...(this.plugin.data.phone ?? {}) };
+    phone.snsLists = lists;
+    const active = activeId ?? this.plugin.data.phone?.activeSnsListId;
+    phone.activeSnsListId = lists.some((l) => l.id === active)
+      ? active
+      : lists[0]?.id;
+    await this.plugin.savePluginData({ phone });
+    this.plugin.store.trigger("phone-lists-changed");
+  }
+
+  /** 리스트 만들기 — 만든 리스트를 활성으로 둔다. */
+  async createSnsList(name: string, scenarioIds: string[] = []): Promise<SnsList> {
+    const list: SnsList = {
+      id: uuidv4(),
+      name: name.trim() || "새 리스트",
+      scenarioIds: [...new Set(scenarioIds)],
+    };
+    await this.saveSnsLists([...this.listSnsLists(), list], list.id);
+    return list;
+  }
+
+  /** 리스트 부분 수정 (이름/멤버/밴). */
+  async updateSnsList(id: string, patch: Partial<Omit<SnsList, "id">>): Promise<void> {
+    const lists = this.listSnsLists().map((l) =>
+      l.id === id
+        ? {
+            ...l,
+            ...patch,
+            ...(patch.scenarioIds
+              ? { scenarioIds: [...new Set(patch.scenarioIds)] }
+              : {}),
+          }
+        : l
+    );
+    await this.saveSnsLists(lists);
+  }
+
+  /** 리스트 삭제 (피드 글은 그대로 남는다 — 생성 범위만 바뀐다). */
+  async deleteSnsList(id: string): Promise<void> {
+    await this.saveSnsLists(this.listSnsLists().filter((l) => l.id !== id));
+  }
+
+  /** 활성 리스트 전환. */
+  async setActiveSnsList(id: string): Promise<void> {
+    await this.saveSnsLists(this.listSnsLists(), id);
+  }
+
+  /**
+   * 세션 단위 팔로우 — 그 세션의 참가자(호스트 + 그룹 멤버 전원)를 한 번에
+   * 리스트에 넣는다. 사용자가 세션을 고르면 "이 이야기에 나오는 사람들"이
+   * 통째로 들어오는 게 자연스럽다.
+   */
+  async participantsOfSession(sessionFile: string): Promise<string[]> {
+    const store = this.plugin.store;
+    const session = await store.getSession(sessionFile);
+    if (!session) return [];
+    const ids: string[] = [];
+    if (session.meta.scenarioId) ids.push(session.meta.scenarioId);
+    const gid = session.meta.groupId;
+    if (gid) {
+      const group = await store
+        .getGroupById(gid)
+        .catch(() => null)
+        .then((g) => g?.group);
+      for (const m of group?.members ?? []) ids.push(m.scenarioId);
+    }
+    return [...new Set(ids)];
+  }
+
+  /** 최근 세션 목록 (표시용) — 세션 단위 팔로우 메뉴에 쓴다. */
+  async listRecentSessions(
+    limit = 20
+  ): Promise<{ sessionFile: string; label: string }[]> {
+    const store = this.plugin.store;
+    const scenarios = await store
+      .getScenarios()
+      .catch((): Awaited<ReturnType<typeof store.getScenarios>> => []);
+    const rows: { sessionFile: string; label: string; at: number }[] = [];
+    for (const sc of scenarios) {
+      if (sc.sessionCount === 0) continue;
+      const world = sc.scenario.data?.name?.trim() || "세계";
+      const sessions = await store.getSessions(sc.folder).catch(() => []);
+      for (const item of sessions) {
+        rows.push({
+          sessionFile: item.sessionFile,
+          label: `${world} — ${item.session.meta.name || "세션"}`,
+          at: item.session.meta.modifiedAt ?? 0,
+        });
+      }
+    }
+    rows.sort((a, b) => b.at - a.at);
+    return rows
+      .slice(0, Math.max(1, limit))
+      .map(({ sessionFile, label }) => ({ sessionFile, label }));
+  }
+
+  /**
+   * 최근 세션에 나온 인물들 — "최근 세션 봇 모두 추가" 원클릭용.
+   * 수정 시각 최신순 세션 `limit` 개의 참가자 전원.
+   */
+  async recentSessionParticipants(limit = 10): Promise<string[]> {
+    const store = this.plugin.store;
+    const scenarios = await store
+      .getScenarios()
+      .catch((): Awaited<ReturnType<typeof store.getScenarios>> => []);
+    const pairs: { file: string; at: number }[] = [];
+    for (const sc of scenarios) {
+      if (sc.sessionCount === 0) continue;
+      const sessions = await store.getSessions(sc.folder).catch(() => []);
+      for (const item of sessions) {
+        pairs.push({
+          file: item.sessionFile,
+          at: item.session.meta.modifiedAt ?? 0,
+        });
+      }
+    }
+    pairs.sort((a, b) => b.at - a.at);
+    const out: string[] = [];
+    for (const p of pairs.slice(0, Math.max(1, limit))) {
+      out.push(...(await this.participantsOfSession(p.file)));
+    }
+    return [...new Set(out)];
+  }
 
   /**
    * SNS 계정 엔진 (v2 §6.1) — 배치 활동의 작성자를 accounts.json 에 귀속한다.
@@ -2142,8 +2837,22 @@ export class PhoneService {
     charByName: Map<string, SnsAuthor>;
     personaName: string;
     newAccountCap: number;
+    /** 밴된 계정 id (§V3-4 계정 화면 밴) — 그 리스트 피드에 등장 금지. */
+    bannedAccountIds?: Set<string>;
+    /** 밴된 시나리오 id — 핸들 참조로 우회 등장하는 것도 막는다. */
+    bannedScenarioIds?: Set<string>;
+    /**
+     * 이번 배치에 허용할 등급 3(엑스트라) 활동 수 (§V3-4 배분 강제).
+     * 초과분은 작성자 해석 단계에서 폐기된다 — 지시만으로는 안 지켜진다.
+     * 미지정 = 무제한(문자/방송 등 배분 규칙이 없는 경로).
+     */
+    extraQuota?: number;
   }) {
     const { accounts, charByName, personaName } = opts;
+    const banned = opts.bannedAccountIds ?? new Set<string>();
+    const bannedWorlds = opts.bannedScenarioIds ?? new Set<string>();
+    const extraQuota = opts.extraQuota ?? Number.POSITIVE_INFINITY;
+    let extraUsed = 0;
     const byId = new Map(accounts.accounts.map((a) => [a.id, a]));
     const byKey = new Map<string, SnsAccount>();
     const keyOf = (acc: SnsAccount): string => {
@@ -2159,6 +2868,12 @@ export class PhoneService {
       if (acc.handle && acc.kind === "character" && acc.scenarioId) {
         const ck = `character:${acc.scenarioId}`;
         if (!byKey.has(ck)) byKey.set(ck, acc);
+      }
+      // 핸들을 가진 인물도 이름 키로 한 번 더 — 모델이 핸들 없이 이름만 쓴
+      // 경우에도 기존 계정으로 붙는다(로어북 인물이 매번 새로 태어나던 경로).
+      if (acc.handle && acc.kind !== "persona" && acc.kind !== "character") {
+        const nk = `extra:${acc.name.trim().toLowerCase()}`;
+        if (!byKey.has(nk)) byKey.set(nk, acc);
       }
     }
     let newCount = 0;
@@ -2185,7 +2900,7 @@ export class PhoneService {
       accountId: acc.id,
     });
 
-    const resolveAuthor = (
+    const resolveRaw = (
       d: {
         account?: string;
         author: string;
@@ -2223,6 +2938,7 @@ export class PhoneService {
             ...(handleRef ? { handle: handleRef } : {}),
             ...(known.world ? { world: known.world } : {}),
             followers: initFollowers("character"),
+            tier: 1,
             firstSeen: now,
             lastActive: now,
             postCount: 0,
@@ -2241,17 +2957,12 @@ export class PhoneService {
         if (isPress(nameAcc) && !allowVerified) return null;
         return authorOf(nameAcc);
       }
-      // 4) 신규 계정 — 배치당 상한, 넘치면 등록 없는 익명 작성자.
+      // 4) 신규 계정 — 배치당 상한. **넘치면 그 활동을 폐기한다**(§V3-4):
+      //    예전의 "등록 없는 익명 작성자" 폴백이 상한을 무력화해 엑스트라가
+      //    사실상 무제한으로 판쳤다.
       const verified = d.verified === true;
       if (verified && !allowVerified) return null;
-      if (newCount >= opts.newAccountCap) {
-        return {
-          kind: "extra",
-          name,
-          ...(handleRef ? { handle: handleRef } : {}),
-          ...(d.world ? { world: d.world } : {}),
-        };
-      }
+      if (newCount >= opts.newAccountCap) return null;
       newCount++;
       const acc: SnsAccount = {
         id: `acc_${uuidv4()}`,
@@ -2261,12 +2972,42 @@ export class PhoneService {
         ...(verified ? { verified: true } : {}),
         ...(d.world ? { world: d.world } : {}),
         followers: initFollowers(verified ? "press" : "extra"),
+        tier: 3,
         firstSeen: now,
         lastActive: now,
         postCount: 0,
       };
       register(acc);
       return authorOf(acc);
+    };
+
+    /**
+     * 작성자 해석 + 등장 자격 검사 (§V3-4) — 밴된 인물은 등장 자체가 금지이고,
+     * 등급 3(엑스트라) 활동은 이번 배치 할당량 안에서만 통과한다.
+     */
+    const resolveAuthor = (
+      d: {
+        account?: string;
+        author: string;
+        handle?: string;
+        verified?: boolean;
+        world?: string;
+      },
+      allowVerified: boolean
+    ): SnsAuthor | null => {
+      const author = resolveRaw(d, allowVerified);
+      if (!author) return null;
+      const acc = author.accountId ? byId.get(author.accountId) : undefined;
+      if (acc) {
+        if (banned.has(acc.id)) return null;
+        if (acc.scenarioId && bannedWorlds.has(acc.scenarioId)) return null;
+      }
+      const tier = acc ? accountTier(acc) : 3;
+      if (tier === 3) {
+        if (extraUsed >= extraQuota) return null;
+        extraUsed++;
+      }
+      return author;
     };
 
     const recordActivity = (
@@ -2305,6 +3046,150 @@ export class PhoneService {
   }
 
   /**
+   * 로어북 인물 스캔 (§V3-4) — 한 세계(시나리오)의 로어북에서 "계정을 가질 수
+   * 있는 사람"만 AI 로 골라 **등급 2 계정**으로 계정 DB 에 영속시킨다.
+   *
+   * 시나리오 이름만 인물로 인정하던 탓에 로어북 인물이 전부 신규 엑스트라로
+   * 떨어지던 문제의 근원 수정이다. 한 번 등록하면 이후 배치는 그 계정을 그대로
+   * 재사용한다(스캔 기록 = `accounts.castScans`, force 로 다시 훑을 수 있음).
+   */
+  async scanLorebookCast(
+    scenarioId: string,
+    opts?: { force?: boolean }
+  ): Promise<{ ok: boolean; added: number; reason?: string }> {
+    const plugin = this.plugin;
+    const phone = plugin.data.phone;
+    const accounts = await plugin.store.getPhoneAccounts();
+    if (!opts?.force && accounts.castScans?.[scenarioId]) {
+      return { ok: true, added: 0, reason: "이미 훑은 세계" };
+    }
+    if (!plugin.ai.isAvailable()) {
+      return { ok: false, added: 0, reason: "AI 를 사용할 수 없습니다." };
+    }
+    const profile = this.resolvePhoneProfile();
+    if (!profile) return { ok: false, added: 0, reason: "폰 모델이 없습니다." };
+    const item = (await plugin.store.getScenarios()).find(
+      (sc) => sc.scenario.data.extensions?.stella?.id === scenarioId
+    );
+    if (!item) return { ok: false, added: 0, reason: "시나리오를 찾을 수 없습니다." };
+    const world = item.scenario.data.name?.trim() || "";
+    const promptItem = resolveMediaPrompt(
+      "phoneCast",
+      phone?.castPromptId,
+      plugin.data.mediaPrompts
+    );
+    if (!promptItem) return { ok: false, added: 0, reason: "프롬프트가 없습니다." };
+
+    const { profile: persona } = await this.getLoginPersona();
+    const personaName = persona.name?.trim() || "User";
+    const count = (s: string) => plugin.ai.countTokens(s, profile.id);
+    const macroCtx = { char: world, user: personaName, variables: {} };
+    const books = await resolveActiveLorebooks(
+      plugin.store,
+      item.scenario,
+      null
+    ).catch((): StellaLorebook[] => []);
+    const lore = trimToTokens(
+      renderAllLore(books, { char: world, user: personaName }),
+      Math.max(200, Math.floor(phone?.snsCastTokens ?? SNS_CAST_TOKENS)),
+      count,
+      "head"
+    );
+    const card = item.scenario.data as { description?: string };
+    const desc = card.description
+      ? trimToTokens(
+          applyMacros(card.description, macroCtx).trim(),
+          SNS_WORLD_REF_TOKENS,
+          count,
+          "head"
+        )
+      : "";
+    if (!lore && !desc) {
+      // 훑을 자료가 없는 세계 — 다시 시도하지 않게 기록만 남긴다.
+      await this.markCastScanned(scenarioId);
+      return { ok: true, added: 0 };
+    }
+    // 이미 등록된 사람은 다시 만들지 않게 명시 — 중복 계정이 등급을 흐린다.
+    const knownOfWorld = accounts.accounts
+      .filter((a) => a.kind !== "persona" && (!a.world || a.world === world))
+      .map((a) => `- ${a.handle ?? ""} ${a.name}`.trim())
+      .join("\n");
+    const body =
+      `### ${world}\n${desc}` +
+      (knownOfWorld ? `\n\n[Known accounts — do NOT list these again]\n${knownOfWorld}` : "");
+    const cap = Math.max(1, Math.floor(phone?.snsCastCap ?? SNS_CAST_CAP));
+    const behavior = applyMacros(promptItem.prompt, macroCtx).trim();
+    const system =
+      `${PHONE_CAST_HEADER}\n\n` +
+      `${composeMediaPrompt(behavior, body, lore)}\n\n` +
+      buildCastIoInstructions({ world, cap }) +
+      `\n[BEGIN JSON]`;
+
+    let raw = "";
+    try {
+      const res = await plugin.ai.chat({
+        profileId: profile.id,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: "[List the people now.]" },
+        ],
+        label: `로어북 인물 선별 (${world})`,
+      });
+      raw = (res.text ?? "").trim();
+    } catch (err) {
+      console.warn("[GGAI Stella] 로어북 인물 선별 실패:", err);
+      return { ok: false, added: 0, reason: "선별에 실패했습니다." };
+    }
+    const people = parseSnsCast(raw).slice(0, cap);
+
+    // 저장 — 생성 중 다른 저장이 있었을 수 있으니 다시 읽는다.
+    const fresh = await plugin.store.getPhoneAccounts();
+    const takenNames = new Set(
+      fresh.accounts.map((a) => a.name.trim().toLowerCase())
+    );
+    const takenHandles = new Set(
+      fresh.accounts
+        .map((a) => a.handle?.toLowerCase())
+        .filter((h): h is string => !!h)
+    );
+    const now = Date.now();
+    let added = 0;
+    for (const p of people) {
+      const name = p.name.trim();
+      if (!name || name.toLowerCase() === personaName.toLowerCase()) continue;
+      if (takenNames.has(name.toLowerCase())) continue;
+      const handle = p.handle ? normalizeHandle(p.handle) : "";
+      const useHandle = handle && !takenHandles.has(handle.toLowerCase()) ? handle : "";
+      fresh.accounts.push({
+        id: `acc_${uuidv4()}`,
+        kind: "extra",
+        tier: 2,
+        name,
+        ...(useHandle ? { handle: useHandle } : {}),
+        world,
+        followers: 80 + Math.floor(Math.random() * 300),
+        ...(p.persona ? { persona: p.persona } : {}),
+        firstSeen: now,
+        lastActive: 0,
+        postCount: 0,
+      });
+      takenNames.add(name.toLowerCase());
+      if (useHandle) takenHandles.add(useHandle.toLowerCase());
+      added++;
+    }
+    fresh.castScans = { ...(fresh.castScans ?? {}), [scenarioId]: now };
+    await plugin.store.savePhoneAccounts(fresh);
+    return { ok: true, added };
+  }
+
+  /** 스캔 기록만 남긴다 (훑을 자료가 없던 세계 — 매 배치 재시도 방지). */
+  private async markCastScanned(scenarioId: string): Promise<void> {
+    const fresh = await this.plugin.store.getPhoneAccounts();
+    fresh.castScans = { ...(fresh.castScans ?? {}), [scenarioId]: Date.now() };
+    await this.plugin.store.savePhoneAccounts(fresh);
+  }
+
+  /**
    * SNS 활동 1회 — 최근 플레이한 캐릭터 몇 명을 뽑아 각자의 최근 세션을 재료로
    * 게시글/답글을 **배치 1회 호출**(JSON)로 생성한다. 상한 = `snsPerRefresh`(기본 10).
    * 캐릭터 기억 우선순위 = 로그인 페르소나와의 세션 > 다른 세션 (스펙 원칙 1).
@@ -2316,10 +3201,26 @@ export class PhoneService {
     opts: { notify: boolean; reactToPostId?: string; reactedToReply?: boolean }
   ): Promise<void> {
     if (this.snsBusy) return;
+    // 리스트(v3) 게이트 — 팔로우한 세계가 하나도 없으면 피드는 조용하다.
+    // 사건 재료가 없는 채로 글을 만들게 하면 그게 곧 스토리 발명이 된다.
+    const activeList = this.activeSnsList();
+    if (!activeList || activeList.scenarioIds.length === 0) return;
     this.snsBusy = true;
     try {
       const plugin = this.plugin;
       const store = plugin.store;
+      // 로어북 인물 자동 등록 (§V3-4) — 아직 훑지 않은 세계 하나만, 배치당 1회.
+      // 명부에 없는 사람은 모델이 이름을 발명하게 되므로 재료 수집보다 먼저 한다.
+      if (plugin.data.phone?.snsCastScan !== false) {
+        const scanned = (await store.getPhoneAccounts().catch(() => null))
+          ?.castScans;
+        const pending = activeList.scenarioIds.find((id) => !scanned?.[id]);
+        if (pending) {
+          await this.scanLorebookCast(pending).catch((err) =>
+            console.warn("[GGAI Stella] 로어북 인물 스캔 실패:", err)
+          );
+        }
+      }
       // 상한 = 활동 총합 (게시글 + 댓글). 배치 1회 호출은 동일.
       const cap = Math.min(20, Math.max(1, plugin.data.phone?.snsPerRefresh ?? 10));
       const minNewPosts = Math.max(
@@ -2330,49 +3231,50 @@ export class PhoneService {
         0,
         Math.floor(plugin.data.phone?.snsNewAccountCap ?? 3)
       );
+      // 등급 1·2 비율 하한 (§V3-4) — 지시 + 엔진 강제(초과 엑스트라 폐기) 짝.
+      const namedRatioPct = Math.min(
+        100,
+        Math.max(0, Math.floor(plugin.data.phone?.snsNamedRatio ?? 70))
+      );
       // AI 사진 게시 허용 (v2 §5.2) — 끄면 프로토콜에서 photo 를 빼고 엔진도 무시.
       const allowPhoto = plugin.data.phone?.snsPhotoEnabled !== false;
       // 스텔라튜브 자동 시작 판정 (v2 §7.2) — 자동 감지 켬 + 튜브 켬 + 열린
       // 세션 + 진행 중 방송 없음일 때만 모델에게 판정을 맡긴다.
-      const tubeStartFile =
+      // 방송 자동 시작 판정 대상 = 지금 열려 있는 세션(그 세션이 방송 중이 아닐 때).
+      // 다른 세션의 방송 여부는 무관하다 (세션당 1개, 볼트 전역 제한 없음).
+      const openForTube =
         plugin.data.phone?.streamAutoDetect === true &&
         plugin.data.phone?.tubeEnabled !== false &&
-        !opts.reactToPostId &&
-        this.tubeLiveSessions.size === 0 &&
-        this.liveSessions.size === 0
+        !opts.reactToPostId
           ? this.firstOpenSessionFile()
           : null;
+      const tubeStartFile =
+        openForTube && !this.isSessionLive(openForTube) ? openForTube : null;
       // 방송 스트리머는 그 세션의 "장면 속 인물"만 될 수 있다 — 화면에 없는
-      // 딴 세계 인물이 스트리머로 뽑히면 안 된다(사용자 지적). 세션의 시나리오
-      // 이름을 구해 그 이름을 지목할 때만 캐릭터 스트리머로 인정, 아니면 페르소나.
-      let tubeSessionCharName: string | null = null;
-      if (tubeStartFile) {
-        try {
-          const s = await store.getSession(tubeStartFile);
-          const scId = s?.meta.scenarioId;
-          if (scId) {
-            const list = await store.getScenarios().catch(
-              (): Awaited<ReturnType<typeof store.getScenarios>> => []
-            );
-            tubeSessionCharName =
-              list
-                .find(
-                  (i) => i.scenario.data?.extensions?.stella?.id === scId
-                )
-                ?.scenario.data?.name?.trim() || null;
-          }
-        } catch {
-          /* 세션/시나리오 로드 실패 — 페르소나 스트리머로 폴백 */
-        }
-      }
+      // 딴 세계 인물도, 뷰어(페르소나)도 자동 경로의 스트리머가 될 수 없다
+      // (사용자 지적). 명부에서 못 찾으면 방송을 시작하지 않는다.
+      const tubeCast = tubeStartFile
+        ? await this.collectSceneCast(tubeStartFile).catch(() => null)
+        : null;
 
       // 재료 = 최근 세션 본문(설정 개수/양) + 본문에 걸린 활성 로어북 +
       // 최근 플레이 가중 캐릭터 로스터 10명(프로필) + 뷰어(페르소나) 목록.
       // 시나리오 = 세계이지 계정이 아니다: 작성자는 그 세계의 "인물"이다.
       const personaName = persona.name?.trim() || "User";
-      const { eventBlocks, rosterBlock, viewerBlock, charByName } =
-        await this.collectSnsMaterial(persona, personaName, profile);
+      const {
+        eventBlocks,
+        rosterBlock,
+        viewerBlock,
+        charByName,
+        hasNews,
+        consumed,
+      } = await this.collectSnsMaterial(persona, personaName, profile);
       if (eventBlocks.length === 0) return;
+      // 일상 축 비율 (v3) — 세션 사건과 무관한 생활글 비중. 진행분이 없으면
+      // 100%(잡담 모드): 새 플롯 사건을 발명하지 않고 일상·기존 이슈 반응만.
+      const dailyRatio = hasNews
+        ? Math.min(100, Math.max(0, Math.floor(plugin.data.phone?.snsDailyRatio ?? 70)))
+        : 100;
 
       // 최근 피드 발췌 (v2 §6.4) — 게시글 누적 기준 최신 창: 표시 순서
       // (붐업 반영) 상위 N개. 단, 댓글이 열린 글은 딱 둘 — 현 최상단 이슈
@@ -2456,29 +3358,50 @@ export class PhoneService {
               })
               .join("\n");
 
-      // 영속 계정 목록 (v2 §6.1) — 활동 많은 순 상위 30, 재등장 우선을 위해
-      // 모델에 준다. 페르소나 계정은 사칭 방지를 위해 제외.
+      // 영속 계정 목록 (v2 §6.1) — 페르소나 계정은 사칭 방지를 위해 제외.
+      // v3 §V3-4: **캐스트 명부**(등급 1·2 = 이 세계들의 진짜 사람들)와
+      // **엑스트라 목록**(등급 3)을 나눠 준다. 명부를 명시하지 않으면 모델이
+      // 이름을 스스로 찾아야 하고, 못 찾으면 새 엑스트라를 발명한다.
       const accountsFile = await store.getPhoneAccounts();
-      const topAccounts = [...accountsFile.accounts]
-        .filter((a) => a.kind !== "persona")
-        .sort(
-          (x, y) => y.postCount - x.postCount || y.lastActive - x.lastActive
-        )
-        .slice(0, 30);
-      const accountsBlock = topAccounts
-        .map((a) => {
-          const bits = [
-            a.handle ?? "",
-            a.name,
-            a.world ? `(${a.world})` : "",
-            `${a.followers} followers`,
-            a.kind === "press" || a.verified ? "[press/verified]" : "",
-            a.persona ? `— ${a.persona}` : "",
-          ]
-            .filter(Boolean)
-            .join(" ");
-          return `- ${bits}`;
-        })
+      const banned = new Set(activeList.bannedAccountIds ?? []);
+      const bannedWorlds = new Set(activeList.bannedScenarioIds ?? []);
+      const visible = accountsFile.accounts.filter(
+        (a) =>
+          a.kind !== "persona" &&
+          !banned.has(a.id) &&
+          !(a.scenarioId && bannedWorlds.has(a.scenarioId))
+      );
+      const line = (a: SnsAccount): string =>
+        `- ${[
+          a.handle ?? "(no handle yet)",
+          `— ${a.name}`,
+          a.world ? `(${a.world})` : "",
+          `${a.followers} followers`,
+          a.kind === "press" || a.verified ? "[press/verified]" : "",
+          a.persona ? `— ${a.persona}` : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}`;
+      const castLines = visible
+        .filter((a) => accountTier(a) <= 2)
+        .sort((x, y) => accountTier(x) - accountTier(y) || y.lastActive - x.lastActive)
+        .map(line);
+      // 계정이 아직 없는 메인 캐릭터도 명부에 올린다 — 첫 등장을 발명 대신
+      // 명부에서 고르게 해야 그 사람의 이름/세계가 그대로 계정이 된다.
+      const castNamed = new Set(visible.map((a) => a.name.trim().toLowerCase()));
+      for (const [key, author] of charByName) {
+        if (castNamed.has(key)) continue;
+        castLines.push(
+          `- (no account yet) — ${author.name}` +
+            (author.world ? ` (${author.world})` : "")
+        );
+      }
+      const castBlock = castLines.join("\n");
+      const extrasBlock = visible
+        .filter((a) => accountTier(a) === 3)
+        .sort((x, y) => y.postCount - x.postCount || y.lastActive - x.lastActive)
+        .slice(0, 30)
+        .map(line)
         .join("\n");
 
       // 앱 간 공유 허브 (§8.1) — 문자·진행 중 방송 등 피드 밖 소식(자기 앱 제외).
@@ -2501,11 +3424,18 @@ export class PhoneService {
       const system =
         `${PHONE_SNS_HEADER}\n\n` +
         `${behavior}\n` +
-        (accountsBlock
-          ? `\n[Known accounts on Stella Network — the SAME netizens keep ` +
-            `living here. REUSE them (refer by "account":"@handle") whenever ` +
-            `someone fitting exists; press/verified accounts only surface for ` +
-            `scale 4-5 issues.]\n${accountsBlock}\n`
+        (castBlock
+          ? `\n[THE CAST — the actual people of these worlds. These are who ` +
+            `this feed is about: pick posters and commenters from HERE first ` +
+            `and refer to them by "account":"@handle" (for someone with no ` +
+            `account yet, give their exact name and world and one will be ` +
+            `made for them). At least ${namedRatioPct}% of this batch must be ` +
+            `these people.]\n${castBlock}\n`
+          : "") +
+        (extrasBlock
+          ? `\n[Recurring extras — bystanders who already exist on the ` +
+            `network. Reuse these before inventing anyone new; press/verified ` +
+            `accounts only surface for scale 4-5 issues.]\n${extrasBlock}\n`
           : "") +
         (viewerBlock
           ? `\n[Viewers on Stella Network — persona accounts watching the feed. ` +
@@ -2518,8 +3448,8 @@ export class PhoneService {
             `character. A world may hold one person or many; treat each named ` +
             `person as their own individual. This is background for writing them, ` +
             `NOT public knowledge — no one else on the network has read these ` +
-            `profiles. About half of all activity should come from these named ` +
-            `people, each strictly in their own voice.]\n${rosterBlock}\n`
+            `profiles. Use it to voice the cast listed above in their own ` +
+            `voice.]\n${rosterBlock}\n`
           : "") +
         `\n[Recent events — the PRIVATE lived experience of the people in the ` +
         `worlds below. This is the raw material for what THOSE people (and only ` +
@@ -2554,7 +3484,16 @@ export class PhoneService {
             ? { viewerPostIdShort: viewerPost.id.slice(0, 8) }
             : {}),
           allowPhoto,
-          ...(tubeStartFile ? { tubeStart: true } : {}),
+          dailyRatioPct: dailyRatio,
+          namedRatioPct,
+          hasNews,
+          bystanderCap: Math.max(
+            0,
+            Math.floor(plugin.data.phone?.snsBystanderCap ?? 1)
+          ),
+          ...(tubeStartFile && tubeCast && tubeCast.names.length > 0
+            ? { tubeStart: { castNames: tubeCast.names } }
+            : {}),
         }) +
         (language
           ? `\n- Write ALL text (posts, comments, display names) in ${language}, ` +
@@ -2629,6 +3568,12 @@ export class PhoneService {
         charByName,
         personaName,
         newAccountCap,
+        bannedAccountIds: banned,
+        bannedScenarioIds: bannedWorlds,
+        // 배분 강제 (§V3-4) — 이번 배치에 허용되는 엑스트라 활동 수.
+        extraQuota: Math.floor(
+          (activities.length * (100 - namedRatioPct)) / 100
+        ),
       });
       engine.decayInactive();
       const addReply = (
@@ -2680,38 +3625,16 @@ export class PhoneService {
       for (const act of activities) {
         // 방송 시작 판정 (v2 §7.2) — 활동 상한과 무관, 배치당 1회.
         if (act.kind === "stream_start") {
-          if (tubeStartFile && !tubeStarted) {
-            tubeStarted = true;
-            const name = act.author.trim();
-            let streamer: SessionStreamFile["streamer"] | undefined;
-            // 스트리머 = 그 세션의 장면 속 인물(= 세션 시나리오)만 인정한다.
-            // 모델이 그 이름을 지목했을 때만 캐릭터 스트리머, 아니면 페르소나
-            // (화면에 없는 딴 세계 인물이 스트리머가 되는 것 방지 — 사용자 지적).
-            if (
-              tubeSessionCharName &&
-              name.toLowerCase() === tubeSessionCharName.toLowerCase()
-            ) {
-              const author = engine.resolveAuthor(
-                {
-                  account: act.account,
-                  author: name,
-                  handle: act.handle,
-                  world: act.world,
-                },
-                false
+          if (tubeStartFile && tubeCast && !tubeStarted) {
+            // 스트리머 = 장면 속 인물 명부에서 찾은 사람만. 못 찾으면 시작하지
+            // 않는다 — 페르소나 폴백은 수동 방송 버튼 전용이다(사용자 지적).
+            const streamer = tubeCast.resolve(act.author);
+            if (streamer) {
+              tubeStarted = true;
+              void this.startStream(tubeStartFile, streamer).catch((err) =>
+                console.warn("[GGAI Stella] 스텔라튜브 자동 시작 실패:", err)
               );
-              if (author) {
-                streamer = {
-                  kind: "character",
-                  ...(author.accountId ? { accountId: author.accountId } : {}),
-                  name: author.name,
-                };
-              }
             }
-            // streamer 미지정 = 로그인 페르소나 (수동 시작과 동일).
-            void this.startStream(tubeStartFile, streamer).catch((err) =>
-              console.warn("[GGAI Stella] 스텔라튜브 자동 시작 실패:", err)
-            );
           }
           continue;
         }
@@ -2851,6 +3774,20 @@ export class PhoneService {
       }
       await store.saveSnsFeed(fresh);
       if (engine.wasChanged()) await store.savePhoneAccounts(accountsFile);
+      // 사건 반영 북마크 전진 (v3) — 이번에 재료로 쓴 지점까지 소비 처리.
+      // 다음 갱신은 이 지점 이후의 새 진행분만 사건으로 본다(같은 장면 재소비 =
+      // SNS 가 세션을 앞지르던 원인).
+      if (consumed.size > 0) {
+        const map = { ...(plugin.data.snsProgress ?? {}) };
+        let moved = false;
+        for (const [file, nodeId] of consumed) {
+          if (map[file] !== nodeId) {
+            map[file] = nodeId;
+            moved = true;
+          }
+        }
+        if (moved) await plugin.savePluginData({ snsProgress: map });
+      }
       if (opts.notify) this.notifyIncoming("SNS 새 소식");
       // 자동 번역 (§4) — 켜져 있으면 이번 배치가 건드린 글만 바로 번역한다.
       if (this.isAutoTranslateOn()) {
@@ -2863,10 +3800,12 @@ export class PhoneService {
     }
   }
 
-  /** 자동 번역 켜짐 여부 (§4) — 번역 사용 + 자동 옵션 둘 다 켜야. */
+  /**
+   * 자동 번역 켜짐 여부 (§4) — 폰 화면 번역 사용 = 자동 번역(별도 옵션 없음).
+   * 기본 꺼짐: 켜지 않으면 폰은 번역 호출을 하지 않는다.
+   */
   isAutoTranslateOn(): boolean {
-    const tr = this.plugin.data.phone?.translation;
-    return tr?.enabled !== false && tr?.auto === true;
+    return this.plugin.data.phone?.translation?.enabled === true;
   }
 
   /**
@@ -2888,6 +3827,10 @@ export class PhoneService {
     rosterBlock: string;
     viewerBlock: string;
     charByName: Map<string, SnsAuthor>;
+    /** 이번 배치에 새 진행분(사건)이 있는가 — false 면 잡담 모드. */
+    hasNews: boolean;
+    /** 사건으로 소비한 세션 → 노드 id. 저장 성공 후 북마크를 여기로 옮긴다. */
+    consumed: Map<string, string>;
   }> {
     const store = this.plugin.store;
     const phone = this.plugin.data.phone;
@@ -2905,7 +3848,11 @@ export class PhoneService {
       Math.floor(phone?.snsBodyTokens ?? SNS_BODY_TOKENS)
     );
     const includeLore = phone?.snsIncludeLore !== false;
-    const excluded = new Set(phone?.snsExcludedScenarioIds ?? []);
+    // 리스트(v3) — 사건 재료는 리스트에 담은 세계에서만 온다. 밴은 인물 축
+    // 제외(등장 자체 금지)이고, 리스트 밖 인물도 답글·잡담으로는 등장한다.
+    const list = this.activeSnsList();
+    const listSet = new Set(list?.scenarioIds ?? []);
+    const excluded = new Set(list?.bannedScenarioIds ?? []);
 
     const scenarios = await store
       .getScenarios()
@@ -3009,16 +3956,27 @@ export class PhoneService {
       ];
     };
 
+    // ── 사건 재료는 리스트 안에서만 (v3) — 리스트에 담긴 세계가 참가한 세션만
+    //    장면·사건으로 첨부된다. 리스트 밖 세션은 재료로도 들어가지 않는다
+    //    (그래야 팔로우하지 않은 이야기가 피드로 새지 않는다).
+    const listPairs = allPairs.filter((p) =>
+      participantsOfPair(p).some((id) => listSet.has(id))
+    );
+
     // ── 확정 참가 — 가장 최근 세션의 참가자 무조건 + 남은 슬롯 score 가중 랜덤 ──
     const confirmedIds: string[] = [];
-    if (allPairs.length > 0) {
-      for (const id of participantsOfPair(allPairs[0])) {
+    if (listPairs.length > 0) {
+      for (const id of participantsOfPair(listPairs[0])) {
         if (confirmedIds.length >= confirmedCount) break;
-        confirmedIds.push(id);
+        if (listSet.has(id)) confirmedIds.push(id);
       }
     }
-    const fillCandidates = [...scById.keys()].filter(
-      (id) => (scoreById.get(id) ?? 0) > 0 && !confirmedIds.includes(id)
+    const fillCandidates = [...listSet].filter(
+      (id) =>
+        scById.has(id) &&
+        !excluded.has(id) &&
+        (scoreById.get(id) ?? 0) > 0 &&
+        !confirmedIds.includes(id)
     );
     confirmedIds.push(
       ...pickWeightedSample(
@@ -3030,71 +3988,96 @@ export class PhoneService {
 
     // ── 확정 참가자 블록 — 카드 설명 + 최근 세션 요약/본문 tail + 활성 로어북 ──
     const latestPairOf = (id: string) =>
-      allPairs.find((p) => participantsOfPair(p).includes(id));
+      listPairs.find((p) => participantsOfPair(p).includes(id));
     const eventBlocks: string[] = [];
     const usedSessions = new Map<string, string>(); // sessionFile → 먼저 첨부한 인물
+    // 이번 배치가 "사건"으로 소비한 세션 — 저장 성공 후 북마크를 여기로 옮긴다.
+    const consumed = new Map<string, string>(); // sessionFile → 소비한 노드 id
+    let hasNews = false;
+    const emptyBlock = {
+      text: "",
+      hasNews: false,
+      newsNodeId: undefined as string | undefined,
+    };
+    const takeBlock = (
+      sessionFile: string,
+      r: { text: string; hasNews: boolean; newsNodeId?: string }
+    ): string => {
+      if (r.newsNodeId) consumed.set(sessionFile, r.newsNodeId);
+      if (r.hasNews) hasNews = true;
+      return r.text;
+    };
     for (const id of confirmedIds) {
       const sc = scById.get(id);
       if (!sc) continue;
       registerWorld(sc);
       const pair = latestPairOf(id);
       if (!pair) continue;
-      const block = await this.buildParticipantBlock({
-        scenario: sc.scenario,
-        sessionFile: pair.item.sessionFile,
-        session: pair.item.session,
-        summaryBudget,
-        bodyBudget,
-        includeLore,
-        userName,
-        count,
-        usedSessions,
-        openFile,
-      }).catch(() => "");
+      const block = takeBlock(
+        pair.item.sessionFile,
+        await this.buildParticipantBlock({
+          scenario: sc.scenario,
+          sessionFile: pair.item.sessionFile,
+          session: pair.item.session,
+          summaryBudget,
+          bodyBudget,
+          includeLore,
+          userName,
+          count,
+          usedSessions,
+          openFile,
+        }).catch(() => emptyBlock)
+      );
       if (block) eventBlocks.push(block);
     }
 
     // ── 현재(가장 최근) 세션 보장 — 인물 확정과 무관하게 지금 장면은 무조건
     //    재료에 들어간다. 호스트가 인물 제외(세계관 시나리오)라도 장면·로어북은
     //    첨부하되 인물 귀속(작성자 노트)만 뺀다 (프로필 축 ≠ 세션 컨텍스트 축).
-    if (allPairs.length > 0 && !usedSessions.has(allPairs[0].item.sessionFile)) {
-      const anchor = allPairs[0];
+    if (listPairs.length > 0 && !usedSessions.has(listPairs[0].item.sessionFile)) {
+      const anchor = listPairs[0];
       registerWorld(anchor.sc);
-      const block = await this.buildParticipantBlock({
-        scenario: anchor.sc.scenario,
-        sessionFile: anchor.item.sessionFile,
-        session: anchor.item.session,
-        summaryBudget,
-        bodyBudget,
-        includeLore,
-        userName,
-        count,
-        usedSessions,
-        openFile,
-        personKnown: !isExcludedPerson(anchor.sc),
-      }).catch(() => "");
-      if (block) eventBlocks.unshift(block);
-    }
-
-    // ── 랜덤 세션 (설정 켬) — 확정에 안 붙은 세션 중 무작위, 토큰은 확정의 50% ──
-    if (phone?.snsRandomSessions === true) {
-      const pool = allPairs.filter((p) => !usedSessions.has(p.item.sessionFile));
-      for (let i = 0; i < SNS_RANDOM_SESSION_COUNT && pool.length > 0; i++) {
-        const pair = pool.splice(Math.floor(Math.random() * pool.length), 1)[0];
-        registerWorld(pair.sc);
-        const block = await this.buildParticipantBlock({
-          scenario: pair.sc.scenario,
-          sessionFile: pair.item.sessionFile,
-          session: pair.item.session,
-          summaryBudget: Math.floor(summaryBudget / 2),
-          bodyBudget: Math.max(100, Math.floor(bodyBudget / 2)),
+      const block = takeBlock(
+        anchor.item.sessionFile,
+        await this.buildParticipantBlock({
+          scenario: anchor.sc.scenario,
+          sessionFile: anchor.item.sessionFile,
+          session: anchor.item.session,
+          summaryBudget,
+          bodyBudget,
           includeLore,
           userName,
           count,
           usedSessions,
           openFile,
-          personKnown: !isExcludedPerson(pair.sc),
-        }).catch(() => "");
+          personKnown: !isExcludedPerson(anchor.sc),
+        }).catch(() => emptyBlock)
+      );
+      if (block) eventBlocks.unshift(block);
+    }
+
+    // ── 랜덤 세션 (설정 켬) — 확정에 안 붙은 세션 중 무작위, 토큰은 확정의 50% ──
+    if (phone?.snsRandomSessions === true) {
+      const pool = listPairs.filter((p) => !usedSessions.has(p.item.sessionFile));
+      for (let i = 0; i < SNS_RANDOM_SESSION_COUNT && pool.length > 0; i++) {
+        const pair = pool.splice(Math.floor(Math.random() * pool.length), 1)[0];
+        registerWorld(pair.sc);
+        const block = takeBlock(
+          pair.item.sessionFile,
+          await this.buildParticipantBlock({
+            scenario: pair.sc.scenario,
+            sessionFile: pair.item.sessionFile,
+            session: pair.item.session,
+            summaryBudget: Math.floor(summaryBudget / 2),
+            bodyBudget: Math.max(100, Math.floor(bodyBudget / 2)),
+            includeLore,
+            userName,
+            count,
+            usedSessions,
+            openFile,
+            personKnown: !isExcludedPerson(pair.sc),
+          }).catch(() => emptyBlock)
+        );
         if (block) eventBlocks.push(block);
       }
     }
@@ -3135,7 +4118,12 @@ export class PhoneService {
       })
       .join("\n");
 
-    return { eventBlocks, rosterBlock, viewerBlock, charByName };
+    return { eventBlocks, rosterBlock, viewerBlock, charByName, hasNews, consumed };
+  }
+
+  /** 지금 열려 있는 세션 파일 (없으면 null) — 폰 뷰가 방송을 고를 때 쓴다. */
+  openSessionFile(): string | null {
+    return this.firstOpenSessionFile();
   }
 
   /** 열려 있는 세션 호스트 뷰의 첫 세션 파일 (없으면 null). */
@@ -3181,6 +4169,12 @@ export class PhoneService {
    * 확정 참가자(인물) 블록 v2 (§6.5) — 카드 설명 + 최근 세션 요약 tail +
    * 본문 tail + 그 본문 기준 활성 로어북 전부(상시 + 키워드 매칭, 절단 없음).
    * 같은 세션이 이미 다른 참가자로 첨부됐으면 본문/요약은 중복 첨부하지 않는다.
+   *
+   * 본문은 두 갈래로 나뉜다 (v3 사건/일상 축):
+   *  - **배경**(북마크까지) = 모순되는 글을 쓰지 않기 위한 참고. 이미 지난
+   *    갱신에 반영됐으므로 새 사건으로 다루면 안 된다.
+   *  - **새 사건**(북마크 이후 진행분) = 이번 배치에서만 뉴스가 되는 부분.
+   *    진행이 없으면 이 갈래가 비고, 배치는 잡담 모드가 된다.
    */
   private async buildParticipantBlock(opts: {
     scenario: StellaScenario;
@@ -3198,7 +4192,7 @@ export class PhoneService {
      * 장면·로어북은 첨부하되 작성자 귀속 노트를 뺀다.
      */
     personKnown?: boolean;
-  }): Promise<string> {
+  }): Promise<{ text: string; newsNodeId?: string; hasNews: boolean }> {
     const { scenario, sessionFile, count, userName } = opts;
     const world = (scenario.data.name ?? "").trim();
     const parts: string[] = [`### World: ${world}`];
@@ -3234,8 +4228,20 @@ export class PhoneService {
       }
     }
 
-    const body = spansToText(buildSpans(session, session.meta.activeLeafId)).trim();
+    const full = spansToText(buildSpans(session, session.meta.activeLeafId));
+    // 새 진행분 = 북마크 이후. 배경은 그 앞부분만 — 겹쳐 붙이지 않는다.
+    const news = newTextSinceMark(
+      session,
+      this.plugin.data.snsProgress?.[sessionFile]
+    ).trim();
+    const background = (
+      news ? full.slice(0, Math.max(0, full.length - news.length)) : full
+    ).trim();
+    const body = background || full.trim();
     const tail = trimToTokens(body, opts.bodyBudget, count, "tail");
+    const newsTail = news
+      ? trimToTokens(news, opts.bodyBudget, count, "tail")
+      : "";
     const dupOwner = opts.usedSessions.get(sessionFile);
     if (dupOwner) {
       parts.push(
@@ -3262,9 +4268,19 @@ export class PhoneService {
       }
       if (tail) {
         parts.push(
-          `What ${world}'s people just lived through (PRIVATE — only those ` +
-            `present know this; anyone else learns it only if someone posts it):` +
-            `\n${tail}`
+          `[Where ${world}'s people stand right now — BACKGROUND ONLY. The ` +
+            `feed already lived through this; do NOT treat it as news or post ` +
+            `about it again. It is here so nobody contradicts their own ` +
+            `situation. PRIVATE — only those present know it.]\n${tail}`
+        );
+      }
+      if (newsTail) {
+        parts.push(
+          `[JUST HAPPENED to ${world}'s people — the only genuinely new ` +
+            `event this batch. PRIVATE: only those who were there know it, ` +
+            `and only THEY may post about it, in the slice they would ` +
+            `actually make public. Everyone else learns it only if one of ` +
+            `them posts it.]\n${newsTail}`
         );
       }
       opts.usedSessions.set(sessionFile, world);
@@ -3278,7 +4294,7 @@ export class PhoneService {
         session
       ).catch((): StellaLorebook[] => []);
       if (books.length > 0) {
-        const scene = tail || body;
+        const scene = [tail, newsTail].filter(Boolean).join("\n") || body;
         const matched = matchLorebookEntries(books, {
           recentMessages: [scene],
           activeText: scene,
@@ -3289,7 +4305,11 @@ export class PhoneService {
       }
     }
 
-    return parts.join("\n");
+    return {
+      text: parts.join("\n"),
+      hasNews: !!newsTail && !dupOwner,
+      newsNodeId: session.meta.activeLeafId,
+    };
   }
 
   /**
@@ -4167,6 +5187,106 @@ function parseTubeReaction(raw: string): {
     streamState: p.streamState === "closing" ? "closing" : "on",
     chat,
   };
+}
+
+/**
+ * 로어북 인물 선별 응답 파싱 (§V3-4) — `[{name, handle, persona}]` 를 관대하게
+ * 읽는다. 형식이 깨졌으면 빈 배열(등록 없음).
+ */
+function parseSnsCast(
+  raw: string
+): Array<{ name: string; handle?: string; persona?: string }> {
+  const start = raw.indexOf("[");
+  const end = raw.lastIndexOf("]");
+  if (start < 0 || end <= start) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw.slice(start, end + 1));
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const str = (v: unknown): string | undefined =>
+    typeof v === "string" && v.trim() ? v.trim() : undefined;
+  const out: Array<{ name: string; handle?: string; persona?: string }> = [];
+  for (const p of parsed) {
+    if (!p || typeof p !== "object") continue;
+    const pp = p as Record<string, unknown>;
+    const name = str(pp.name);
+    if (!name) continue;
+    out.push({
+      name,
+      ...(str(pp.handle) ? { handle: str(pp.handle)! } : {}),
+      ...(str(pp.persona) ? { persona: str(pp.persona)! } : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * 방송 시작 판정 응답 파싱 (§7.2 자동 경로) — 실패/애매하면 null 이고, null 은
+ * "방송 아님"으로 취급된다(오작동보다 침묵이 낫다).
+ */
+function parseStreamDetect(
+  raw: string
+): { live: boolean; streamer?: string } | null {
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const p = parsed as Record<string, unknown>;
+  const streamer =
+    typeof p.streamer === "string" && p.streamer.trim()
+      ? p.streamer.trim()
+      : undefined;
+  return { live: p.live === true, ...(streamer ? { streamer } : {}) };
+}
+
+/**
+ * SNS 북마크 이후 새로 붙은 본문 = "이번에 새로 벌어진 일" (없으면 "").
+ *
+ * SNS 가 세션을 앞지르던 원인은 갱신마다 **같은 장면**을 새 사건으로 다시
+ * 먹였기 때문이다. 여기서 잘라낸 새 진행분만 사건 재료가 되고, 그 앞은 "이미
+ * 반영된 배경"으로 따로 붙는다. 북마크가 없으면(첫 관측) 뉴스 없음 —
+ * 북마크만 남기고 다음 진행분부터 사건이 된다.
+ */
+function newTextSinceMark(
+  session: Parameters<typeof buildSpans>[0],
+  markNodeId: string | undefined
+): string {
+  const leafId = session.meta.activeLeafId;
+  if (!markNodeId || markNodeId === leafId) return "";
+  const current = spansToText(buildSpans(session, leafId));
+  const textAt = (nodeId: string) => {
+    try {
+      return spansToText(buildSpans(session, nodeId));
+    } catch {
+      return null;
+    }
+  };
+  const path = pathToLeaf(session, leafId);
+  // 1) 북마크가 활성 경로에 있으면 그 지점 이후 전부가 새 진행분.
+  if (path.some((n) => n.id === markNodeId)) {
+    const prior = textAt(markNodeId);
+    if (prior !== null && current.startsWith(prior)) {
+      return current.slice(prior.length);
+    }
+  }
+  // 2) 재생성·분기 갈아타기로 북마크가 경로 밖이거나 앞부분이 수정됐으면,
+  //    마지막 노드가 더한 만큼만 새 것으로 본다 (통짜 재소비 방지).
+  if (path.length >= 2) {
+    const prior = textAt(path[path.length - 2].id);
+    if (prior !== null && current.startsWith(prior)) {
+      return current.slice(prior.length);
+    }
+  }
+  return "";
 }
 
 /** 모델 응답에서 SNS 활동 JSON 배열을 관대하게 파싱한다 (실패는 빈 배열). */

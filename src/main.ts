@@ -21,7 +21,6 @@ import {
   VIEW_TYPE_SIDEBAR,
 } from "./constants";
 import { AIService } from "./services/ai-service";
-import { installFocusForensics } from "./services/focus-forensics";
 import { TranslationService } from "./services/translation-service";
 import { LorebookPlusService } from "./services/lorebook-plus-service";
 import { LorebookGenService } from "./services/lorebook-gen-service";
@@ -36,6 +35,7 @@ import { PhoneService } from "./services/phone-service";
 import { ProService } from "./services/pro-service";
 import { registerPhoneExtension } from "./extensions/phone-extension";
 import { registerLorebookGenExtension } from "./extensions/lorebook-gen-extension";
+import { registerQuickReplyExtension } from "./extensions/quick-reply-extension";
 import type { PhonePluginData } from "./types/phone";
 import { PhoneOverlayModal } from "./views/phone-view";
 import {
@@ -91,6 +91,7 @@ import {
   canRetargetSessionView,
   getSessionHostLeaves,
   isSessionHostView,
+  runAutoQuickRepliesEverywhere,
   SESSION_HOST_VIEW_TYPES,
 } from "./views/session-host";
 import { SessionView, type SessionViewCommand } from "./views/session-view";
@@ -148,12 +149,20 @@ export interface StellaPluginData {
   proFocusPins?: string[];
   /** 분기(노드) 화면 번역 표시 토글 — 전역 영속(다시 열어도 유지). */
   branchShowTranslation?: boolean;
+  /** 세션창 빠른 답장(QR) 바 펼침 상태 — 전역 UI 선호, 다시 열어도 유지. */
+  quickReplyBarOpen?: boolean;
   /** 세션별 마지막 읽던 위치 — 보던 노드 기준 앵커. key = sessionFile. 재실행 복원용. */
   sessionAnchor?: Record<string, SessionScrollAnchor>;
   /** 세션별 안 읽은 AI 응답 — 보고 있지 않을 때 생성이 끝나면 쌓이고, 세션을 보면 지워진다. key = sessionFile. */
   sessionUnread?: Record<string, SessionUnread>;
   /** 선채팅(P1) 발화 예약 — key = sessionFile, 값 = 다음 발화 예정 시각(지터). 스케줄러가 관리. */
   proactiveSchedule?: Record<string, ProactiveScheduleEntry>;
+  /**
+   * SNS 사건 반영 북마크 — key = sessionFile, 값 = SNS 가 이미 "사건"으로 소비한
+   * 노드 id. 이 지점 이후의 새 진행분만 다음 갱신의 새 사건이 된다(같은 장면이
+   * 매 갱신마다 새 사건으로 재소비돼 SNS 가 세션을 앞지르는 것 방지).
+   */
+  snsProgress?: Record<string, string>;
   /** 우측 디테일 뷰 UI 상태(섹션 접힘 등) 영속. */
   detailUi?: {
     basic?: Record<string, unknown>;
@@ -330,9 +339,6 @@ export default class StellaEnginePlugin extends Plugin {
     // 모바일 홈버튼 바 높이를 키보드 없는 순간에 측정해 고정한다(세션 툴바 여백용).
     this.installHomeBarInsetTracker();
 
-    // [임시 진단] 입력 포커스 소실 추적 — GGAI/focus-log.txt 에 기록. 원인 확정 후 제거.
-    installFocusForensics(this);
-
     // 3. AI service (Core 미설치 시에도 객체는 만들고 isAvailable=false)
     this.ai = new AIService(this.app);
     this.ai.start();
@@ -475,10 +481,10 @@ export default class StellaEnginePlugin extends Plugin {
       name: "유령 탭 정리",
       callback: () => this.reconcileStellaLeaves(),
     });
-    // 선채팅 수동 트리거 — P1 검증용 임시 명령. 스케줄러가 들어오면 유지 여부 재검토.
+    // 선채팅 수동 트리거 — 스케줄러(예약 발화)와 별개로 "지금 한 통" 받는 정식 경로.
     this.addCommand({
       id: "proactive-chat-once",
-      name: "선채팅 받아보기 (테스트)",
+      name: "지금 선채팅 받기",
       callback: async () => {
         const sessionFile = this.getActiveOrLastSessionFile();
         if (!sessionFile) {
@@ -521,6 +527,13 @@ export default class StellaEnginePlugin extends Plugin {
       } else if (this.data.installOnboardingShown !== true) {
         void this.savePluginData({ installOnboardingShown: true });
       }
+      // "옵시디언 시작 시" 자동 실행 QR — 복원된 세션창이 자리를 잡은 뒤에 돈다.
+      // (레이아웃 준비 직후엔 지연 로딩 탭이 아직 실체가 없어 세션창을 못 찾는다.)
+      this.registerInterval(
+        window.setTimeout(() => {
+          void runAutoQuickRepliesEverywhere(this.app.workspace, "executeOnStartup");
+        }, 1500)
+      );
       // 의존 플러그인(개인 PRO 등)에 "엔진 로드 완료" 신호 — BRAT/hot-reload 로
       // 엔진만 리로드되면 새 인스턴스가 휴면으로 시작하고 옛 인스턴스의 설정 패널·
       // 라우팅이 통째로 사라진다. window 이벤트는 의존 플러그인의 리스너가 살아남아
@@ -568,6 +581,11 @@ export default class StellaEnginePlugin extends Plugin {
           delete map[file];
           patch.proactiveSchedule = map;
         }
+        if (this.data.snsProgress?.[file] !== undefined) {
+          const map = { ...this.data.snsProgress };
+          delete map[file];
+          patch.snsProgress = map;
+        }
         if (Object.keys(patch).length > 0) void this.savePluginData(patch);
       })
     );
@@ -594,6 +612,13 @@ export default class StellaEnginePlugin extends Plugin {
           delete map[oldFile];
           map[newFile] = prevSchedule;
           patch.proactiveSchedule = map;
+        }
+        const prevSnsProgress = this.data.snsProgress?.[oldFile];
+        if (prevSnsProgress !== undefined) {
+          const map = { ...this.data.snsProgress };
+          delete map[oldFile];
+          map[newFile] = prevSnsProgress;
+          patch.snsProgress = map;
         }
         if (Object.keys(patch).length > 0) void this.savePluginData(patch);
       })
@@ -988,6 +1013,12 @@ export default class StellaEnginePlugin extends Plugin {
       "stella:lorebook-gen",
       this.isExtensionEnabled("stella:lorebook-gen"),
       () => registerLorebookGenExtension(this)
+    );
+    // QR 자동 실행 — 버튼 편집기의 "자동 실행 시점" 이 실제로 도는 자리.
+    this.syncExtensionResource(
+      "stella:quick-reply",
+      this.isExtensionEnabled("stella:quick-reply"),
+      () => registerQuickReplyExtension(this)
     );
     // 정규식 치환 설정 — 치환 자체는 planSessionRequest 가 isExtensionEnabled 로 게이트.
     this.syncExtensionResource(
@@ -1424,7 +1455,7 @@ export default class StellaEnginePlugin extends Plugin {
     // 제목 AI 생성.
     withSession("session-generate-title", "세션: 제목 AI 생성", (f) =>
       void (async () => {
-        new Notice("제목 생성 중…");
+        // 진행 안내는 Core 가 label + 모델명으로 띄운다 (CLAUDE.md 7).
         const r = await generateSessionTitleNow(this, f);
         new Notice(r.ok ? `제목 생성: ${r.title}` : `제목 생성 실패: ${r.error}`);
       })()

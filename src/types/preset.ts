@@ -35,6 +35,10 @@ export interface MediaPromptLibrary {
   phoneSns?: MediaPromptItem[];
   /** 스텔라 폰 — 스텔라튜브 시청자 채팅 (v2). */
   phoneTube?: MediaPromptItem[];
+  /** 스텔라 폰 — 방송 시작 판정 (자동 감지 경로). */
+  phoneStreamDetect?: MediaPromptItem[];
+  /** 스텔라 폰 — 로어북에서 SNS 계정을 가질 인물 선별 (v3 계정 등급). */
+  phoneCast?: MediaPromptItem[];
   /** 작가노트 전용 프레이밍 프롬프트 — 작가노트를 {{MAIN}} 자리에 감싼다. */
   authorNote?: MediaPromptItem[];
   /** 집필 프로 — 한국어 입력을 영어판 문체를 이어받은 영어 문단으로 변환. */
@@ -189,6 +193,12 @@ export interface ProActiveSettings {
   glossaryPromptId?: string;
 }
 
+/** 빠른 답장(QR) — 이 세션에서 켜 둔 세트. 상세는 `QR 스펙.md`. */
+export interface QuickReplyActiveSettings {
+  /** 활성 세트 id 목록 (StellaQuickReplySet.meta.id 참조), 표시 순서 = 배열 순서. */
+  setIds?: string[];
+}
+
 export interface ActiveSettings {
   modelProfileId?: string;
   params?: PromptPresetParams;
@@ -198,6 +208,8 @@ export interface ActiveSettings {
   summarize?: SummaryActiveSettings;
   /** 로어북 확장 — 키워드/AI 매칭 스위치와 AI 선별 옵션. */
   lorebookPlus?: LorebookPlusActiveSettings;
+  /** 빠른 답장(QR) — 이 세션에서 켜 둔 세트. */
+  quickReply?: QuickReplyActiveSettings;
   /** 집필 프로(PRO) — 한→영 집필 변환 설정. PRO 활성 환경에서만 쓰인다. */
   pro?: ProActiveSettings;
   /** NAI 형식으로 보내기 — 텍스트 컴플리션 전송 시 역할 토큰으로 감싼다. */

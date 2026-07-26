@@ -2,6 +2,10 @@ import type StellaEnginePlugin from "../main";
 import type { GenerationProfileLite } from "../services/ai-service";
 import type { CustomContextContribution } from "../services/extension-registry";
 import {
+  consumeQrInjections,
+  listQrInjections,
+} from "../services/qr-injections";
+import {
   defaultLorebookEntry,
   defaultLorebookMeta,
   type StellaLorebook,
@@ -419,6 +423,31 @@ export async function planSessionRequest(
         depth: c.depth ?? 4,
         role: c.role ?? "system",
         order: c.order ?? 100,
+      })),
+    });
+  }
+
+  // QR `/inject` — 빠른 답장이 "다음 생성에 얹어라"로 심은 텍스트. 확장 custom
+  // 슬롯과 **같은 기계**(가상 로어북 상시 엔트리)를 쓴다 — QR 전용 삽입 경로를
+  // 새로 만들지 않는다. 미리보기(dryRun)는 읽기만 하고, 실제 전송에서만
+  // ephemeral 주입이 소비된다(그래서 미리보기 = 전송본 byte 동일).
+  const injections = opts.dryRun
+    ? listQrInjections(sessionFile)
+    : consumeQrInjections(sessionFile);
+  if (injections.length) {
+    lorebooks.push({
+      meta: defaultLorebookMeta("sillytavern", "빠른 답장 주입", "stella-qr-inject"),
+      entries: injections.map((inj) => ({
+        ...defaultLorebookEntry("sillytavern"),
+        uid: `qr-inject-${inj.id}`,
+        name: inj.id,
+        keys: [],
+        content: inj.text,
+        constant: true,
+        position: inj.position,
+        depth: inj.depth,
+        role: inj.role,
+        order: 100,
       })),
     });
   }

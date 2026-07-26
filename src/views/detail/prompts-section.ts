@@ -60,6 +60,8 @@ export class PromptsSection {
   private continueAnchor = false;
   private continueAnchorCheckbox: HTMLInputElement | null = null;
   private savingSelf = false;
+  /** 이름/내용/가공 텍스트에 blur 전 미저장 편집이 있는지 — flush() 대상. */
+  private promptDirty = false;
 
   constructor(
     container: HTMLElement,
@@ -492,6 +494,9 @@ export class PromptsSection {
       const info = panel.createDiv({ cls: "ggai-prompt-edit-info" });
       info.createSpan({ text: "marker 항목 — identifier: " });
       info.createEl("code", { text: item.identifier });
+      if (item.identifier === "chatHistory") {
+        this.appendHistoryRoleField(panel, item, idx);
+      }
       this.appendMarkerWrapField(panel, item, idx);
       return;
     }
@@ -520,9 +525,8 @@ export class PromptsSection {
     ta.value = item.content ?? "";
     ta.rows = 6;
     ta.placeholder = "프롬프트 내용...";
-    ta.addEventListener("blur", () =>
-      void this.handleContentEdit(idx, ta.value)
-    );
+    ta.addEventListener("input", () => this.handleContentLive(idx, ta.value));
+    ta.addEventListener("blur", () => void this.flush());
 
     this.appendDeleteRow(panel, item, idx);
   }
@@ -606,14 +610,46 @@ export class PromptsSection {
     }) as HTMLInputElement;
     input.type = "text";
     input.value = name;
-    input.addEventListener("blur", () =>
-      void this.handleNameEdit(idx, input.value)
-    );
+    // 글자마다 모델 반영, 저장은 blur/flush 에서 (타이핑 중 저장하면 detail-view
+    // refresh 가 입력칸을 재렌더로 날림). blur 미발생 화면 이탈은 flush() 가 방어.
+    input.addEventListener("input", () => this.handleNameLive(idx, input.value));
+    input.addEventListener("blur", () => {
+      void this.flush();
+      this.renderBody(); // 접힌 row 이름 표시 갱신 (포커스는 이미 떠남).
+    });
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
         input.blur();
       }
+    });
+  }
+
+  /**
+   * chatHistory 마커 — 소설모드에서 지난 본문을 어느 롤로 보낼지 선택. 기본 assistant.
+   */
+  private appendHistoryRoleField(
+    panel: HTMLElement,
+    item: import("../../types/prompt").StellaPromptMarkerItem,
+    idx: number
+  ): void {
+    const row = panel.createDiv({ cls: "ggai-prompt-edit-row" });
+    row.createSpan({ cls: "ggai-prompt-edit-label", text: "소설 본문 롤" });
+    const sel = row.createEl("select", { cls: "ggai-prompt-edit-select" });
+    const current = item.historyRole ?? "assistant";
+    for (const [value, label] of [
+      ["assistant", "assistant (기본)"],
+      ["user", "user"],
+    ] as const) {
+      const opt = sel.createEl("option", { value, text: label });
+      if (current === value) opt.selected = true;
+    }
+    sel.addEventListener("change", () =>
+      void this.handleHistoryRoleEdit(idx, sel.value as "user" | "assistant")
+    );
+    panel.createDiv({
+      cls: "ggai-prompt-wrap-hint",
+      text: "소설모드에서만 적용 — 지금까지의 본문을 어느 역할로 보낼지. 챗 모드는 각 메시지가 제 역할대로 나가므로 영향 없습니다.",
     });
   }
 
@@ -642,9 +678,8 @@ export class PromptsSection {
     ta.rows = 3;
     ta.value = item.wrap ?? "";
     ta.placeholder = `예: (관련 설정: ${macro})`;
-    ta.addEventListener("blur", () =>
-      void this.handleMarkerWrapEdit(idx, ta.value, false)
-    );
+    ta.addEventListener("input", () => this.handleMarkerWrapLive(idx, ta.value));
+    ta.addEventListener("blur", () => void this.flush());
     taWrap.createDiv({
       cls: "ggai-prompt-wrap-hint",
       text:
@@ -898,16 +933,45 @@ export class PromptsSection {
     this.renderBody();
   }
 
-  private async handleNameEdit(idx: number, rawName: string): Promise<void> {
-    if (!this.activePreset || !this.activePresetFile) return;
+  /** 항목 이름 라이브 반영 — 모델만 갱신 + dirty 표시. 저장/재렌더는 안 함. */
+  private handleNameLive(idx: number, rawName: string): void {
+    if (!this.activePreset) return;
     const name = rawName.trim();
     if (!name || name === this.activePreset.prompts[idx].name) return;
     this.activePreset.prompts[idx] = {
       ...this.activePreset.prompts[idx],
       name,
     };
+    this.promptDirty = true;
+  }
+
+  /** 항목 내용 라이브 반영 — 모델만 갱신 + dirty 표시. */
+  private handleContentLive(idx: number, content: string): void {
+    if (!this.activePreset) return;
+    const item = this.activePreset.prompts[idx];
+    if (item.kind !== "text" || content === item.content) return;
+    this.activePreset.prompts[idx] = { ...item, content };
+    this.promptDirty = true;
+  }
+
+  /** 마커 본문 가공 텍스트 라이브 반영 — 모델만 갱신 + dirty 표시. */
+  private handleMarkerWrapLive(idx: number, wrap: string): void {
+    if (!this.activePreset) return;
+    const item = this.activePreset.prompts[idx];
+    if (item.kind !== "marker" || item.wrap === wrap) return;
+    this.activePreset.prompts[idx] = { ...item, wrap };
+    this.promptDirty = true;
+  }
+
+  /**
+   * 대기 중인 텍스트 편집(이름/내용/가공)을 확정 저장한다. blur 와 함께,
+   * detail-view 가 탭 전환/세션 전환/뷰 종료/앱 백그라운드에서 호출한다 —
+   * blur 가 오지 않는 모바일 화면 이탈에도 유실되지 않게 하는 방어선.
+   */
+  async flush(): Promise<void> {
+    if (!this.promptDirty || !this.activePreset || !this.activePresetFile) return;
+    this.promptDirty = false;
     await this.save();
-    this.renderBody();
   }
 
   private async handleMarkerWrapEdit(
@@ -928,6 +992,23 @@ export class PromptsSection {
     if (rerender) this.renderBody();
   }
 
+  private async handleHistoryRoleEdit(
+    idx: number,
+    role: "user" | "assistant"
+  ): Promise<void> {
+    if (!this.activePreset || !this.activePresetFile) return;
+    const item = this.activePreset.prompts[idx];
+    if (item.kind !== "marker" || (item.historyRole ?? "assistant") === role) {
+      return;
+    }
+    const next = { ...item };
+    // 기본값(assistant)은 필드를 아예 두지 않아 파일을 깨끗하게 유지.
+    if (role === "assistant") delete next.historyRole;
+    else next.historyRole = role;
+    this.activePreset.prompts[idx] = next;
+    await this.save();
+  }
+
   private async handleRoleEdit(idx: number, role: PromptRole): Promise<void> {
     if (!this.activePreset || !this.activePresetFile) return;
     const item = this.activePreset.prompts[idx];
@@ -935,17 +1016,6 @@ export class PromptsSection {
     this.activePreset.prompts[idx] = { ...item, role };
     await this.save();
     this.renderBody();
-  }
-
-  private async handleContentEdit(
-    idx: number,
-    content: string
-  ): Promise<void> {
-    if (!this.activePreset || !this.activePresetFile) return;
-    const item = this.activePreset.prompts[idx];
-    if (item.kind !== "text" || content === item.content) return;
-    this.activePreset.prompts[idx] = { ...item, content };
-    await this.save();
   }
 
   private async handleChoiceChange(

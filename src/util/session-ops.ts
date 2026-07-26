@@ -1,7 +1,19 @@
 import { TFile, TFolder, Vault, normalizePath } from "obsidian";
 import type { ActiveSettings } from "../types/preset";
-import type { SessionMode, StellaSession } from "../types/session";
+import type { SessionMode, SessionNode, StellaSession } from "../types/session";
 import { createBlankSession, type SessionSeed } from "./new-session";
+
+/**
+ * 씨드로는 만들 수 없는 내용(임포트한 대화 트리 등)을 **생성 시점의 첫 쓰기에** 함께
+ * 담기 위한 값. 만들어 놓고 두 번째 저장으로 채우면, 그 사이에 무엇이든 실패했을 때
+ * 빈 세션만 남는다(실리태번 채팅 임포트가 텅 빈 세션을 남기던 경로).
+ */
+export interface SessionPrefill {
+  nodes: Record<string, SessionNode>;
+  rootId: string;
+  activeLeafId: string;
+  personaFile?: string;
+}
 
 /**
  * 시나리오 폴더 안에 새 세션을 만든다.
@@ -17,7 +29,8 @@ export async function createNewSession(
   name: string,
   seedText: SessionSeed = "",
   initial?: ActiveSettings,
-  mode: SessionMode = "novel"
+  mode: SessionMode = "novel",
+  prefill?: SessionPrefill
 ): Promise<{ folder: string; sessionFile: string; session: StellaSession }> {
   const safe = sanitizeName(name) || "세션";
   const sessionsRoot = normalizePath(`${scenarioFolder}/SESSIONS`);
@@ -27,6 +40,12 @@ export async function createNewSession(
   await vault.createFolder(folder);
 
   const session = createBlankSession(name, scenarioId, seedText, initial, mode);
+  if (prefill) {
+    session.nodes = prefill.nodes;
+    session.meta.rootId = prefill.rootId;
+    session.meta.activeLeafId = prefill.activeLeafId;
+    if (prefill.personaFile) session.meta.personaFile = prefill.personaFile;
+  }
   const sessionFile = `${folder}/session.json`;
   await vault.create(sessionFile, JSON.stringify(session, null, 2));
   return { folder, sessionFile, session };

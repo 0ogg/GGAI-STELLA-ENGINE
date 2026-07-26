@@ -10,6 +10,7 @@
  */
 
 import type { View, Workspace, WorkspaceLeaf } from "obsidian";
+import type { AutoExecuteFlagKey } from "../types/quick-reply";
 import {
   VIEW_TYPE_CHAT_SESSION,
   VIEW_TYPE_PRO_SESSION,
@@ -26,6 +27,47 @@ export interface SessionHostView extends View {
   scrollToNode(nodeId: string): boolean;
   /** AI 생성(스트리밍) 진행 중 여부 — 생성 중인 탭을 다른 세션으로 갈아끼우면 잠금·로딩 상태가 새 세션에 새어든다. */
   isGenerating(): boolean;
+  /**
+   * 이 시점에 자동 실행할 QR 버튼을 돌린다 (QR 바 위임).
+   * 자동 실행은 **열려 있는 세션창이 있을 때만** 돈다 — 버튼이 넣는 텍스트/생성은
+   * 그 뷰의 입력·본문 경로를 타기 때문이다(뷰 없이 도는 별도 경로를 만들지 않는다).
+   */
+  runAutoQuickReplies?(trigger: AutoExecuteFlagKey): Promise<void>;
+}
+
+/** 열려 있는 모든 세션창에서 자동 실행 QR 을 돌린다 (옵시디언 시작 시점용). */
+export async function runAutoQuickRepliesEverywhere(
+  workspace: Workspace,
+  trigger: AutoExecuteFlagKey
+): Promise<void> {
+  for (const leaf of getSessionHostLeaves(workspace)) {
+    const view = leaf.view;
+    if (isSessionHostView(view) && typeof view.runAutoQuickReplies === "function") {
+      await view.runAutoQuickReplies(trigger);
+    }
+  }
+}
+
+/**
+ * `sessionFile` 세션이 열려 있으면 그 뷰의 자동 실행 QR 을 돌린다.
+ * 열려 있지 않으면 조용히 아무것도 하지 않는다.
+ */
+export async function runAutoQuickRepliesFor(
+  workspace: Workspace,
+  sessionFile: string,
+  trigger: AutoExecuteFlagKey
+): Promise<void> {
+  for (const leaf of getSessionHostLeaves(workspace)) {
+    const view = leaf.view;
+    if (
+      isSessionHostView(view) &&
+      view.getSessionFile() === sessionFile &&
+      typeof view.runAutoQuickReplies === "function"
+    ) {
+      await view.runAutoQuickReplies(trigger);
+      return;
+    }
+  }
 }
 
 /**

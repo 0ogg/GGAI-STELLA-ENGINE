@@ -93,6 +93,7 @@ export class DetailView extends ItemView {
     if (document.visibilityState === "hidden") {
       this.paramsSection?.flush();
       this.scenarioSection?.flush();
+      void this.promptsSection?.flush();
     } else {
       void this.refreshVisibleSectionsFromDisk();
     }
@@ -120,6 +121,7 @@ export class DetailView extends ItemView {
       this.captureVisibleUiState();
       this.paramsSection?.flush();
       this.scenarioSection?.flush();
+      void this.promptsSection?.flush();
     });
     this.registerDomEvent(window, "focus", () => void this.refreshVisibleSectionsFromDisk());
 
@@ -248,6 +250,7 @@ export class DetailView extends ItemView {
     this.captureVisibleUiState();
     this.paramsSection?.flush();
     this.scenarioSection?.flush();
+    await this.promptsSection?.flush();
   }
 
   // ─── 렌더 ────────────────────────────────────────────────────────────
@@ -467,6 +470,7 @@ export class DetailView extends ItemView {
     this.captureVisibleUiState();
     this.paramsSection?.flush();
     this.scenarioSection?.flush();
+    void this.promptsSection?.flush();
     this.activeTab = next;
     this.renderTabHeaders();
     this.renderTabContent();
@@ -529,6 +533,7 @@ export class DetailView extends ItemView {
     this.captureVisibleUiState();
     this.paramsSection?.flush();
     this.scenarioSection?.flush();
+    void this.promptsSection?.flush();
     this.activeSessionFile = next;
     this.reloadSeq++;
     this.renderTabHeaders();

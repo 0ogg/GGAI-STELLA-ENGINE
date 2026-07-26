@@ -22,18 +22,18 @@ import type { SessionTranslations } from "../../types/media";
 type BranchMode = "active" | "map" | "favorites";
 type MapSortMode = "active" | "created";
 
-const LABEL_MAX = 10; // ?몃뱶 移대뱶 ?쇰꺼 理쒕? 湲몄씠 (?ъ슜???붿껌: ??吏㏐쾶)
+const LABEL_MAX = 10; // 노드 카드 라벨 최대 길이 (사용자 요청: 더 짧게)
 
 /**
- * BranchSection ???곗륫 ?ъ씠?쒕컮 [遺꾧린] ??
+ * BranchSection — 우측 디테일뷰 [분기] 탭. 세 모드: active(활성 경로) / map(전체 트리) / favorites(즐겨찾기).
  *
- * ??紐⑤뱶:
- *  - "active": ?쒖꽦 寃쎈줈留??몃줈 ?쇱옄 + ?몃뱶 ?대┃ ???뷀뀒??移대뱶 ?몃씪??
- *  - "tree":   ?꾩껜 ?몃━瑜??ㅼ뿬?곌린 媛怨꾨룄濡? 源딆씠 = padding-left, ASCII ?몃━ ?쇱씤.
+ * 모드별:
+ *  - "active": 활성 경로만 세로 목록 + 노드 클릭 시 상세카드 인라인.
+ *  - "map": 전체 트리를 들여쓰기 깊이로(깊이 = padding-left), ASCII 트리 라인. "favorites": 즐겨찾기한 노드만 카드 목록(검색 가능).
  *
- * ?꾧뎄諛? [?쒖꽦 寃쎈줈 | ?꾩껜 ?몃━] ?좉?, 寃??input, [??泥섏쓬] [???꾩옱] [???? ?ㅻ퉬.
+ * 툴바: [활성 경로 | 전체 | 즐겨찾기] 모드 토글, [현재 노드] [번역] 버튼(즐겨찾기 모드 제외), 즐겨찾기 모드에서만 검색 input.
  *
- * ?뷀뀒??移대뱶 (??紐⑤뱶 怨듯넻): 蹂몃Ц 誘몃━蹂닿린 + [?????몃뱶濡??대룞] + ??+ ?먯떇 紐⑸줉 ???먰봽.
+ * 상세카드(모든 모드 공통): 본문 미리보기 + [이 노드로 이동] + 스크롤/삽화생성/즐겨찾기 버튼 + 위험 동작 목록(하위 라인 삭제).
  */
 export class BranchSection {
   private root: HTMLElement;
@@ -85,7 +85,7 @@ export class BranchSection {
     })();
   }
 
-  /** session-changed ?대깽?????몃━留??щ젋??(寃??input 蹂댁〈). */
+  /** session-changed 이벤트 — 트리만 새로 읽는다(검색 input 은 보존). */
   async refresh(): Promise<void> {
     if (!this.activeSessionFile) return;
     this.session = await this.plugin.store.getSession(this.activeSessionFile);
@@ -113,7 +113,7 @@ export class BranchSection {
       : null;
   }
 
-  // ??? render ?????????????????????????????????????????????
+  // ── render ──
 
   private render(): void {
     this.root.empty();
@@ -145,7 +145,7 @@ export class BranchSection {
     const bar = this.root.createDiv({ cls: "ggai-branch-toolbar" });
     this.toolbarEl = bar;
 
-    // 紐⑤뱶 ?좉?
+    // 모드 토글
     const modeWrap = bar.createDiv({ cls: "ggai-branch-mode-toggle" });
     const activeBtn = modeWrap.createEl("button", {
       cls: "ggai-branch-mode-btn",
@@ -166,7 +166,7 @@ export class BranchSection {
     mapBtn.addEventListener("click", () => this.switchMode("map"));
     favBtn.addEventListener("click", () => this.switchMode("favorites"));
 
-    // ?ㅻ퉬 踰꾪듉
+    // 툴 버튼
     if (this.mode !== "favorites") {
     const nav = bar.createDiv({ cls: "ggai-branch-nav" });
     const curBtn = nav.createEl("button", { cls: "ggai-btn ggai-btn-small", title: "\uD604\uC7AC \uB178\uB4DC\uB85C" });
@@ -195,7 +195,7 @@ export class BranchSection {
     });
     }
 
-    // 寃??(?꾩껜 ?몃━ / 利먭꺼李얘린 紐⑤뱶)
+    // 검색 입력 — 즐겨찾기 모드에서만 표시(트리 모드는 확대/정렬 컨트롤을 따로 쓴다).
     if (this.mode === "favorites") {
       const search = bar.createEl("input", {
         cls: "ggai-branch-search",
@@ -265,7 +265,7 @@ export class BranchSection {
     }
   }
 
-  // ??? 紐⑤뱶 3: 利먭꺼李얘린 ?됰㈃ 由ъ뒪???????????????????????
+  // ── 모드 3: 즐겨찾기 화면 리스트 ──
 
   private renderFavorites(parent: HTMLElement, session: StellaSession): void {
     const favorites = getFavoritedNodes(session);
@@ -361,7 +361,7 @@ export class BranchSection {
     });
   }
 
-  // ??? 紐⑤뱶 1: ?쒖꽦 寃쎈줈 ?????????????????????????????????
+  // ── 모드 1: 활성 경로 ──
 
   private renderActivePath(parent: HTMLElement, session: StellaSession): void {
     const path = pathToLeaf(session, session.meta.activeLeafId);
@@ -379,7 +379,7 @@ export class BranchSection {
     });
   }
 
-  // ??? 紐⑤뱶 2: ?꾩껜 ?몃━ (?ㅼ뿬?곌린 媛怨꾨룄) ???????????????
+  // ── 모드 2: 전체 트리 (들여쓰기 깊이) ──
 
   private renderTreeMap(parent: HTMLElement, session: StellaSession): void {
     // \uB300\uCCB4 \uCCAB \uBA54\uC2DC\uC9C0(alternate greetings)\uB294 \uD615\uC81C \uB8E8\uD2B8(parent==null)\uB85C \uC313\uC778\uB2E4.
@@ -787,7 +787,7 @@ export class BranchSection {
     });
   }
 
-  // ??? ?≪뀡 ??????????????????????????????????????????????
+  // ── 액션 ──
 
   private async handleJumpTo(nodeId: string): Promise<void> {
     const file = this.activeSessionFile;
@@ -830,7 +830,7 @@ export class BranchSection {
       new Notice("GGAI Core 가 설치/활성화되어 있지 않습니다.");
       return;
     }
-    new Notice("삽화 생성 중…");
+    // 진행 안내는 Core 가 label + 모델명으로 띄운다 (CLAUDE.md 7).
     const result = await this.plugin.illustration.generateForNode(file, nodeId);
     if (!result.ok) {
       new Notice("삽화 생성 실패: " + (result.errors[0] ?? "알 수 없는 오류"));
@@ -849,7 +849,7 @@ export class BranchSection {
     }
   }
 
-  // ??? ?ㅻ퉬/寃??????????????????????????????????????????
+  // ── 도구 / 위험 동작 ──
 
   private async handleDeleteDescendants(nodeId: string): Promise<void> {
     const file = this.activeSessionFile;
@@ -940,10 +940,9 @@ export class BranchSection {
     return matches;
   }
 
-  /** matchIds 媛 ?덈뒗 寃쎌슦, 洹??몃뱶???먯넀 以묒뿉 留ㅼ튂媛 ?덉쑝硫?true (?꾪꽣留곸슜 ?먯넀 蹂댁〈). */
 }
 
-// ??? helpers ??????????????????????????????????????????????
+// ── helpers ──
 
 const MAP_NODE_W = 86;
 const MAP_NODE_H = 40;

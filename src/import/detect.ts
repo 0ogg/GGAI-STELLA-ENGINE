@@ -5,6 +5,8 @@
 export type ImportFormat =
   | "sillytavern-worldinfo"
   | "sillytavern-prompt-preset"
+  | "sillytavern-quick-reply"
+  | "sillytavern-regex"
   | "novelai-lorebook"
   | "novelai-scenario"
   | "novelai-story"
@@ -26,6 +28,7 @@ export type ImportFormat =
  *      `prompts` 배열 + `prompt_order` 배열 (양쪽 다 필수).
  *      `chat_completion_source` 는 일부 프리셋에만 있어 옵셔널로 둔다.
  *      이 두 키 조합은 캐릭터카드/로어북/월드인포 어느 것과도 겹치지 않는다.
+ *  - ST 정규식:      `findRegex` 문자열 (파일 하나 = 스크립트 하나)
  */
 export function detectFormat(data: unknown): ImportFormat {
   if (!data || typeof data !== "object") return "unknown";
@@ -58,6 +61,24 @@ export function detectFormat(data: unknown): ImportFormat {
   // ST 프롬프트 프리셋 — prompts[] + prompt_order[] 가 동시에 있으면 충분.
   if (Array.isArray(d.prompts) && Array.isArray(d.prompt_order)) {
     return "sillytavern-prompt-preset";
+  }
+
+  // ST 빠른 답장(QR) 세트 — qrList[] 는 다른 어느 포맷과도 겹치지 않는다.
+  if (Array.isArray(d.qrList)) {
+    return "sillytavern-quick-reply";
+  }
+
+  // 버튼 **1개짜리** QR 파일 — ST 는 버튼 하나만 내보내면 세트 껍데기 없이
+  // 버튼 객체를 통째로 저장한다(예: `🏭 서사공장.qr.json`). message + contextList
+  // 조합은 다른 포맷에 없으므로 이것으로 판별하고, 임포트에서 세트 1개로 감싼다.
+  if (typeof d.message === "string" && Array.isArray(d.contextList)) {
+    return "sillytavern-quick-reply";
+  }
+
+  // ST 정규식 스크립트 — 파일 하나 = 스크립트 하나(ST 가 그렇게 내보낸다).
+  // `findRegex` 는 다른 어느 포맷에도 없는 키다.
+  if (typeof d.findRegex === "string") {
+    return "sillytavern-regex";
   }
 
   if (d.entries && typeof d.entries === "object" && !Array.isArray(d.entries)) {

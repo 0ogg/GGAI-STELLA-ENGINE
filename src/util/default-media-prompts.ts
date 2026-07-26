@@ -17,6 +17,8 @@ export type MediaPromptBucket =
   | "phoneExtra"
   | "phoneSns"
   | "phoneTube"
+  | "phoneStreamDetect"
+  | "phoneCast"
   | "authorNote"
   | "proConvert"
   | "translationGlossary";
@@ -217,7 +219,16 @@ export const DEFAULT_MEDIA_PROMPTS: Record<MediaPromptBucket, MediaPromptItem[]>
       title: "Default",
       prompt: `# Stella Network Activity Generation
 
-Stella Network is the mysterious parallel social feed where the player's story worlds bleed together into one stream. It exists for a single reason: to show the ripples of what just happened in those worlds. You generate how PEOPLE across those worlds are posting, fighting, thirsting, lying, and spiraling right now.
+Stella Network is the mysterious parallel social feed where the player's story worlds bleed together into one stream. You generate how PEOPLE across those worlds are posting, fighting, thirsting, lying, and spiraling right now.
+
+## THIS IS THEIR LIFE, NOT A NEWS DESK (READ THIS FIRST)
+Most of this feed is people living their lives off-screen — the hours the player never sees. Lunch, a delayed train, a haircut they regret, gym soreness, a song stuck in their head, sniping at a friend, a 3am confession, a pet photo, an argument with a stranger from another world about something trivial. **That off-screen life is the point of this feed.** It is what makes these people feel like they exist when nobody is playing their story.
+
+Story events are the *minority* ingredient, and they are strictly bounded:
+- Only what the input explicitly marks as **JUST HAPPENED** is news. Anything marked as background has already been absorbed by this feed — treat it as the situation these people are living in, never as something to post about now.
+- **Never invent, advance, resolve, or escalate a plot event.** The stories move only when the player plays them. If you write the next chapter here, you have broken the app.
+- Nobody writes a report on someone else's business. A person may post about an event only if they lived it; everyone else reacts to POSTS, not to events they never witnessed. Treating a stranger's life like a show you are watching and reviewing is the single worst failure mode here.
+- The one exception is **fallout**: a person whose own day got hit by the visible spillover — sirens all night, a street sealed off, the shop closed, a rumor going around the office — may post about that. They are complaining about their day, not covering a story: they have no idea what actually happened and cannot name anyone involved. Keep these rare, and never let one turn into commentary on the people in the event.
 
 ## THE FEED IS RAW INTERNET, NOT A ROUNDUP OF TAKES
 This is a living social network, with all the social gravity and mess that implies.
@@ -240,14 +251,15 @@ A poster with no inner life is a failure. Before writing any line, know WHO this
 If you could swap two posters' lines and nothing feels off, you've failed. Each voice must be unmistakably theirs.
 
 ## GROUNDING — ANCHORED, BUT ONLY IN WHAT EACH PERSON COULD KNOW (STRICT)
-The attached events are the PRIVATE lived experience of the people who were there — raw material for what THOSE people might post about their own lives, NOT a broadcast the whole network watched. Ground every activity, but ground it in what its author could actually know:
+The attached scenes are the PRIVATE lived experience of the people who were there — raw material for what THOSE people might post about their own lives, NOT a broadcast the whole network watched. Ground every activity, but ground it in what its author could actually know:
+- **A character's own life does not stop between scenes.** Writing what they eat, buy, complain about, or miss while off-screen is not inventing plot — it is the daily-life material this feed runs on. What you must not do is move their story forward: no new confrontations, revelations, injuries, deaths, confessions, or relationship changes.
 - **The people who lived it** (named characters and bystanders from that world's events) post from the inside: what they saw, felt, survived, or can't stop thinking about — but only the slice they'd actually put in public. They do not narrate their own secrets or private moments for a crowd.
 - **Everyone else** (other worlds, uninvolved accounts) has NOT seen the events and has NOT read anyone's profile. They know ONLY what has actually been posted to the feed, plus at most a vague public rumor. They react to what a POST says — never to session details, backstory, or lore they had no way to witness. An outsider quoting private specifics they couldn't have learned is the exact failure to kill: the drama-audience-watching-a-play voice.
 - A reaction you could paste under any post ("omg so cool") is still a failure — but the cure is a specific PERSON with a specific stake, NOT omniscient knowledge of what happened off-feed.
 - Plausible adjacent knowledge welcome (the cafe next to the incident, the classmate who heard shouting) — but as public exposure, never as private insight.
 
 ## WHO IS POSTING
-- NAMED characters from the events are the stars: about HALF of all activities come from named characters, posting/commenting in their own established voice about what they themselves just experienced.
+- THE CAST is the star of this feed: most activity comes from the people on the cast list (the named characters of the attached worlds and the people registered from their lore), posting/commenting in their own established voice — mostly about their own ordinary day, and only about an event if they lived it. Pick from that list before inventing anyone; extras exist to fill the room around them, not to hold the room.
 - If a world's title is a PERSON's name, that person is its main character and posts under that exact name. Only worlds titled after a place/story have no account of their own.
 - The rest are the **actual population of the internet**, not just polite bystanders. The roster includes: creeps, perverts, edgelords, doomers, true-crime obsessives, conspiracy theorists, degenerate accounts, shock-posters, horny anons, morbid rubberneckers, armchair experts, clout-chasers, stalker-ish super-fans, contrarians, concern-trolls, peacemakers, and ordinary classmates/coworkers/fans/haters. Cast the feed with the real menagerie of an online comment section, weighted toward whatever types the events would naturally attract (a scandal draws horndogs and moralists; a murder draws true-crime hounds and grief vultures; a cute scene draws softies and the one guy who has to be weird about it).
 - The player ({{user}}) never posts. You never write as them.
@@ -285,7 +297,7 @@ Stella Network is not a normal social network. It is a liminal space where the p
 - A character's voice is a promise to the reader. Writing a hardened criminal's post in prim phrasing, a degenerate's reaction in sanitized prose, or a grieving widow's in meme-speak breaks that promise and breaks the fiction. Stay true to who each person is, completely, the way a committed actor would.
 
 ## NAME & HANDLE RULES (STRICT)
-- The known-accounts list (when provided) is this feed's existing population — when someone fitting already exists there, post AS that account (reuse their handle exactly) instead of inventing a new person. The rules below govern NEW accounts only.
+- The cast list and the extras list (when provided) are this feed's existing population — when someone fitting already exists there, post AS that account (reuse their handle exactly) instead of inventing a new person. Someone on the cast list marked "(no account yet)" gets their first account here: use their exact name and world. The rules below govern NEW accounts only.
 - Every author has a "name" (display name) and a "handle" (@id).
 - Handles must look like REAL random users — the kind a person actually picks for themselves, not a label describing the post or the role. They must NOT announce content or role. FORBIDDEN: "익명의 목격자", "목격자1", "지나가던행인", "@witness", "@anonymous", "@user123", "@fan_club", "@horny_account_69", or any handle/name declaring "I am an extra/witness/fan/pervert".
 - The shape of a believable handle: a short, unpredictable mix of lowercase letters, numbers, dots, underscores, or hyphens — often a nickname, initials, a birthdate, an obscure fandom reference, or keyboard-mash gibberish that *that specific user* once chose and stuck with. Display names are ordinary nicknames or real-ish names.
@@ -328,6 +340,59 @@ Whatever the broadcast shows — sex, violence, crime, threats, a stream the per
 
 ## VIEWERS COUNT
 - Estimate the live viewer count as a natural drift from the previous count — it rises when the scene gets dramatic or clippable, sinks when it drags. No teleporting.`,
+    },
+  ],
+
+  phoneStreamDetect: [
+    {
+      id: "builtin:phoneStreamDetect:1",
+      title: "Default",
+      prompt: `# Broadcast Detection
+
+A scene from the player's story mentioned something broadcast-related. Read the scene and decide ONE thing: is a character in this scene actually live-streaming to an audience at this very moment?
+
+## BE STRICT — SILENCE IS THE DEFAULT ANSWER
+A false alarm hijacks the player's story with a broadcast that never happened. Most mentions are NOT a live broadcast:
+- Someone talks about a stream, quotes one, or complains about a streamer → no.
+- Someone watches, clips, or reacts to another person's broadcast → no.
+- A broadcast is planned, promised, remembered, or already over → no.
+- A TV/radio/announcement plays in the background with no character running it → no.
+- The word appears figuratively or in an unrelated sense → no.
+
+Say yes only when a specific person in this scene has a camera rolling and an audience watching, right now, in the present moment of the text.
+
+## WHO IS THE STREAMER
+- The streamer is the character in the story who started and is running the broadcast — the one whose camera it is. Use the reference material (character sheets, lore) to tell who is who in the scene; side characters from the lore count as long as they are present in the scene.
+- Name them EXACTLY as the scene writes their name.
+- The player's own persona is the audience of this app, never the streamer. If the scene shows the player's persona broadcasting, that is for them to start by hand — answer no.
+- If you cannot name the broadcaster from the scene with confidence, answer no.`,
+    },
+  ],
+
+  phoneCast: [
+    {
+      id: "builtin:phoneCast:1",
+      title: "Default",
+      prompt: `# Who lives in this world
+
+Below is the reference material for one world of the story: its description and its lore entries. Find the PEOPLE in it — the individuals who could open a social-media account and post about their own life.
+
+## WHAT COUNTS AS A PERSON
+- A named individual with a life of their own: a character sheet in the lore, a side character, a rival, a shopkeeper, a family member.
+- Groups ("the guild", "House Verel"), places, items, systems, rules, timelines, and terminology are NOT people. Skip them.
+- If an entry describes a role held by no specific named person, skip it.
+- Someone mentioned only once in passing still counts if they have a name and a life; a title with no name does not.
+
+## HOW TO WRITE THEM
+- Take the name exactly as the material writes it.
+- Give each one a handle they would plausibly pick themselves — short, latin letters, lowercase, no spaces.
+- Write one short line about who they are and how they would post: their role, their temperament, the register of their voice. This memo is the only thing the feed will remember about them, so make it usable.
+
+{{lorebook}}
+
+{{main}}
+
+Cast:`,
     },
   ],
 

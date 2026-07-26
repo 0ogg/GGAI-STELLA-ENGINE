@@ -51,9 +51,11 @@ import {
   confirmDeleteUser,
   copyScenarioWithPrompt,
   createAndOpenSession,
+  exportLorebook,
   exportPromptPreset,
-  openGroupCreator,
+  exportScenarioCard,
   openSessionByPath,
+  populateCreateMenu,
   promptNewLorebook,
   promptNewScenario,
   promptNewUser,
@@ -65,7 +67,14 @@ import { PromptSetEditorSection } from "./detail/prompt-set-editor-section";
 import { UserEditorSection } from "./user-editor-section";
 import { ScenarioEditorSection } from "./scenario-editor-section";
 import { LorebookEditorSection } from "./lorebook-editor-section";
-import { ConfirmModal } from "./modals";
+import { QuickReplyEditorSection } from "./quick-reply-editor-section";
+import {
+  createQuickReply,
+  describeQuickReply,
+  type StellaQuickReply,
+} from "../types/quick-reply";
+import type { QuickReplyListItem } from "../util/scan-quick-replies";
+import { ConfirmModal, PromptModal } from "./modals";
 
 export type DashboardTab =
   | "home"
@@ -74,13 +83,21 @@ export type DashboardTab =
   | "gallery"
   | "user"
   | "lorebook"
-  | "prompt";
+  | "prompt"
+  | "quickReply";
 
 /** 대시보드 내부 편집 페이지 종류. */
-export type EditorKind = "user" | "prompt" | "scenario" | "lorebook";
+export type EditorKind =
+  | "user"
+  | "prompt"
+  | "scenario"
+  | "lorebook"
+  | "quickReply";
 export interface EditorRoute {
   kind: EditorKind;
   file: string;
+  /** quickReply 전용 — 편집할 버튼의 세트 내 id. */
+  itemId?: number;
 }
 
 /** 대시보드 내부 라우트 — 뒤로가기 스택 한 칸. */
@@ -204,7 +221,13 @@ export class DashboardView extends ItemView {
     | PromptSetEditorSection
     | ScenarioEditorSection
     | LorebookEditorSection
+    | QuickReplyEditorSection
     | null = null;
+
+  /** 빠른 답장(QR) 탭 — 세트 목록 + 접힌 세트 + 드래그 상태. */
+  private quickReplySets: QuickReplyListItem[] = [];
+  private qrCollapsed = new Set<string>();
+  private qrDragSource: { setFile: string; id: number } | null = null;
 
   /** 대시보드 내부 뒤로가기 스택. */
   private navStack: DashRoute[] = [];
@@ -263,6 +286,7 @@ export class DashboardView extends ItemView {
     await this.refreshUserData();
     await this.refreshLoreData();
     await this.refreshPromptData();
+    await this.refreshQuickReplyData();
     this.renderPage();
 
     const debouncedScenarios = debounce(
@@ -328,6 +352,12 @@ export class DashboardView extends ItemView {
     this.registerEvent(
       this.store.on("prompt-presets-changed", () => {
         void this.refreshPromptData().then(() => this.refreshSurface());
+      })
+    );
+
+    this.registerEvent(
+      this.store.on("quick-replies-changed", () => {
+        void this.refreshQuickReplyData().then(() => this.refreshSurface());
       })
     );
 
@@ -426,6 +456,8 @@ export class DashboardView extends ItemView {
         return "scenario";
       case "lorebook":
         return "lorebook";
+      case "quickReply":
+        return "quickReply";
     }
   }
 
@@ -560,6 +592,12 @@ export class DashboardView extends ItemView {
     this.promptPresets = await this.store.getPromptPresets().catch(() => []);
   }
 
+  private async refreshQuickReplyData(): Promise<void> {
+    this.quickReplySets = await this.store
+      .getQuickReplySets()
+      .catch((): QuickReplyListItem[] => []);
+  }
+
   /** 최근 플레이한 시나리오 몇 개의 세션만 모아 최신순 상위 N 개 + 카드 썸네일 결정. */
   private async loadRecentSessions(): Promise<RecentSessionItem[]> {
     const candidates = this.scenarios
@@ -622,6 +660,7 @@ export class DashboardView extends ItemView {
       { tab: "user", label: "페르소나", icon: "user" },
       { tab: "lorebook", label: "로어북", icon: "book-open" },
       { tab: "prompt", label: "프롬프트", icon: "list-tree" },
+      { tab: "quickReply", label: "빠른 답장", icon: "zap" },
     ];
     for (const def of defs) {
       const el = tabs.createDiv({ cls: "ggai-dash-tab" });
@@ -664,6 +703,7 @@ export class DashboardView extends ItemView {
       "user",
       "lorebook",
       "prompt",
+      "quickReply",
     ] as DashboardTab[]) {
       const el = this.tabEls[tab];
       if (!el) continue;
@@ -815,6 +855,10 @@ export class DashboardView extends ItemView {
         this.renderPromptToolbar(page);
         this.listEl = page.createDiv({ cls: "ggai-dash-prompt-list" });
         break;
+      case "quickReply":
+        this.renderQuickReplyToolbar(page);
+        this.listEl = page.createDiv({ cls: "ggai-dash-qr-tree" });
+        break;
     }
     this.renderListOnly();
   }
@@ -853,6 +897,9 @@ export class DashboardView extends ItemView {
         break;
       case "prompt":
         this.renderPromptList();
+        break;
+      case "quickReply":
+        this.renderQuickReplyTree();
         break;
     }
   }
@@ -978,6 +1025,418 @@ export class DashboardView extends ItemView {
     ).open();
   }
 
+  // ─── 빠른 답장(QR) 탭 — 세트=폴더 / 버튼=항목 트리 ────────
+  //
+  // 드롭다운으로 세트를 고르게 하지 않는다(실리태번 편집기가 복잡한 주원인).
+  // 전부 펼쳐 두고 드래그로 옮긴다. 상세는 `QR 스펙.md`.
+
+  private renderQuickReplyToolbar(page: HTMLElement): void {
+    const bar = page.createDiv({ cls: "ggai-dash-toolbar" });
+    const addBtn = this.renderToolbarButton(bar, "folder-plus", "새 세트", () =>
+      void this.createQuickReplySet()
+    );
+    addBtn.addClass("mod-cta");
+    this.renderToolbarButton(bar, "download", "가져오기", () =>
+      runImportPicker(this.plugin)
+    );
+    bar.createSpan({
+      cls: "ggai-dash-qr-tip",
+      text: "드래그로 세트에 넣거나 순서를 바꿉니다",
+    });
+  }
+
+  private renderQuickReplyTree(): void {
+    const body = this.listEl;
+    if (!body || this.activeTab !== "quickReply") return;
+    body.empty();
+
+    if (this.quickReplySets.length === 0) {
+      this.renderEmpty(
+        body,
+        "빠른 답장 세트가 없습니다. [새 세트] 또는 [가져오기]로 시작하세요."
+      );
+      return;
+    }
+
+    for (const item of this.quickReplySets) {
+      const collapsed = this.qrCollapsed.has(item.setFile);
+
+      // ── 폴더 줄 (세트) ──
+      const folder = body.createDiv({ cls: "ggai-qr-folder" });
+      const chev = folder.createSpan({ cls: "ggai-qr-folder-chev" });
+      setIcon(chev, collapsed ? "chevron-right" : "chevron-down");
+      const fIcon = folder.createSpan({ cls: "ggai-qr-folder-icon" });
+      setIcon(fIcon, collapsed ? "folder" : "folder-open");
+      folder.createSpan({
+        cls: "ggai-qr-folder-name",
+        text: item.set.name,
+      });
+      folder.createSpan({
+        cls: "ggai-qr-folder-meta",
+        text: `버튼 ${item.set.qrList.length}`,
+      });
+      const menuBtn = folder.createEl("button", {
+        cls: "ggai-qr-folder-menu clickable-icon",
+      });
+      setIcon(menuBtn, "more-vertical");
+      menuBtn.setAttr("aria-label", "세트 메뉴");
+      menuBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.quickReplySetMenu(item).showAtMouseEvent(e);
+      });
+      this.makePressable(folder, () => {
+        if (collapsed) this.qrCollapsed.delete(item.setFile);
+        else this.qrCollapsed.add(item.setFile);
+        this.renderQuickReplyTree();
+      });
+      this.pressMenu.attachContextMenu(
+        folder,
+        (e) => this.quickReplySetMenu(item).showAtMouseEvent(e),
+        (x, y) => this.quickReplySetMenu(item).showAtPosition({ x, y })
+      );
+      // 폴더 줄 = "이 세트에 넣기" 드롭 타깃 (맨 뒤에 추가).
+      this.bindQuickReplyDrop(folder, item, null);
+
+      if (collapsed) continue;
+
+      if (item.set.qrList.length === 0) {
+        const empty = body.createDiv({
+          cls: "ggai-qr-item ggai-qr-item-empty",
+          text: "버튼이 없습니다 — 세트 메뉴에서 추가하세요",
+        });
+        this.bindQuickReplyDrop(empty, item, null);
+        continue;
+      }
+
+      // ── 항목 줄 (버튼) ──
+      for (const qr of item.set.qrList) {
+        const row = body.createDiv({ cls: "ggai-qr-item" });
+        row.draggable = true;
+        const grip = row.createSpan({ cls: "ggai-qr-item-grip" });
+        setIcon(grip, "grip-vertical");
+        const icon = row.createSpan({ cls: "ggai-qr-item-icon" });
+        setIcon(icon, qr.icon || "message-square");
+        row.createSpan({
+          cls: "ggai-qr-item-name",
+          text: qr.label || "이름 없는 버튼",
+        });
+        row.createSpan({
+          cls: "ggai-qr-item-tag",
+          text: describeQuickReply(qr),
+        });
+        const go = row.createSpan({ cls: "ggai-qr-item-chev" });
+        setIcon(go, "chevron-right");
+
+        this.makePressable(row, () =>
+          this.navigateToQuickReplyEditor(item.setFile, qr.id)
+        );
+        this.pressMenu.attachContextMenu(
+          row,
+          (e) => this.quickReplyItemMenu(item, qr).showAtMouseEvent(e),
+          (x, y) => this.quickReplyItemMenu(item, qr).showAtPosition({ x, y })
+        );
+        this.bindQuickReplyDrag(row, item, qr);
+        this.bindQuickReplyDrop(row, item, qr);
+      }
+    }
+  }
+
+  private bindQuickReplyDrag(
+    row: HTMLElement,
+    item: QuickReplyListItem,
+    qr: StellaQuickReply
+  ): void {
+    row.addEventListener("dragstart", (e) => {
+      this.qrDragSource = { setFile: item.setFile, id: qr.id };
+      row.addClass("is-dragging");
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", `${item.setFile}\n${qr.id}`);
+      }
+    });
+    row.addEventListener("dragend", () => {
+      row.removeClass("is-dragging");
+      this.qrDragSource = null;
+      this.listEl
+        ?.querySelectorAll(".drag-over")
+        .forEach((el) => (el as HTMLElement).removeClass("drag-over"));
+    });
+  }
+
+  /**
+   * 드롭 타깃. target 이 null 이면 "세트 맨 뒤로", 항목이면 "그 항목 앞으로".
+   * 같은 세트 안이면 순서 변경, 다른 세트면 이동.
+   */
+  private bindQuickReplyDrop(
+    el: HTMLElement,
+    item: QuickReplyListItem,
+    target: StellaQuickReply | null
+  ): void {
+    el.addEventListener("dragover", (e) => {
+      const src = this.qrDragSource;
+      if (!src) return;
+      if (target && src.setFile === item.setFile && src.id === target.id) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+      el.addClass("drag-over");
+    });
+    el.addEventListener("dragleave", () => el.removeClass("drag-over"));
+    el.addEventListener("drop", (e) => {
+      e.preventDefault();
+      el.removeClass("drag-over");
+      const src = this.qrDragSource;
+      this.qrDragSource = null;
+      if (!src) return;
+      if (target && src.setFile === item.setFile && src.id === target.id) return;
+      void this.moveQuickReply(src, item.setFile, target?.id ?? null);
+    });
+  }
+
+  /**
+   * 버튼 이동/정렬. 다른 세트로 옮길 때는 대상 세트의 idIndex 로 id 를 새로 뽑는다
+   * (id 는 세트 안에서만 고유 — ST 규칙).
+   */
+  private async moveQuickReply(
+    src: { setFile: string; id: number },
+    destFile: string,
+    beforeId: number | null
+  ): Promise<void> {
+    try {
+      const srcSet = await this.store.getQuickReplySet(src.setFile);
+      if (!srcSet) return;
+      const idx = srcSet.qrList.findIndex((q) => q.id === src.id);
+      if (idx < 0) return;
+
+      if (src.setFile === destFile) {
+        const [moved] = srcSet.qrList.splice(idx, 1);
+        const at =
+          beforeId === null
+            ? srcSet.qrList.length
+            : srcSet.qrList.findIndex((q) => q.id === beforeId);
+        srcSet.qrList.splice(at < 0 ? srcSet.qrList.length : at, 0, moved);
+        await this.store.saveQuickReplySet(src.setFile, srcSet);
+        return;
+      }
+
+      const destSet = await this.store.getQuickReplySet(destFile);
+      if (!destSet) return;
+      const [moved] = srcSet.qrList.splice(idx, 1);
+      moved.id = destSet.idIndex;
+      destSet.idIndex = moved.id + 1;
+      const at =
+        beforeId === null
+          ? destSet.qrList.length
+          : destSet.qrList.findIndex((q) => q.id === beforeId);
+      destSet.qrList.splice(at < 0 ? destSet.qrList.length : at, 0, moved);
+      await this.store.saveQuickReplySet(destFile, destSet);
+      await this.store.saveQuickReplySet(src.setFile, srcSet);
+    } catch (err) {
+      new Notice(
+        `이동 실패: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  private quickReplySetMenu(item: QuickReplyListItem): Menu {
+    const menu = new Menu();
+    menu.addItem((mi) =>
+      mi
+        .setTitle("버튼 추가")
+        .setIcon("plus")
+        .onClick(() => void this.addQuickReply(item))
+    );
+    menu.addItem((mi) =>
+      mi
+        .setTitle("이름 변경")
+        .setIcon("pencil")
+        .onClick(() => this.promptRenameQuickReplySet(item))
+    );
+    menu.addItem((mi) =>
+      mi
+        .setTitle(item.set.meta.favorite ? "즐겨찾기 해제" : "즐겨찾기")
+        .setIcon("star")
+        .onClick(() => void this.store.toggleQuickReplyFavorite(item.setFile))
+    );
+    menu.addItem((mi) =>
+      mi
+        .setTitle("내보내기")
+        .setIcon("upload")
+        .onClick(() => void this.exportQuickReplySet(item))
+    );
+    menu.addItem((mi) =>
+      mi
+        .setTitle("삭제")
+        .setIcon("trash-2")
+        .onClick(() => this.confirmDeleteQuickReplySet(item))
+    );
+    return menu;
+  }
+
+  private quickReplyItemMenu(
+    item: QuickReplyListItem,
+    qr: StellaQuickReply
+  ): Menu {
+    const menu = new Menu();
+    menu.addItem((mi) =>
+      mi
+        .setTitle("편집")
+        .setIcon("pencil")
+        .onClick(() => this.navigateToQuickReplyEditor(item.setFile, qr.id))
+    );
+    menu.addItem((mi) =>
+      mi
+        .setTitle("복제")
+        .setIcon("copy")
+        .onClick(() => void this.duplicateQuickReply(item, qr))
+    );
+    menu.addItem((mi) =>
+      mi
+        .setTitle("삭제")
+        .setIcon("trash-2")
+        .onClick(() => void this.deleteQuickReply(item, qr))
+    );
+    return menu;
+  }
+
+  private navigateToQuickReplyEditor(setFile: string, itemId: number): void {
+    this.pushHistory();
+    this.detailFolder = null;
+    this.branchSessionFile = null;
+    this.editorRoute = { kind: "quickReply", file: setFile, itemId };
+    this.selectMode = false;
+    this.sessionSelection.clear();
+    this.updateTabChrome();
+    this.renderPage();
+    this.contentEl.scrollTop = 0;
+    void this.persistRoute();
+  }
+
+  private async createQuickReplySet(): Promise<void> {
+    try {
+      const { setFile } = await this.store.createQuickReplySet("새 세트");
+      await this.refreshQuickReplyData();
+      this.qrCollapsed.delete(setFile);
+      this.renderQuickReplyTree();
+    } catch (err) {
+      new Notice(
+        `세트 생성 실패: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  private async addQuickReply(item: QuickReplyListItem): Promise<void> {
+    try {
+      const set = await this.store.getQuickReplySet(item.setFile);
+      if (!set) return;
+      const qr = createQuickReply(set);
+      set.qrList.push(qr);
+      await this.store.saveQuickReplySet(item.setFile, set);
+      this.qrCollapsed.delete(item.setFile);
+      this.navigateToQuickReplyEditor(item.setFile, qr.id);
+    } catch (err) {
+      new Notice(
+        `버튼 추가 실패: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  private async duplicateQuickReply(
+    item: QuickReplyListItem,
+    qr: StellaQuickReply
+  ): Promise<void> {
+    try {
+      const set = await this.store.getQuickReplySet(item.setFile);
+      if (!set) return;
+      const id = set.idIndex;
+      set.idIndex = id + 1;
+      const copy: StellaQuickReply = {
+        ...qr,
+        id,
+        label: `${qr.label} 복사본`,
+        contextList: qr.contextList.map((c) => ({ ...c })),
+      };
+      const at = set.qrList.findIndex((q) => q.id === qr.id);
+      set.qrList.splice(at < 0 ? set.qrList.length : at + 1, 0, copy);
+      await this.store.saveQuickReplySet(item.setFile, set);
+    } catch (err) {
+      new Notice(
+        `복제 실패: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  private async deleteQuickReply(
+    item: QuickReplyListItem,
+    qr: StellaQuickReply
+  ): Promise<void> {
+    const set = await this.store.getQuickReplySet(item.setFile);
+    if (!set) return;
+    set.qrList = set.qrList.filter((q) => q.id !== qr.id);
+    await this.store.saveQuickReplySet(item.setFile, set);
+  }
+
+  private promptRenameQuickReplySet(item: QuickReplyListItem): void {
+    new PromptModal(
+      this.plugin.app,
+      "세트 이름 변경",
+      "세트 이름",
+      item.set.name,
+      (next) => {
+        if (!next) return;
+        void (async () => {
+          try {
+            await this.store.renameQuickReplySet(item.setFile, next);
+          } catch (err) {
+            new Notice(
+              `이름 변경 실패: ${err instanceof Error ? err.message : String(err)}`
+            );
+          }
+        })();
+      }
+    ).open();
+  }
+
+  private async exportQuickReplySet(item: QuickReplyListItem): Promise<void> {
+    try {
+      const json = await this.store.buildQuickReplyExportJson(item.setFile);
+      if (!json) return;
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${item.set.name}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      new Notice(`내보내기 완료: ${item.set.name}.json`);
+    } catch (err) {
+      new Notice(
+        `내보내기 실패: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  private confirmDeleteQuickReplySet(item: QuickReplyListItem): void {
+    new ConfirmModal(
+      this.plugin.app,
+      "빠른 답장 세트 삭제",
+      `"${item.set.name}" 세트를 삭제할까요? (되돌릴 수 없습니다)`,
+      "삭제",
+      (confirmed) => {
+        if (!confirmed) return;
+        void (async () => {
+          try {
+            await this.store.deleteQuickReplySet(item.setFile);
+            new Notice(`세트 삭제: ${item.set.name}`);
+          } catch (err) {
+            new Notice(
+              `삭제 실패: ${err instanceof Error ? err.message : String(err)}`
+            );
+          }
+        })();
+      }
+    ).open();
+  }
+
   private async createAndOpenPromptSet(): Promise<void> {
     try {
       const init = buildDefaultPromptPreset(NEW_PRESET_BASE_NAME);
@@ -1066,15 +1525,14 @@ export class DashboardView extends ItemView {
     this.makePressable(persona, () => void this.setTab("user"));
 
     const actions = line.createDiv({ cls: "ggai-dash-home-actions" });
-    this.renderToolbarButton(actions, "download", "임포트", () =>
+    const imp = this.renderToolbarButton(actions, "download", "임포트", () =>
       runImportPicker(this.plugin)
     );
-    this.renderToolbarButton(actions, "users", "그룹 만들기", () =>
-      void openGroupCreator(this.plugin)
-    );
-    const add = this.renderToolbarButton(actions, "plus", "새 시나리오", () =>
-      promptNewScenario(this.plugin)
-    );
+    imp.addClass("is-icon-only");
+    imp.setAttr("aria-label", "임포트");
+    const add = this.renderToolbarButton(actions, "plus", "NEW", (e) => {
+      populateCreateMenu(this.plugin, new Menu()).showAtMouseEvent(e as MouseEvent);
+    });
     add.addClass("mod-cta");
   }
 
@@ -2057,11 +2515,11 @@ export class DashboardView extends ItemView {
     bar: HTMLElement,
     icon: string,
     label: string,
-    onClick: () => void
+    onClick: (e: MouseEvent) => void
   ): HTMLElement {
     const btn = bar.createEl("button", { cls: "ggai-btn ggai-dash-tool-btn" });
     setIcon(btn, icon);
-    btn.createSpan({ text: label });
+    btn.createSpan({ cls: "ggai-dash-tool-btn-label", text: label });
     btn.addEventListener("click", onClick);
     return btn;
   }
@@ -2485,6 +2943,7 @@ export class DashboardView extends ItemView {
       user: { back: "페르소나 목록", title: "페르소나 편집" },
       scenario: { back: "시나리오 목록", title: "시나리오 편집" },
       lorebook: { back: "로어북 목록", title: "로어북 편집" },
+      quickReply: { back: "빠른 답장", title: "버튼 편집" },
     };
 
     const head = body.createDiv({ cls: "ggai-dash-branch-head" });
@@ -2520,6 +2979,15 @@ export class DashboardView extends ItemView {
         this.editorSection = new LorebookEditorSection(host, this.plugin, file, {
           onClose,
         });
+        break;
+      case "quickReply":
+        this.editorSection = new QuickReplyEditorSection(
+          host,
+          this.plugin,
+          file,
+          this.editorRoute.itemId ?? -1,
+          { onClose }
+        );
         break;
     }
     void this.editorSection.load();
@@ -2851,6 +3319,12 @@ export class DashboardView extends ItemView {
       )
       .addItem((mi) =>
         mi
+          .setTitle("내보내기")
+          .setIcon("upload")
+          .onClick(() => void exportScenarioCard(this.plugin, item.scenarioFile))
+      )
+      .addItem((mi) =>
+        mi
           .setTitle(getFavorite(item) ? "즐겨찾기 해제" : "즐겨찾기")
           .setIcon("star")
           .onClick(() => void this.toggleScenarioFavorite(item))
@@ -2905,6 +3379,12 @@ export class DashboardView extends ItemView {
           .setTitle("편집")
           .setIcon("pencil")
           .onClick(() => void this.openLorebookEditor(item))
+      )
+      .addItem((mi) =>
+        mi
+          .setTitle("내보내기")
+          .setIcon("upload")
+          .onClick(() => void exportLorebook(this.plugin, item.lorebookFile))
       )
       .addSeparator()
       .addItem((mi) =>

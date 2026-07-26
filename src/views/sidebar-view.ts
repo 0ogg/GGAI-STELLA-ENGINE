@@ -30,11 +30,11 @@ import {
   confirmDeleteScenario,
   confirmDeleteUser,
   createAndOpenSession,
+  exportLorebook,
+  exportScenarioCard,
   getInviteToActiveSession,
   openSessionByPath,
-  promptNewLorebook,
-  promptNewScenario,
-  promptNewUser,
+  populateCreateMenu,
   promptRenameSession,
   runImportPicker,
 } from "./entity-actions";
@@ -338,26 +338,7 @@ export class SidebarView extends ItemView {
   }
 
   private showAddMenu(e: MouseEvent): void {
-    const menu = new Menu();
-    menu.addItem((item) =>
-      item
-        .setTitle("시나리오")
-        .setIcon("sparkles")
-        .onClick(() => this.triggerAddScenario())
-    );
-    menu.addItem((item) =>
-      item
-        .setTitle("페르소나")
-        .setIcon("user")
-        .onClick(() => this.triggerAddUser())
-    );
-    menu.addItem((item) =>
-      item
-        .setTitle("로어북")
-        .setIcon("book-open")
-        .onClick(() => this.triggerAddLorebook())
-    );
-    menu.showAtMouseEvent(e);
+    populateCreateMenu(this.plugin, new Menu()).showAtMouseEvent(e);
   }
 
   private renderPanelOpenButton(root: HTMLElement): void {
@@ -846,21 +827,6 @@ export class SidebarView extends ItemView {
     runImportPicker(this.plugin);
   }
 
-  private triggerAddScenario(): void {
-    promptNewScenario(this.plugin);
-  }
-
-  private triggerAddUser(): void {
-    promptNewUser(this.plugin, async () => {
-      await this.refreshAndRerenderUsers();
-      await this.setTab("user");
-    });
-  }
-
-  private triggerAddLorebook(): void {
-    promptNewLorebook(this.plugin);
-  }
-
   private async toggleScenarioFavorite(item: ScenarioListItem): Promise<void> {
     try {
       await this.store.toggleScenarioFavorite(item.scenarioFile);
@@ -884,6 +850,11 @@ export class SidebarView extends ItemView {
       )
       .addItem((menuItem) =>
         menuItem.setTitle("편집").onClick(() => void this.openScenarioEditor(item))
+      )
+      .addItem((menuItem) =>
+        menuItem
+          .setTitle("내보내기")
+          .onClick(() => void exportScenarioCard(this.plugin, item.scenarioFile))
       );
     // 그룹 초대 (G1) — 활성 세션이 있고 이 시나리오가 아직 멤버가 아닐 때만.
     const invite = await getInviteToActiveSession(this.plugin, item);
@@ -949,6 +920,11 @@ export class SidebarView extends ItemView {
     return new Menu()
       .addItem((menuItem) =>
         menuItem.setTitle("편집").onClick(() => void this.openLorebookEditor(item))
+      )
+      .addItem((menuItem) =>
+        menuItem
+          .setTitle("내보내기")
+          .onClick(() => void exportLorebook(this.plugin, item.lorebookFile))
       )
       .addSeparator()
       .addItem((menuItem) =>

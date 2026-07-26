@@ -52,6 +52,9 @@ import {
 } from "../util/illustrations";
 import { computeIllustrationAnchors } from "../util/illustration-anchors";
 import type { IllustrationAnchor } from "../util/illustration-anchors";
+import { computeNoteAnchors, type NoteAnchor } from "../util/note-anchors";
+import type { SessionNote, SessionNotes } from "../types/note";
+import { createNoteWidgetEl } from "./note-widget";
 import { computeLatestAiMarkerOffset } from "../util/ai-start-marker";
 import { isImeComposing, runWhenImeIdle } from "./edit-guard";
 import { IllustrationCarousel } from "./illustration-carousel";
@@ -79,6 +82,8 @@ import {
   openExtensionActionsMenu,
   renderHeaderCommandBar,
 } from "./session-command-bar";
+import { SessionQuickReplyBar } from "./session-quick-reply-bar";
+import type { AutoExecuteFlagKey } from "../types/quick-reply";
 import { composeSummaryContextForPath } from "../util/summarize-session";
 import {
   collectUntranslatedParagraphs,
@@ -114,25 +119,25 @@ import {
 import { uuidv4 } from "../util/uuid";
 
 /**
- * SessionView ??B2 ?紐꾨??癒?탵??+ B3 ?브쑨由?AI ?????됱뵠??
+ * SessionView — 소설(novel) 모드 세션창. 본문 직접 편집(B2) + 분기/AI 이어쓰기(B3).
  *
  * ?紐꾩춿 UX (B2):
- *  - `<div contenteditable="plaintext-only">` ????μ뵬 癰귣챶揆??곗쨮. AI/?醫? ?닌됲뀋?? `<span class>` 嚥?
- *  - ??筌왖?癒?퓠???④쑴???紐꾩춿??롫뮉 ??덈툧?? `pendingDiff` 嚥≪뮆彛??곕뗄??(?紐껊굡 沃섎챷源??.
- *  - ?紐꾩춿 ?袁⑺뒄揶쎛 獄쏅뗀???늺(caret ??pending ?닌덉퍢 獄쏅쉼?앮에? 筌앸맩???뚣끇而??뤿연 ???紐껊굡 ??밴쉐.
- *  - 1.5s idle ?癒?뮉 blur ???뚣끇而??紐꺿봺椰?
- *  - Ctrl+Z = activeLeaf ??parent 嚥? Ctrl+Y / Ctrl+Shift+Z = redoStack ?癒?퐣 癰귣벊??
- *  - ???뚣끇而????깅선??롢늺 redoStack ?? ??쑴?숋쭪袁⑤뼄 (?됰슢?뽫㎉??브쑨由?筌욊낯??.
+ *  - `<div contenteditable="plaintext-only">` 로 본문 전체를 직접 편집. AI/사용자 구간은 `<span class>` 로만 구분.
+ *  - 타이핑마다 전체를 다시 그리지 않고, baseline 대비 변경분만 `pendingDiff` 로 누적한다(노드는 커밋 시점에만 생성).
+ *  - 편집 커밋 판정: caret 이 pending 구간 밖으로 벗어나면 즉시 커밋, 아니면 idle/blur 를 기다린다.
+ *  - 1.5s 입력 idle 또는 blur 에서 pending 편집을 커밋한다.
+ *  - Ctrl+Z = activeLeaf 를 parent 로(redoStack 에 push). Ctrl+Y / Ctrl+Shift+Z = redoStack pop.
+ *  - 커밋(새 편집/분기 이동)이 일어나면 redoStack 을 비운다(되돌리기 이후 다르게 이어쓰면 옛 redo 후보가 무의미해지므로).
  *
- * ?브쑨由?UX (B3):
- *  - [??곷선?怨뚮┛] = activeLeaf ??child + AI append (kind=ai-continue).
- *  - [??源??   = activeLeaf ??parent 獄?sibling + AI append (kind=ai-regen). AI ?紐껊굡?????춸.
- *  - [?? n/m ?? = 揶쏆늿? parent ????삘뀲 child(?類ㅼ젫)嚥???猷?
- *  - [????    = activeLeaf 筌앸Þ爰쇽㎕?섎┛ ?醫? (?紐꾩뵠?????????뽯뻻).
- *  - AI ??용뮞?紐껊뮉 ?袁⑸뻻 placeholder. ??쇱젫 GGAI Core ?紐꾪뀱?? B4 ?癒?퐣.
+ * 분기 UX (B3):
+ *  - [이어쓰기] = activeLeaf 의 child + AI append (kind=ai-continue).
+ *  - [재생성]   = activeLeaf 의 parent 밑 sibling + AI append (kind=ai-regen). AI 노드에서만 활성.
+ *  - [◀ n/m ▶] = 같은 parent 의 형제(자식) 사이 이동.
+ *  - [최신]     = activeLeaf 를 이 분기의 가장 최근 leaf 로 이동(더 깊은 자손이 있을 때만 활성).
+ *  - AI 스트리밍 중엔 노드 텍스트를 실시간 갱신. 실제 호출은 GGAI Core 경유(B4 참조).
  *
- * B2 ????????紐꾩춿 ?紐껊굡??spec ??"??륁젟=sibling" ????B2 ??child 獄쎻뫗????醫???뺣뼄.
- * ?臾? typo ???됰슢?뽫㎉?? 筌띾슢諭???紐꺿봺揶쎛 ??뺢콢???숋쭪???UX ?얜챷?????????곕????????
+ * B2 편집과 B3 분기는 스펙의 "확정=sibling" 규칙과 B2 의 child 규칙을 함께 지킨다.
+ * 두 로직을 뒤섞지 않고 함수 단위로 분리해 UX 일관성을 유지한다.
  */
 export interface SessionViewState {
   sessionFile?: string;
@@ -191,7 +196,7 @@ export class SessionView extends ItemView {
   private stellaPanel = false;
   private session: StellaSession | null = null;
 
-  /** 筌띾뜆?筌??뚣끇而???뽰젎??癰귣챶揆 (pending diff ??疫꿸퀣?). */
+  /** 현재 커밋된 본문 스팬/문자열 — pending 편집(diff) 반영 전의 기준선. */
   private baselineSpans: Span[] = [];
   private baselineText = "";
   private displaySpans: Span[] = [];
@@ -205,19 +210,27 @@ export class SessionView extends ItemView {
 
   private pendingDiff: TextDiff | null = null;
   /**
+   * 아직 확장 훅에 흘리지 않은 사용자 작성분 (타이핑 커밋마다 쌓고 이어쓰기
+   * 직전에 1회 발송) + 그 마지막 노드 id.
+   */
+  private pendingUserText = "";
+  private pendingUserNodeId: string | null = null;
+  /**
    * 실제 사용자 입력으로 본문 DOM 이 바뀌었을 수 있음 표시. 순수 커서 이동
    * (selectionchange 만 발생)에는 false 라, 본문 전체를 문자열화·diff 하는 비용을
    * 건너뛴다. onBodyInput 이 세우고 syncPendingDiff 가 내린다.
    */
   private bodyDirty = false;
   private idleTimer: number | null = null;
-  /** ??롫즼???紐껊굡 id ??쎄문 (??쇰뻻 ??쎈뻬??. ???뚣끇而????λ뜃由?? ?遺용뮞??肉????????? */
+  /** 되돌린 노드 id 스택(redo 후보). 새 편집이나 분기 이동이 일어나면 비운다. */
   private redoStack: string[] = [];
 
   private bodyWrapEl: HTMLElement | null = null;
   private bodyEl: HTMLElement | null = null;
   private toolbarEl: HTMLElement | null = null;
-  /** DOM ???꾤빊?餓λ쵐肉?input/selectionchange ?얜똻?? */
+  /** 빠른 답장(QR) 바 — 하단 툴바 바로 위. */
+  private qrBar: SessionQuickReplyBar | null = null;
+  /** true 면 DOM 재구성 중 — input/selectionchange 핸들러가 반응하지 않는다. */
   private suppressEvents = false;
   /**
    * IME(한글 등) 조합 진행 중 플래그. 조합 중에는 commitPending()이 body.empty() 로
@@ -261,10 +274,10 @@ export class SessionView extends ItemView {
     null;
   private syncRafId: number | null = null;
 
-  /** ??삳쐭????뽯뻻????뺢돌?귐딆궎 筌롫?? (?紐껉퐬????已?. loadSession + scenarios-changed ?癒?퐣 揶쏄퉮?? */
+  /** 세션이 속한 시나리오 캐시(표지/이름 등 표시용). loadSession + scenarios-changed 에서 갱신. */
   private cachedScenario: ScenarioListItem | null = null;
 
-  // ??而??遺용꺖 ??updateToolbar() ?癒?퐣 ?怨밴묶 揶쏄퉮???
+  // 하단 툴바 버튼 참조 — updateToolbar() 에서 활성/비활성 등을 갱신한다.
   private undoBtn: HTMLButtonElement | null = null;
   private redoBtn: HTMLButtonElement | null = null;
   private jumpEndBtn: HTMLButtonElement | null = null;
@@ -349,6 +362,14 @@ export class SessionView extends ItemView {
     string,
     { el: HTMLElement; carousel: IllustrationCarousel; sig: string }
   >();
+
+  // ── 세션 노트 (notes.json — QR /comment, 노드 기준 인라인 표시) ──
+  /** 세션 노트 — store 에서 로드한 참조. */
+  private notes: SessionNotes | null = null;
+  /** 인라인 노트 위젯들 (본문/번역 편집 영역 안의 글자 0개 원자 블록). */
+  private inlineNoteEls: HTMLElement[] = [];
+  /** 노트 위젯 풀 — key = `b\n<noteId>`(본문) / `t\n<noteId>`(번역). 접힘 상태 보존용. */
+  private inlineNotePool = new Map<string, HTMLElement>();
   /** 가장 최근 AI 생성 시작 마커(다섯 잎 꽃) — 재배치 시 제거용. */
   private aiStartMarkerEl: HTMLElement | null = null;
   /** 번역 뷰의 AI 생성 시작 마커 — 원문 패널과 별개로 추적/제거. */
@@ -366,16 +387,11 @@ export class SessionView extends ItemView {
   /** 문단 선택 모드 (문단 재생성) — 툴바 버튼 토글, 문단 클릭/탭 시 재생성 패널. */
   private paraSelectMode = false;
 
-  /**
-   * ?癒?┛ view 揶쎛 store.saveSession ???紐꾪뀱??롢늺 store 揶쎛 "session-changed" ??獄쏆뮉???롫뮉??
-   * 域???源?硫? ?癒?┛?癒?쓺???袁⑤뼎??뺣뼄. ??? baseline 揶쏄퉮???귐됱젉????멸땋 筌욊낱????얜똻???곷튊 ??뺣뼄.
-   * saveSession ?紐꾪뀱 筌욊낯???true, ?紐꾪뀱 ??false. ?紐껊굶????true 筌?reload ??쎄땁.
-   */
   /** 발신자 토큰 — 이 뷰의 저장이 쏜 session-changed 를 detail.origin 으로 구분. */
   private readonly storeOrigin = `session-view:${uuidv4()}`;
 
-  // ?????? B4: AI ??쎈뱜?귐됱빪 ?怨밴묶 ??????
-  /** ?袁⑹삺 筌욊쑵六?餓λ쵐??AI ??밴쉐 ??null ??????疫? */
+  // ── B4: AI 스트리밍 관련 상태 ──
+  /** 현재 진행 중인 AI 생성 상태 — null 이면 생성 중 아님. */
   private generation: {
     nodeId: string;
     abort: AbortController;
@@ -435,7 +451,7 @@ export class SessionView extends ItemView {
       // (레이아웃 복원 등)로 여기 오면 생성을 중단해 잠금·스트리밍이 새 세션에
       // 새어들지 않게 한다.
       this.generation?.abort.abort();
-      // ??삘뀲 ?紐꾨??곗쨮 ?대Ŋ猿??? 疫꿸퀣??pending ????됱몵筌?筌띾뜄龜??
+      // 다른 세션으로 갈아탈 때 — 아직 커밋 안 된 pending 편집을 먼저 확정 저장.
       await this.commitPending();
       this.flushScrollSave(); // 떠나는 세션의 스크롤 위치 저장
       this.sessionFile = next;
@@ -443,6 +459,8 @@ export class SessionView extends ItemView {
       this.pendingIllustrationFocus = focus;
       await this.loadSession();
       this.render();
+      // "세션을 열 때" 자동 실행 QR — 화면이 다 그려진 뒤에 돈다(기다리지 않는다).
+      void this.qrBar?.runAuto("executeOnChatChange");
     } else if (focus) {
       // 이미 열려 있는 세션 — 바로 삽화로 스크롤.
       this.focusIllustrationNode(focus);
@@ -454,7 +472,7 @@ export class SessionView extends ItemView {
     return { sessionFile: this.sessionFile, stellaPanel: this.stellaPanel };
   }
 
-  /** detail view ???紐??癒?퐣 ??뽮쉐 ?紐꾨?野껋럥以덄몴?筌╈돦荑???????? */
+  /** detail view 등 다른 곳에서 이 세션의 파일 경로를 얻어갈 때 쓰는 진입점. */
   getSessionFile(): string | null {
     return this.sessionFile;
   }
@@ -462,6 +480,11 @@ export class SessionView extends ItemView {
   /** AI 생성(스트리밍) 진행 중 — 이 탭은 다른 세션으로 갈아끼우면 안 된다 (session-host 규약). */
   isGenerating(): boolean {
     return this.generation != null;
+  }
+
+  /** 자동 실행 QR (session-host 규약) — 판단·실행은 전부 바가 소유한다. */
+  async runAutoQuickReplies(trigger: AutoExecuteFlagKey): Promise<void> {
+    await this.qrBar?.runAuto(trigger);
   }
 
   /**
@@ -634,7 +657,7 @@ export class SessionView extends ItemView {
     // 그린다 (renderViewerBar — 탭 타이틀 바를 꺼도 보임).
     if (Platform.isMobile) this.setupViewerToolActions();
 
-    // ?紐? 癰궰野???삘뀲 ???紐? ?紐꾩춿疫? 揶쏅Ŋ?. ?癒?┛ 癰궰野껋럩? suppressOwnSessionEvent 嚥???쎄땁.
+    // 다른 뷰가 이 세션을 저장하면(store.saveSession) session-changed 가 뜬다. 자기 저장 에코는 storeOrigin 으로 걸러낸다.
     this.registerEvent(
       this.store.on(
         "session-changed",
@@ -656,6 +679,10 @@ export class SessionView extends ItemView {
         this.handleDeletedSession();
       })
     );
+    // 대시보드에서 QR 세트를 고치면 열려 있는 세션 바도 즉시 따라간다.
+    this.registerEvent(
+      this.store.on("quick-replies-changed", () => void this.qrBar?.refresh())
+    );
     this.registerEvent(
       this.store.on(
         "session-translations-changed",
@@ -676,8 +703,14 @@ export class SessionView extends ItemView {
         }
       )
     );
+    this.registerEvent(
+      this.store.on("session-notes-changed", (file: string) => {
+        if (file !== this.sessionFile) return;
+        void this.refreshNotes();
+      })
+    );
 
-    // ??뺢돌?귐딆궎 筌롫??(??已??紐껉퐬??筌앸Þ爰쇽㎕?섎┛) 癰궰野?????삳쐭筌???쇰뻻 域밸챶??
+    // 시나리오 정보(표지/이름 등)가 바뀌면 캐시만 다시 읽어 갱신한다.
     this.registerEvent(
       this.store.on("scenarios-changed", () => {
         void this.refreshScenario();
@@ -804,6 +837,7 @@ export class SessionView extends ItemView {
     }
     this.translations = await this.store.getSessionTranslations(this.sessionFile);
     this.illustrations = await this.store.getSessionIllustrations(this.sessionFile);
+    this.notes = await this.store.getSessionNotes(this.sessionFile);
     this.translationViewActive = this.translations.displayMode === "translation";
     this.outputMode = this.session?.meta.translation?.output ?? "replace";
     this.splitRatio = this.plugin.data.translationSplitRatio ?? 0.5;
@@ -816,7 +850,7 @@ export class SessionView extends ItemView {
     }
   }
 
-  /** ?紐꾨????곷립 ??뺢돌?귐딆궎 ?怨쀬뵠???紐껉퐬????已? ??store ?癒?퐣 筌≪뼚釉?筌?Ŋ?? */
+  /** 세션이 속한 시나리오를 store 에서 찾아 캐시에 채운다(표지/이름 등 표시용). */
   private async resolveScenario(): Promise<void> {
     this.cachedScenario = null;
     if (!this.sessionFile) return;
@@ -912,7 +946,7 @@ export class SessionView extends ItemView {
     this.redrawBodyIfDisplayChanged();
   }
 
-  /** ?紐??癒?퐣 session.json ??獄쏅뗀??野껋럩????pending ?癒?┛ ??store ?????+ ?袁⑷퍥 ????? */
+  /** 다른 곳에서 session.json 이 바뀌면(store) pending 편집 없는 상태로 다시 읽어 반영 + 캐럿 복원. */
   private async handleExternalChange(): Promise<void> {
     if (!this.sessionFile) return;
     // 생성(스트리밍) 중에는 본문 소유권이 생성 플로우에 있다 — 외부발 전체 재구성은
@@ -948,7 +982,7 @@ export class SessionView extends ItemView {
     }
 
     if (this.pendingDiff) {
-      new Notice("?紐? 癰궰野?揶쏅Ŋ? ??筌욊쑵六?餓λ쵐????紐꾩춿???癒?┛??몃빍??");
+      new Notice("새로 저장된 내용을 반영하며 진행 중이던 편집은 취소되었습니다.");
     }
     this.pendingDiff = null;
     this.clearIdleTimer();
@@ -1039,6 +1073,7 @@ export class SessionView extends ItemView {
     this.translating = false;
     this.illustrations = null;
     this.illustrating = false;
+    this.notes = null;
     this.paraSelectMode = false;
     this.clearTranslationBlocks();
     this.baselineSpans = [];
@@ -1072,10 +1107,10 @@ export class SessionView extends ItemView {
   }
 
   /**
-   * 3???닌듼?
-   *   [header]   ?⑥쥙?? ??뺢돌?귐딆궎 ?紐껉퐬????已?+ ?紐꾨???已?+ ?類ｋ궖 + 筌앸Þ爰쇽㎕?섎┛.
-   *   [body-wrap] flex:1, ??쎄쾿嚥??怨몃열. ?????contenteditable body.
-   *   [toolbar]  ?⑥쥙?? ??undo/redo/end) / 餓???곷선?怨뚮┛ ??甕곌쑵?? / ??regen/?類ㅼ젫/?????뺤뺍/??쇱젟).
+   * 3단 구조:
+   *   [header]   좌측 시나리오/세션 이름 + 세션명 편집 + 뱃지 + 사이드패널 토글.
+   *   [body-wrap] flex:1, 스크롤 담당. 안쪽에 contenteditable body.
+   *   [toolbar]  좌측(undo/redo/end) / 가운데(이어쓰기 CTA) / 우측(regen/형제이동/즐겨찾기/사이드패널).
    */
   private render(): void {
     const root = this.contentEl;
@@ -1089,8 +1124,10 @@ export class SessionView extends ItemView {
     this.translationEl = null;
     this.splitHandleEl = null;
     this.inlineIllusEls = [];
+    this.inlineNoteEls = [];
     // root.empty() 로 옛 위젯 DOM 이 모두 파괴됐으니 풀도 비운다(죽은 참조 제거).
     this.inlineWidgetPool.clear();
+    this.inlineNotePool.clear();
     this.paraSelectMode = false;
     this.clearTranslationBlocks();
 
@@ -1175,6 +1212,13 @@ export class SessionView extends ItemView {
     this.resizeObserver.observe(this.bodyWrapEl);
     this.resizeObserver.observe(this.contentEl);
 
+    // 빠른 답장(QR) 바 — 하단 툴바 바로 위 좌측. 열림/닫힘은 전역 영속.
+    this.qrBar = new SessionQuickReplyBar(root, this.plugin, {
+      sessionFile: () => this.sessionFile,
+      runText: (text, send) => this.applyQuickReplyText(text, send),
+    });
+    void this.qrBar.refresh();
+
     this.toolbarEl = root.createEl("div", { cls: "ggai-session-toolbar" });
     this.renderToolbarContent();
 
@@ -1193,7 +1237,7 @@ export class SessionView extends ItemView {
     if (!toolbar) return;
     toolbar.empty();
 
-    // ?ル슣瑜? ??쀪쉘 ???? / ??쀪쉘 ???? / 筌띾뜆?筌??紐껊굡 ?癒곕늄(??
+    // 왼쪽: 되돌리기/다시실행/최신이동 + 미디어 트리거 버튼(번역/삽화/문단재생성, 아래 줄).
     const left = toolbar.createEl("div", { cls: "ggai-toolbar-group-left" });
     const leftTop = left.createEl("div", {
       cls: "ggai-toolbar-row ggai-toolbar-row-top",
@@ -1257,7 +1301,7 @@ export class SessionView extends ItemView {
     pBtn.addEventListener("click", () => void this.toggleParaSelectMode());
     this.paraRegenBtn = pBtn;
 
-    // 餓λ쵐釉? ??곷선?怨뚮┛ (??CTA)
+    // 가운데: 이어쓰기(메인 CTA).
     const center = toolbar.createEl("div", {
       cls: "ggai-toolbar-group-center",
     });
@@ -1270,7 +1314,7 @@ export class SessionView extends ItemView {
     cont.addEventListener("click", () => void this.handleContinueOrStop());
     this.continueBtn = cont;
 
-    // ?怨쀫?: ??源??/ ?類ㅼ젫 nav / ??쇱젟 / ?????뺤뺍
+    // 오른쪽: 재생성 / 형제 nav / 즐겨찾기 / 보기설정 / 사이드패널.
     const right = toolbar.createEl("div", { cls: "ggai-toolbar-group-right" });
     const rightTop = right.createEl("div", {
       cls: "ggai-toolbar-row ggai-toolbar-row-top",
@@ -1339,7 +1383,7 @@ export class SessionView extends ItemView {
     });
   }
 
-  /** ?袁⑹뵠??甕곌쑵?????? setIcon ?紐꾪뀱 + aria-label + click ?紐껊굶?? */
+  /** 공용 하단 툴바 버튼 하나 — setIcon 호출 + aria-label + click 핸들러. */
   private makeIconBtn(
     parent: HTMLElement,
     icon: string,
@@ -1355,7 +1399,6 @@ export class SessionView extends ItemView {
     return btn;
   }
 
-  /** baselineSpans ??DOM ??곗쨮 ??쇰뻻 域밸챶???(???癒????. */
   /**
    * 인라인 마크다운(**굵게**, __굵게__, *기울임*, _기울임_, `코드`) 표기를 조각(run)으로
    * 쪼갠다. 마커 문자(*, _, `)는 지우지 않고 별도 span(ggai-md-marker)으로 남겨
@@ -1459,8 +1502,8 @@ export class SessionView extends ItemView {
       }
       flush();
     }
-    // 본문을 새로 그렸으니 인라인 삽화도 다시 꽂는다.
-    this.renderInlineIllustrations();
+    // 본문을 새로 그렸으니 인라인 위젯(삽화·노트)도 다시 꽂는다.
+    this.renderInlineWidgets();
     this.renderAiStartMarker();
   }
 
@@ -2120,23 +2163,23 @@ export class SessionView extends ItemView {
     const range = sel.getRangeAt(0);
     if (!this.bodyEl.contains(range.startContainer)) return;
 
-    // pendingDiff ????DOM textContent ??筌욊낯????뚮선 ?醫롪퐨??띿쓺 ????怨좊립??
-    // ??곸?: Chromium ?癒?퐣 selectionchange 揶쎛 input 癰귣????믪눘? 獄쏆뮉???롫뮉 野껋럩??
-    //       pendingDiff ????疫꼲????쇱퓗筌???甕곌쑴?????caret > end ??쎈솇????룸┸??
-    //       textContent ????? 筌ㅼ뮇??DOM 揶쏅??좄첋?嚥?????筌???뽮퐣???類μ넇??롫뼄.
+    // pendingDiff 갱신은 DOM textContent 를 문자열화해 diff 하므로 비용이 크다 —
+    // 원인: Chromium 이 조합 중 selectionchange 만으로도(input 없이) 발화하는 경우가 있다.
+    //       pendingDiff 가 비어 있으면 이 판정 자체가 무의미(caret > end 판정 불가)하므로
+    //       textContent 를 실제로 다시 읽어야 하는 경로만 여기서 골라낸다.
     this.syncPendingDiff();
     const fresh = this.pendingDiff;
-    if (!fresh) return; // 癰궰野???곸벉 ???뚣끇而??븍뜆??
+    if (!fresh) return; // 편집 없음 — 커밋할 게 없다.
 
     const caret = this.getCaretOffset();
     const end = fresh.from + fresh.inserted.length;
-    // ?닌덉퍢 獄쏅쉼?좑쭖??袁⑺뒄揶쎛 獄쏅뗀??野껉퍔?앮에??癒?뼊 ??筌앸맩???뚣끇而?
+    // 조합 중이거나 편집 없는 순수 커서 이동이면 여기서 끝난다 — 커밋 안 함.
     if (caret < fresh.from || caret > end) {
       void this.commitPending();
     }
   }
 
-  /** DOM ?袁⑹삺 ??용뮞?紐? baseline ??diff ??pendingDiff ??揶쏄퉮???뺣뼄. */
+  /** DOM 의 현재 textContent 를 baseline 과 diff 해 pendingDiff 를 갱신한다. */
   private syncPendingDiff(): void {
     const body = this.bodyEl;
     if (!body) return;
@@ -2182,7 +2225,7 @@ export class SessionView extends ItemView {
     }
   }
 
-  /** pendingDiff ?????紐껊굡 1揶쏆뮆以??뚣끇而? diff 揶쎛 ??곸몵筌?no-op. */
+  /** pendingDiff 를 저장용 노드 patch 1개로 변환. diff 가 없으면 no-op. */
   private displayDiffToStoredPatch(diff: TextDiff): Patch {
     let rawFrom = this.displayOffsetToRawOffset(diff.from);
     let rawTo = this.displayOffsetToRawOffset(diff.to);
@@ -2278,14 +2321,97 @@ export class SessionView extends ItemView {
     this.session.meta.activeLeafId = node.id;
     this.redoStack = [];
 
-    // baseline 揶쏄퉮????DOM ?? ??? 揶쏆늿? ?怨밴묶, ??곗춸 ????
+    // 사용자가 새로 쓴 텍스트를 모아 둔다 — 확장 훅(폰 키워드/방송 감지)은
+    // 타이핑 커밋마다가 아니라 이어쓰기 직전에 한 번만 받는다(호출 낭비 방지).
+    if (patch.op !== "delete") {
+      const written = patch.spans
+        .map((s) => s.text)
+        .join("")
+        .trim();
+      if (written) {
+        this.pendingUserText = this.pendingUserText
+          ? `${this.pendingUserText}\n${written}`
+          : written;
+        this.pendingUserNodeId = node.id;
+      }
+    }
+
+    // baseline 갱신은 DOM 재구성 없이 값만 갱신, 재렌더는 나중에 한 번만.
     this.baselineSpans = applyPatch(this.baselineSpans, patch);
     this.baselineText = spansToText(this.baselineSpans);
 
-    await this.persistSession("?紐꾨???????쎈솭");
+    await this.persistSession("본문 편집 저장 실패");
 
     this.redrawBodyPreservingCaret();
     this.updateToolbar();
+  }
+
+  /**
+   * 모아 둔 사용자 입력을 확장 훅으로 흘린다 (이어쓰기 직전 1회).
+   * 사용자 입력도 서사 진행이므로 생성과 같은 자격으로 훅이 돈다 — 소설 모드는
+   * "쓰고 이어쓰기"가 한 턴이라 그 경계에서 보낸다.
+   */
+  private flushPendingUserText(): void {
+    const text = this.pendingUserText;
+    const nodeId = this.pendingUserNodeId;
+    this.pendingUserText = "";
+    this.pendingUserNodeId = null;
+    if (!text || !nodeId || !this.sessionFile) return;
+    void this.plugin.extensions.runUserText({
+      sessionFile: this.sessionFile,
+      nodeId,
+      text,
+    });
+  }
+
+  // ── 빠른 답장 (QR) ───────────────────────────────────────────────
+
+  /**
+   * QR 버튼 결과를 소설 본문에 반영한다. 챗과 달리 입력창이 없으므로
+   * 본문 끝에 user-write 노드로 붙이고(= 사용자가 직접 쓴 것과 같은 취급),
+   * send 면 곧바로 이어쓰기를 건다.
+   */
+  private async applyQuickReplyText(text: string, send: boolean): Promise<void> {
+    if (!this.session || !this.sessionFile || this.generation) return;
+    const body = text.trim();
+    if (!body) return;
+    // 진행 중이던 손편집을 먼저 확정 — 안 그러면 이 노드가 옛 지점에서 갈라진다.
+    await this.commitPending({ force: true });
+    if (!this.session) return;
+
+    const flatLen = spansToText(buildSpans(this.session)).length;
+    const node: SessionNode = {
+      id: uuidv4(),
+      parent: this.session.meta.activeLeafId,
+      kind: "user-write",
+      patches: [
+        {
+          op: "append",
+          spans: [{ author: "user", text: (flatLen > 0 ? "\n\n" : "") + body }],
+        },
+      ],
+      createdAt: Date.now(),
+    };
+    this.session.nodes[node.id] = node;
+    this.session.meta.activeLeafId = node.id;
+    this.redoStack = [];
+
+    this.baselineSpans = buildSpans(this.session);
+    this.baselineText = spansToText(this.baselineSpans);
+
+    await this.persistSession("빠른 답장 저장 실패");
+    this.followTail = true;
+    this.redrawBodyPreservingCaret();
+    this.updateToolbar();
+
+    // QR 결과도 사용자가 쓴 것과 같은 취급 — 이어쓰기까지 가면 그쪽에서 함께
+    // 발송되므로, 붙이기만 하는 경우에만 여기서 훅을 돌린다.
+    this.pendingUserText = this.pendingUserText
+      ? `${this.pendingUserText}\n${body}`
+      : body;
+    this.pendingUserNodeId = node.id;
+    if (send) await this.handleContinue();
+    else this.flushPendingUserText();
   }
 
   // --- undo / redo via activeLeaf ---
@@ -2297,7 +2423,7 @@ export class SessionView extends ItemView {
     const curId = this.session.meta.activeLeafId;
     const cur = this.session.nodes[curId];
     if (!cur || cur.parent == null) {
-      new Notice("????롫즼??????곷뮸??덈뼄.");
+      new Notice("더 되돌릴 곳이 없습니다.");
       return;
     }
     this.clearUndoRemovalPreview();
@@ -2315,16 +2441,16 @@ export class SessionView extends ItemView {
     if (!this.session || !this.sessionFile) return;
     if (this.leafNavigationBusy) return;
     await this.commitPending({ force: true });
-    // commitPending ??redoStack ????쑴???삠늺 ????곴맒 ??野???용뼄.
+    // commitPending 이 redoStack 을 비울 수 있으므로 그 이후에 pop 한다.
     let next = this.redoStack.pop();
     if (!next || !this.session.nodes[next]) {
-      // redoStack ??鹽뚮뮉硫??(?醫뉒뜇沃섇돥??嫄??ル옙?????紐껊굡 ????????: ?醫밴춯 child 濾롫뗄??
+      // redoStack 이 비었으면(방금 되돌린 적 없음) 활성 노드의 최신 child 로: 가장 최근 child 를 고른다.
       const curId = this.session.meta.activeLeafId;
       const children = getChildren(this.session, curId);
       next = children.length > 0 ? children[children.length - 1].id : undefined;
     }
     if (!next || !this.session.nodes[next]) {
-      new Notice("??쇰뻻 ??쎈뻬?????????곷뮸??덈뼄.");
+      new Notice("다시 실행할 내용이 없습니다.");
       return;
     }
     this.leafNavigationBusy = true;
@@ -2343,10 +2469,10 @@ export class SessionView extends ItemView {
     this.baselineSpans = buildSpans(this.session);
     this.baselineText = spansToText(this.baselineSpans);
     this.refreshDisplayBaseline();
-    await this.persistSession("activeLeaf ??????쎈솭", true);
+    await this.persistSession("activeLeaf 이동 저장 실패", true);
     this.suppressEvents = true;
     this.preserveReadingPosition(() => this.renderBodySpans(), keepRaw);
-    // undo/redo/?브쑨由?筌욊낱??caret ?? 癰귣챶揆 ??밸퓠 ?癒?뮉 野?揶쎛????????얜뼄.
+    // undo/redo/형제이동 후에는 caret 을 본문 끝에 두는 게 자연스럽다.
     this.setCaretOffset(this.displayText.length);
     this.suppressEvents = false;
     this.updateToolbar();
@@ -2357,12 +2483,12 @@ export class SessionView extends ItemView {
     }
   }
 
-  // --- B3 / B4: ?브쑨由?/ AI ??밴쉐 / 筌앸Þ爰쇽㎕?섎┛ ---
+  // --- B3 / B4: 분기(이어쓰기/재생성/형제이동) / AI 스트리밍 생성 ---
 
   /**
-   * ??곷선?怨뚮┛ 甕곌쑵?????? ?紐껊굶??
-   * - ??疫?餓? handleContinue() ?紐꾪뀱 (???怨밴묶)
-   * - ??밴쉐 餓? abort ?醫륁깈 ?袁⑸꽊 (???怨밴묶 ??餓λ쵎??
+   * 되돌리기(undo)·재생성으로 사라질 구간을 버튼 hover 시 미리 강조해 보여준다.
+   * - 원문 본문: CSS Custom Highlight 로 실제로 지워질 글자 구간을 칠한다.
+   * - 번역 보기 중이면 겹치는 문단도 함께 강조한다.
    */
   private showUndoRemovalPreview(): void {
     if (!this.session || this.pendingDiff) return;
@@ -2477,7 +2603,7 @@ export class SessionView extends ItemView {
     }
   }
 
-  /** ??곷선?怨뚮┛ ??activeLeaf ??parent 嚥?AI ?紐껊굡??child 嚥??곕떽???랁?chatStream ??곗쨮 筌?쑴?. */
+  /** 이어쓰기 — activeLeaf 의 child 로 AI 노드를 만들고 chatStream 으로 생성 시작. */
   private async handleContinue(): Promise<void> {
     if (!this.session || this.generation) return;
     await this.commitPending({ force: true });
@@ -2493,12 +2619,14 @@ export class SessionView extends ItemView {
       this.redoStack = [];
       await this.persistSession("유저 입력 노드 병합");
     }
+    // 사용자가 이번 턴에 쓴 내용을 확장 훅으로 (폰 키워드/방송 자동 감지).
+    this.flushPendingUserText();
     await this.runGeneration(this.session.meta.activeLeafId, "ai-continue");
   }
 
   /**
-   * ??源????activeLeaf ??parent ?????봔筌뤴뫀以?sibling AI ?紐껊굡???곕떽???랁?chatStream ??곗쨮 筌?쑴?.
-   * activeLeaf 揶쎛 AI ?紐껊굡揶쎛 ?袁⑤빍椰꾧퀡援?root 筌?椰꾧퀡?.
+   * 재생성 — activeLeaf 의 parent 밑에 새 sibling AI 노드를 만들고 chatStream 으로 생성 시작.
+   * activeLeaf 가 AI 노드가 아니거나 root 면 동작하지 않는다.
    */
   private async handleRegen(): Promise<void> {
     if (!this.session || this.generation) return;
@@ -2513,13 +2641,13 @@ export class SessionView extends ItemView {
   }
 
   /**
-   * ?⑤벏??AI ??밴쉐 ?룐뫂遊?(??곷선?怨뚮┛ / ??源??筌뤴뫀紐?????.
+   * 공통 AI 생성 흐름(이어쓰기 / 재생성 공용).
    *
-   * ?癒?カ:
-   *   1) ??뺢돌?귐딆궎 / 癰귣챶揆(parent 繹먮슣?) 嚥??뚢뫂???쎈뱜 ??슢諭?
-   *   2) ??AI ?紐껊굡 ??밴쉐 + activeLeaf 揶쏄퉮????癰귣챶揆 筌앸맩???????(??쎈뱜????筌?쑴?숋쭪?.
-   *   3) chatStream ?룐뫂遊? text-delta 筌띾뜄???紐껊굡 patch in-place 揶쏄퉮????癰귣챶揆 ?????(?遺용뮞??沃섎챷???.
-   *   4) done / error / abort ??????甕?store.saveSession ??곗쨮 ?怨몃꺗??
+   * 순서:
+   *   1) 설정 / 컨텍스트(parent 기준) 조립.
+   *   2) 새 AI 노드 연결 + activeLeaf 갱신 후 화면 반영(스트리밍 시작 전).
+   *   3) chatStream 콜백마다 text-delta 를 노드 patch 로 in-place 반영 후 화면 갱신(전송본 불변).
+   *   4) done / error / abort 각각 처리 후 store.saveSession 으로 마무리.
    */
   private async runGeneration(
     parentId: string,
@@ -2535,11 +2663,16 @@ export class SessionView extends ItemView {
       return;
     }
 
-    // ??뽮쉐 ??쇱젟 ????뽮쉐 ?紐꾨???PluginData.current ??뽰몵嚥?
+    // "생성 직전" 자동 실행 QR — planSessionRequest 앞이라 `/inject` 로 심은 지시문이
+    // 이번 전송에 실린다. 여기서 기다린다(끝나야 전송본이 확정된다).
+    await this.qrBar?.runAuto("executeBeforeGeneration");
+    if (!this.session || !this.sessionFile) return; // QR 실행 중 세션이 바뀌었을 수 있다
+
+    // 생성 완료 후 제목 자동 생성 등에 쓸 활성 파라미터. PluginData.current 참조.
     // 제목 자동 생성 등에 쓸 활성 파라미터. 전송 프로필/전송본은 planSessionRequest 가 정한다.
     const settings = await this.plugin.resolveActiveSettings(this.sessionFile);
 
-    // 1) ?뚢뫂???쎈뱜 ??슢諭?v2 ??preset + lorebook + scenario + session 癰귣챶揆
+    // 1) 컨텍스트(parent 기준) 조립 — v2: preset + lorebook + scenario + session 합성.
     const parentSpans = buildSpans(this.session, parentId);
     const parentText = spansToText(parentSpans);
     const scenarioFile = scenarioFileOfSessionFile(this.sessionFile);
@@ -2574,7 +2707,7 @@ export class SessionView extends ItemView {
     const consumedVariables = plan.updatedVariables;
     const consumedTimingStates = ctx.updatedTimingStates;
 
-    // 2) ??AI ?紐껊굡 ?곕떽?
+    // 2) 새 AI 노드 연결
     const nodeId = uuidv4();
     const node: SessionNode = {
       id: nodeId,
@@ -2601,7 +2734,7 @@ export class SessionView extends ItemView {
       this.renderTranslationBlocks();
     }
 
-    // 3) 筌욊쑵六??怨밴묶
+    // 3) 생성 상태 준비 — abort controller + generation 필드 + 편집 잠금.
     const abort = new AbortController();
     this.generation = { nodeId, abort, accumulatedText: "" };
     this.setBodyEditable(false);
@@ -2617,8 +2750,8 @@ export class SessionView extends ItemView {
 
     try {
       if (payload.kind === "text") {
-        // ??용뮞???뚮똾逾녺뵳????袁⑥쨮????Core ??generate() ??ㅼ뻣 ?紐꾪뀱.
-        // chat 筌롫뗄?놅쭪? 獄쏄퀣肉??NAI text-completion ????μ뵬 prompt 嚥???뱁뒊??
+        // text-completion payload 면 Core 의 generate() 를 그대로 호출.
+        // chat 프로필이 아닌 NAI text-completion 전용 prompt 문자열.
         // 텍스트 모델은 NAI 형식 기본 ON(명시적으로 끈 경우만 평문) — 역할 토큰으로 감싼다.
         const promptStr = payload.prompt;
         const r = await this.ai.generate({
@@ -2654,8 +2787,8 @@ export class SessionView extends ItemView {
           );
         }
       } else {
-        // chat ?袁⑥쨮????OpenAI ?紐낆넎 ?遺얜굡?????GLM/Z.AI, DeepSeek ?? 揶쎛 椰꾧퀡???롫뮉 ???쉘
-        // (?怨쀫꺗 system / 筌띾뜆?筌?assistant) ???類?뇣?酉釉?????쎈뱜?귐됱빪.
+        // chat payload 는 이미 role 조합이 정리된 안전한 상태(빈 메시지 제거 + 연속 같은 role 병합,
+        // normalizeMessagesForChat) — OpenAI 형식만 지원하는 게 아닌 모델(GLM/Z.AI, DeepSeek 등)도 받는다.
         const safeMessages = payload.messages;
         // 이어쓰기 이음새 보정 — 응답 앞의 앵커(마지막 문장) 반복을 제거하고 표시.
         const anchorSentence = payload.anchor;
@@ -2742,7 +2875,7 @@ export class SessionView extends ItemView {
       } else {
         const msg = err?.message ?? String(err);
         new Notice("Generation failed: " + msg);
-        // ???紐껊굡??겹늺 ?類ｂ봺
+        // 빈 노드(눈에 보이는 텍스트 없음)는 지운다 — 트리에 흔적을 남기지 않는다.
         if (!hasVisibleText(this.generation?.accumulatedText ?? "")) {
           delete this.session.nodes[nodeId];
           this.session.meta.activeLeafId = parentId;
@@ -2871,7 +3004,7 @@ export class SessionView extends ItemView {
     }
   }
 
-  /** baselineSpans/Text ?????+ 癰귣챶揆 ?????(caret ?얜똻?????紐꾪뀱?癒? ???툡??. */
+  /** 세션 제목 자동 생성 — 조건을 만족하면 AI 로 제목을 지어 세션 파일명까지 바꾼다. */
   private async maybeGenerateSessionTitle(input: {
     generatedText: string;
     parentText: string;
@@ -2943,7 +3076,7 @@ export class SessionView extends ItemView {
     );
   }
 
-  /** 筌띾뜆?筌??紐껊굡嚥??癒곕늄 ??activeLeaf ???癒?? 餓?揶쎛??筌ㅼ뮄??leaf 繹먮슣? ?怨뺤뵬揶쏄쑬?? */
+  /** 최신 지점으로 이동 — activeLeaf 를 이 분기의 가장 최근 leaf 로 옮긴다. */
   private async handleJumpEnd(): Promise<void> {
     if (!this.session || this.generation) return;
     await this.commitPending();
@@ -2959,7 +3092,7 @@ export class SessionView extends ItemView {
     await this.afterLeafChange();
   }
 
-  /** ?怨쀫? ?????뺤뺍 detail view ??용┛ / reveal. */
+  /** 사이드패널(우측 디테일뷰) 열기/포커스. */
   private handleSidePanel(): void {
     if (Platform.isMobile) {
       void this.plugin.revealDetail();
@@ -2997,8 +3130,7 @@ export class SessionView extends ItemView {
     el.style.setProperty("--ggai-view-font-scale", String(this.viewStyle.fontScale));
   }
 
-  /** ??뺢돌?귐딆궎 ???문/?紐꾩춿 ????쇱벉 ??ｍ? */
-  /** 揶쏆늿? parent ???類ㅼ젫嚥?activeLeaf ??猷? direction = -1(??곸읈) | 1(??쇱벉). */
+  /** 같은 parent 밑 형제 사이로 activeLeaf 이동. direction = -1(이전) | 1(다음). */
   private async handleSiblingNav(direction: -1 | 1): Promise<void> {
     if (!this.session || !this.sessionFile) return;
     await this.commitPending();
@@ -3015,7 +3147,7 @@ export class SessionView extends ItemView {
     await this.afterLeafChange();
   }
 
-  /** activeLeaf ??favorite ???삋域??醫?. ?브쑨由??癒?퍥??獄쏅뗀??? ??놁몵沃샕嚥?癰귣챶揆 ??????븍뜆?? */
+  /** activeLeaf 의 favorite 를 토글. 분기 트리에서 즐겨찾기 표시로 쓰이며 화면도 즉시 갱신한다. */
   private async handleNodeFavorite(): Promise<void> {
     if (!this.session || !this.sessionFile) return;
     const cur = this.session.nodes[this.session.meta.activeLeafId];
@@ -3026,9 +3158,9 @@ export class SessionView extends ItemView {
   }
 
   /**
-   * ?袁⑹삺 筌롫뗀?덄뵳??怨밴묶??store 嚥??怨몃꺗?酉釉??
-   * - suppressOwnSessionEvent 嚥?癰귣챷???獄쏆룇? session-changed ???얜똻????? 揶쏄퉮????.
-   * - silent=true 筌???쎈솭 ???꾩꼷??野껋럡?э쭕?(??????紐꾪뀱 ??곸벉).
+   * 현재 세션 객체를 store 에 저장한다.
+   * - origin=storeOrigin 을 실어 보내 자기 저장의 session-changed 에코를 걸러낸다.
+   * - silent=true 면 오류 시 Notice 대신 콘솔 경고만(부수적 저장 실패).
    */
   private async persistSession(
     errorPrefix: string,
@@ -3046,7 +3178,7 @@ export class SessionView extends ItemView {
     }
   }
 
-  /** ?袁⑹삺 activeLeaf + ??밴쉐 ?怨밴묶 疫꿸퀣???곗쨮 ??而???삳쐭 甕곌쑵????뽮쉐/??뽯뻻 揶쏄퉮?? */
+  /** 현재 activeLeaf + 생성 상태 기준으로 하단 툴바 버튼들의 활성/비활성을 갱신한다. */
   private updateToolbar(): void {
     if (!this.session) return;
     const cur = this.session.nodes[this.session.meta.activeLeafId];
@@ -3054,16 +3186,16 @@ export class SessionView extends ItemView {
 
     const generating = this.generation != null;
 
-    // ?ル슣瑜?域밸챶竊?
+    // 되돌리기 / 다시실행 / 최신이동
     if (this.undoBtn) this.undoBtn.disabled = generating || cur.parent == null;
     const hasRedoTarget =
       this.redoStack.length > 0 || getChildren(this.session, cur.id).length > 0;
     if (this.redoBtn) this.redoBtn.disabled = generating || !hasRedoTarget;
-    // jump-end: ?癒??????됱뱽 ???춸 ???. 揶쏄쑬???children 鈺곕똻??筌ｋ똾寃?
+    // jump-end: 지금 지점보다 더 깊은 자손이 있을 때만 활성. children 만 봐도 충분(재귀 불필요).
     const hasDeeper = getDeepestLatestDescendant(this.session, cur.id)?.id !== cur.id;
     if (this.jumpEndBtn) this.jumpEndBtn.disabled = generating || !hasDeeper;
 
-    // 餓λ쵐釉?????밴쉐 餓λ쵐?좑쭖???餓λ쵎??, ?袁⑤빍筌?????곷선?怨뚮┛)
+    // 이어쓰기 버튼 — 생성 중이면 정지 아이콘(누르면 중단), 아니면 재생 아이콘(누르면 이어쓰기).
     if (this.continueBtn) {
       this.continueBtn.empty();
       if (generating) {
@@ -3079,7 +3211,7 @@ export class SessionView extends ItemView {
       }
     }
 
-    // ?怨쀫?: ??源??/ ?類ㅼ젫 nav
+    // 재생성 / 형제 nav
     if (this.regenBtn) {
       const canRegen = isAINode(cur) && cur.parent != null;
       this.regenBtn.disabled = generating || !canRegen;
@@ -3093,10 +3225,10 @@ export class SessionView extends ItemView {
     if (this.nextSibBtn)
       this.nextSibBtn.disabled = generating || idx >= siblings.length - 1;
 
-    // side-panel / settings ??placeholder ????쑵??源딆넅 ????(Notice ?袁?)
+    // side-panel 버튼은 생성 중에도 항상 활성(다른 버튼과 달리 disable 하지 않음).
     if (this.sidePanelBtn) this.sidePanelBtn.disabled = false;
 
-    // ??삳쐭??筌앸Þ爰쇽㎕?섎┛
+    // 즐겨찾기(퀵세이브) 버튼
     if (this.nodeFavBtn) {
       const fav = cur.favorite === true;
       this.nodeFavBtn.toggleClass("is-favorited", fav);
@@ -3608,8 +3740,8 @@ export class SessionView extends ItemView {
     } else {
       this.proPendingEl = null;
     }
-    // 인라인 삽화(번역 패널) — 스크롤 복원 전에 꽂아 높이를 이전과 같게.
-    this.renderInlineIllustrations();
+    // 인라인 위젯(번역 패널) — 스크롤 복원 전에 꽂아 높이를 이전과 같게.
+    this.renderInlineWidgets();
     this.renderAiStartMarkerTranslation();
     scroller.scrollTop = scrollTop;
   }
@@ -4528,6 +4660,105 @@ export class SessionView extends ItemView {
    * 영향이 없고, 텍스트 노드를 건드리지 않으므로 재배치해도 편집·스크롤이 보존된다.
    * 생성(스트리밍) 중에는 배치하지 않는다 — 끝나면 renderBodySpans 경유로 재배치.
    */
+  /** 본문에 꽂히는 원자 위젯 재배치 — 인라인 삽화 + 세션 노트(QR /comment). */
+  private renderInlineWidgets(): void {
+    this.renderInlineIllustrations();
+    this.renderInlineNotes();
+  }
+
+  /**
+   * 인라인 노트(QR /comment) 배치 — 삽화와 같은 규칙(앵커는 저장 안 하고 렌더 시 계산,
+   * 활성 경로에 없는 노드의 노트는 자연히 미표시). 노드당 여러 개가 나올 수 있다.
+   * 위젯은 글자 0개(제목=CSS content, 본문=textarea value)라 본문 diff/offset 에 영향 없다.
+   */
+  private renderInlineNotes(): void {
+    if (this.generation) return;
+    if (this.deferWhileComposing("inline-notes", () => this.renderInlineNotes())) {
+      return;
+    }
+    const used = new Set<string>();
+    this.inlineNoteEls = [];
+    const anchors =
+      this.session && this.notes
+        ? computeNoteAnchors(this.session, this.notes)
+        : [];
+    if (anchors.length > 0) {
+      this.placeNotesInBody(anchors, used);
+      if (this.translationEditEl) this.placeNotesInTranslation(anchors, used);
+    }
+    for (const [key, el] of this.inlineNotePool) {
+      if (!used.has(key)) {
+        el.remove();
+        this.inlineNotePool.delete(key);
+      }
+    }
+  }
+
+  /** 풀에서 노트 위젯을 꺼내거나 새로 만든다 — 재사용해야 접힘 상태가 보존된다. */
+  private acquireNoteWidget(key: string, note: SessionNote): HTMLElement {
+    const existing = this.inlineNotePool.get(key);
+    if (existing) return existing;
+    const el = createNoteWidgetEl(note, {
+      onDelete: (n) => void this.deleteNote(n.id),
+    });
+    this.inlineNotePool.set(key, el);
+    return el;
+  }
+
+  private async deleteNote(noteId: string): Promise<void> {
+    if (!this.sessionFile) return;
+    await this.store.deleteSessionNote(this.sessionFile, noteId);
+  }
+
+  /** 원문 본문에 노트 위젯 삽입 — raw 앵커를 표시 offset 으로 바꿔 문단 경계에. */
+  private placeNotesInBody(anchors: NoteAnchor[], used: Set<string>): void {
+    const body = this.bodyEl;
+    if (!body) return;
+    for (const anchor of anchors) {
+      const key = "b\n" + anchor.note.id;
+      const el = this.acquireNoteWidget(key, anchor.note);
+      used.add(key);
+      const target = this.rawOffsetToDisplayOffset(anchor.offset);
+      let ref: Node | null = null;
+      let acc = 0;
+      for (const child of Array.from(body.childNodes)) {
+        if (acc >= target && !isInlineWidgetNode(child)) {
+          ref = child;
+          break;
+        }
+        acc += child.textContent?.length ?? 0;
+      }
+      body.insertBefore(el, ref);
+      this.inlineNoteEls.push(el);
+    }
+  }
+
+  /** 번역 편집 영역에 노트 위젯 삽입 — 앵커 이후 첫 문단 블록 앞에. */
+  private placeNotesInTranslation(anchors: NoteAnchor[], used: Set<string>): void {
+    const editEl = this.translationEditEl;
+    if (!editEl) return;
+    for (const anchor of anchors) {
+      const key = "t\n" + anchor.note.id;
+      const el = this.acquireNoteWidget(key, anchor.note);
+      used.add(key);
+      const block = this.translationBlocks.find(
+        (b) => b.offset >= anchor.offset
+      );
+      editEl.insertBefore(el, block?.el ?? null);
+      this.inlineNoteEls.push(el);
+    }
+  }
+
+  /** notes.json 이 바뀌면(내가 쓴 것 포함) 위젯만 다시 꽂는다. */
+  private async refreshNotes(): Promise<void> {
+    if (!this.sessionFile) {
+      this.notes = null;
+      return;
+    }
+    this.notes = await this.store.getSessionNotes(this.sessionFile);
+    this.preserveReadingPosition(() => this.renderInlineNotes());
+  }
+
   private renderInlineIllustrations(): void {
     if (this.generation) return;
     // 위젯 제거·재삽입은 문서 선택영역이 걸쳐 있는 본문 서브트리를 건드린다 —
@@ -4632,11 +4863,7 @@ export class SessionView extends ItemView {
     let ref: Node | null = null;
     let acc = 0;
     for (const child of Array.from(body.childNodes)) {
-      const isWidget =
-        child instanceof HTMLElement &&
-        (child.hasClass("ggai-inline-illustration") ||
-          child.hasClass("ggai-ai-start-marker"));
-      if (acc >= target && !isWidget) {
+      if (acc >= target && !isInlineWidgetNode(child)) {
         ref = child;
         break;
       }
@@ -4693,10 +4920,7 @@ export class SessionView extends ItemView {
       let ref: Node | null = null;
       let acc = 0;
       for (const child of Array.from(body.childNodes)) {
-        const isWidget =
-          child instanceof HTMLElement &&
-          child.hasClass("ggai-inline-illustration");
-        if (acc >= target && !isWidget) {
+        if (acc >= target && !isInlineWidgetNode(child)) {
           ref = child;
           break;
         }
@@ -5294,7 +5518,7 @@ export class SessionView extends ItemView {
       }
       remaining -= len;
     }
-    // ??媛? 癰귣챶揆 ??
+    // 못 찾았으면(offset 이 본문 끝을 넘음) 맨 끝에 caret 을 둔다.
     const range = document.createRange();
     range.selectNodeContents(root);
     range.collapse(false);
@@ -5309,7 +5533,7 @@ export class SessionView extends ItemView {
   }
 }
 
-// ?????????????????????????????? module-level helpers ??????????????????????????????
+// ──────────────────────────────── module-level helpers ────────────────────────────────
 
 function scenarioFileOfSessionFile(sessionFile: string): string | null {
   const parts = sessionFile.split("/");
@@ -5319,6 +5543,19 @@ function scenarioFileOfSessionFile(sessionFile: string): string | null {
 
 function hasVisibleText(text: string): boolean {
   return text.trim().length > 0;
+}
+
+/**
+ * 본문에 꽂힌 **글자 0개 원자 위젯**인가 (인라인 삽화 / 노트 / AI 시작 마커).
+ * 위젯 앞에 다른 위젯을 꽂지 않도록 삽입 기준점 탐색에서 건너뛴다.
+ */
+function isInlineWidgetNode(node: Node): boolean {
+  return (
+    node instanceof HTMLElement &&
+    (node.hasClass("ggai-inline-illustration") ||
+      node.hasClass("ggai-note-block") ||
+      node.hasClass("ggai-ai-start-marker"))
+  );
 }
 
 /**

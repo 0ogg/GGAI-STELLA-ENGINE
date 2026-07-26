@@ -9,6 +9,16 @@ import { parseCharx } from "./parse-charx";
 import { extractCharacterCardJsonFromPng } from "./png-chunk";
 import { writeLorebook, WriteLorebookResult } from "./write-lorebook";
 import { writePromptPresetFromImport, WritePromptResult } from "./write-prompt";
+import {
+  resolveUniqueQuickReplyFile,
+  writeQuickReplySetFile,
+} from "./write-quick-reply";
+import {
+  normalizeQuickReplySet,
+  uniqueQuickReplySetName,
+} from "../types/quick-reply";
+import { scanQuickReplies } from "../util/scan-quick-replies";
+import { normalizeRegexScript, type RegexScript } from "../types/regex";
 import { uuidv4 } from "../util/uuid";
 import { writeScenario, WriteScenarioResult } from "./write-scenario";
 
@@ -30,6 +40,12 @@ export type ImportResult =
       story?: NaiStoryProgress;
     }
   | { kind: "prompt"; format: ImportFormat; write: WritePromptResult }
+  | { kind: "quick-reply"; format: ImportFormat; file: string; name: string }
+  /**
+   * 정규식 스크립트는 vault 파일이 아니라 `PluginData.regexScripts`(전역) 또는
+   * 시나리오 카드에 얹히는 설정이라, 디스패처는 **파싱만 하고 기록은 호출자**가 한다.
+   */
+  | { kind: "regex"; format: ImportFormat; script: RegexScript }
   | { kind: "error"; format: ImportFormat | "unknown"; error: string };
 
 /**
@@ -118,6 +134,30 @@ export async function importFile(
           favorite: false,
         }),
       };
+    }
+    case "sillytavern-quick-reply": {
+      try {
+        const set = normalizeQuickReplySet(data, fallbackName);
+        // 같은 세트를 두 번 가져와도 이름이 겹치지 않게 — 하위 메뉴가 이름으로 참조한다.
+        set.name = uniqueQuickReplySetName(
+          set.name,
+          (await scanQuickReplies(vault)).map((i) => i.set.name)
+        );
+        const file = await resolveUniqueQuickReplyFile(vault, set.name);
+        await writeQuickReplySetFile(vault, file, set);
+        return { kind: "quick-reply", format, file, name: set.name };
+      } catch (err) {
+        return { kind: "error", format, error: errMsg(err) };
+      }
+    }
+    case "sillytavern-regex": {
+      const script = normalizeRegexScript(data, uuidv4());
+      if (!script) {
+        return { kind: "error", format, error: "찾을 정규식이 비어 있습니다." };
+      }
+      // 이름이 없으면 파일명을 쓴다(ST 는 scriptName 을 항상 넣지만 손편집본 대비).
+      if (!script.scriptName) script.scriptName = fallbackName;
+      return { kind: "regex", format, script };
     }
     case "novelai-lorebook": {
       const book = parseNovelAILorebook(data, fallbackName);

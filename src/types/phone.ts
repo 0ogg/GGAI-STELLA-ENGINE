@@ -367,14 +367,54 @@ export interface SnsAccount {
   followers: number;
   /** 한 줄 성향/말투 메모 — 생성 시 일관성 재료. */
   persona?: string;
+  /**
+   * 계정 등급 (v3 §V3-4) — 1 캐릭터 시나리오(카드 자체가 인물) / 2 로어북 인물
+   * (세계관 시나리오의 로어북에 등록된 사람) / 3 엑스트라(SNS 에서만 태어난 NPC).
+   * 등장 빈도의 기준: 배치 활동의 대부분이 1·2 여야 엑스트라가 판치지 않는다.
+   * 미지정이면 `accountTier` 가 kind 로 파생한다(구버전 파일 호환).
+   */
+  tier?: 1 | 2 | 3;
   firstSeen: number;
   lastActive: number;
   postCount: number;
 }
 
+/** 계정 등급 (§V3-4) — 저장값 우선, 없으면 kind 로 파생. */
+export function accountTier(acc: SnsAccount): 1 | 2 | 3 {
+  if (acc.tier === 1 || acc.tier === 2 || acc.tier === 3) return acc.tier;
+  return acc.kind === "character" ? 1 : 3;
+}
+
 export interface PhoneAccountsFile {
   version: 1;
   accounts: SnsAccount[];
+  /**
+   * 로어북 인물 스캔 기록 (§V3-4) — 시나리오 stella id → 마지막 스캔 시각.
+   * 같은 세계를 매 배치 다시 AI 로 훑지 않기 위한 마크다.
+   */
+  castScans?: Record<string, number>;
+}
+
+/**
+ * 스텔라 네트워크 리스트 (v3) — 트위터 리스트에 해당. "팔로우"는 몰입용 표현이고
+ * 실제로 담는 것은 **사건을 반영할 세계(시나리오)** 다.
+ *
+ * - `scenarioIds` = 이 리스트 피드가 사건 재료로 삼는 세계. 비면 그 리스트는
+ *   아무 사건도 반영하지 않는다(생성도 돌지 않는다).
+ * - 등장 범위는 열려 있다 — 리스트 밖 인물도 답글·잡담으로 나올 수 있다.
+ *   단 `bannedScenarioIds` 에 올린 인물은 그 리스트 피드에 일절 등장하지 않는다.
+ */
+export interface SnsList {
+  id: string;
+  name: string;
+  scenarioIds: string[];
+  bannedScenarioIds?: string[];
+  /**
+   * 계정 단위 밴 (§V3-4) — 시나리오에 매이지 않는 인물(로어북 인물·엑스트라)을
+   * 계정 관리 화면에서 바로 밴할 때 쓴다. 시나리오가 있는 계정은 기존
+   * `bannedScenarioIds` 로 밴한다(같은 개념을 둘로 나누지 않는다).
+   */
+  bannedAccountIds?: string[];
 }
 
 export function createEmptyPhoneAccounts(): PhoneAccountsFile {
@@ -385,6 +425,14 @@ export function createEmptyPhoneAccounts(): PhoneAccountsFile {
 export function normalizePhoneAccounts(raw: unknown): PhoneAccountsFile {
   const out = createEmptyPhoneAccounts();
   if (!raw || typeof raw !== "object") return out;
+  const scans = (raw as { castScans?: unknown }).castScans;
+  if (scans && typeof scans === "object") {
+    const kept: Record<string, number> = {};
+    for (const [id, at] of Object.entries(scans as Record<string, unknown>)) {
+      if (typeof at === "number" && at > 0) kept[id] = at;
+    }
+    if (Object.keys(kept).length > 0) out.castScans = kept;
+  }
   const accounts = (raw as { accounts?: unknown }).accounts;
   if (!Array.isArray(accounts)) return out;
   for (const a of accounts) {
@@ -416,6 +464,9 @@ export function normalizePhoneAccounts(raw: unknown): PhoneAccountsFile {
           : 0,
       ...(typeof acc.persona === "string" && acc.persona
         ? { persona: acc.persona }
+        : {}),
+      ...(acc.tier === 1 || acc.tier === 2 || acc.tier === 3
+        ? { tier: acc.tier }
         : {}),
       firstSeen: typeof acc.firstSeen === "number" ? acc.firstSeen : 0,
       lastActive: typeof acc.lastActive === "number" ? acc.lastActive : 0,
@@ -530,18 +581,17 @@ export interface PhonePluginData {
   /** 폰 생성 언어 (예: "한국어"). 빈 값 = 지시 없음. */
   language?: string;
   /**
-   * 폰 안 번역 (PH5) — enabled 기본 켜짐(문자/SNS 번역 표시).
-   * auto = 생성 직후 자동 번역 (v2 개편, 기본 꺼짐) — 켜면 문자/SNS 생성이
-   * 끝나는 대로 번역을 돌려 번역본을 바로 보여준다(항목별 버튼 대체).
-   * 로어북은 폰 전용 — 세션 번역 설정과 독립. 프롬프트/모델은 전역 번역 설정 재사용.
-   * aiMatching = 번역 전 로어북 AI 선별(폰 전용 토글, 세션 [확장] 탭과 독립). 선별
-   * 모델/프롬프트는 전역 로어북 확장 설정을 재사용(없으면 기본값).
+   * 폰 안 번역 (PH5) — 켜면 문자/SNS/방송 생성이 끝나는 대로 자동으로 번역해
+   * 번역본을 바로 보여준다(기본 꺼짐 = 번역 호출 없음). 별도 "자동 번역" 옵션은
+   * 없앴다 — 사용 = 자동.
+   * 프롬프트/모델/로어북은 전역 번역 설정을 그대로 재사용한다(폰 전용 로어북 없음).
+   *
+   * **이 값은 "자동 번역" 스위치일 뿐이다.** 수동 번역 UI(번역 보기·원문 보기·
+   * 개별 재생성)를 여기에 묶지 않는다 — 묶었다가 자동을 끄면 수동 기능까지
+   * 통째로 사라졌다 (2026-07-26 사고, 회귀금지.md).
    */
   translation?: {
     enabled?: boolean;
-    auto?: boolean;
-    lorebookIds?: string[];
-    aiMatching?: boolean;
   };
   /** 문자 답장 프롬프트 (phoneText 버킷) — 미지정 = 기본. */
   textPromptId?: string;
@@ -569,14 +619,45 @@ export interface PhonePluginData {
   snsIncludeLore?: boolean;
   /** 랜덤 세션 2개 추가 첨부 (v2, 기본 끔 — 각 항목 토큰은 확정값의 50%). */
   snsRandomSessions?: boolean;
-  /** SNS 참가에서 제외한 시나리오 stella id 목록 (설정창 체크 해제). */
+  /**
+   * @deprecated v3 리스트(`snsLists`)로 대체됨 — 더 이상 읽지 않는다.
+   * 인물 축 제외는 리스트별 밴(`SnsList.bannedScenarioIds`)이 담당한다.
+   */
   snsExcludedScenarioIds?: string[];
+  /**
+   * 스텔라 네트워크 리스트 (v3) — 사건을 반영할 세계 묶음. **비어 있으면 SNS
+   * 자동 생성이 돌지 않는다**(팔로우한 계정이 없는 상태 = 조용한 피드).
+   */
+  snsLists?: SnsList[];
+  /** 현재 보고 있는 = 생성 대상 리스트 id. 못 찾으면 첫 리스트. */
+  activeSnsListId?: string;
   /** 갱신 1회당 최소 새 게시글 수 (v2, 기본 2 — 미달 시 1회 재시도). */
   snsMinNewPosts?: number;
-  /** 배치당 신규 계정 발명 상한 (v2, 기본 3 — 넘치면 계정 등록 없이 익명 처리). */
+  /** 배치당 신규 계정 발명 상한 (v2, 기본 3 — 넘치는 활동은 폐기된다). */
   snsNewAccountCap?: number;
+  /**
+   * 배치 활동 중 등급 1·2(캐릭터 시나리오 + 로어북 인물) 비율 하한 % (§V3-4,
+   * 기본 70). 미달분의 엑스트라 활동은 엔진이 잘라낸다 — 지시만으로는 안 지켜진다.
+   */
+  snsNamedRatio?: number;
+  /**
+   * 로어북 인물 자동 등록 (§V3-4, 기본 켬) — 갱신마다 아직 훑지 않은 세계
+   * 하나의 로어북에서 "사람"만 AI 로 골라 등급 2 계정으로 등록한다.
+   */
+  snsCastScan?: boolean;
+  /** 로어북 인물 선별 프롬프트 (phoneCast 버킷) — 미지정 = 기본. */
+  castPromptId?: string;
+  /** 한 세계에서 등록할 로어북 인물 수 상한 (기본 12). */
+  snsCastCap?: number;
+  /** 인물 선별에 첨부할 그 세계 로어북 분량 (토큰, 기본 4000). */
+  snsCastTokens?: number;
   /** 답글 알림 마지막 확인 시각 — 이보다 새 답글이 안 읽음 배지로 뜬다. */
   snsNotifSeenAt?: number;
+  /**
+   * 방송별 "여기까지 봤음" 채팅 id (key = 세션 파일 경로). 방송 화면을 떠날 때
+   * 저장하고, 다시 열면 이 지점 아래부터를 새 채팅으로 구분해 흘려 보낸다.
+   */
+  tubeSeen?: Record<string, string>;
   /** 갱신 트리거 (PH2). */
   triggers?: PhoneTriggerSettings;
   /** 미응답 수신 문자 상한 (기본 2, 0=무제한) — 답장 안 한 스레드가 이만큼 쌓이면 갱신이 쉼. */
@@ -588,12 +669,26 @@ export interface PhonePluginData {
   maxReplyDelayMinutes?: number;
   /** 갱신 1회당 SNS 활동(게시글/답글) 상한 (기본 6, 0=SNS 자동 갱신 끔). */
   snsPerRefresh?: number;
+  /**
+   * 새 글 중 "일상글"(세션 사건과 무관한 생활글) 목표 비율 % (기본 70).
+   * 세션에 새 진행분이 없으면 이 값과 무관하게 100%(잡담 모드)로 동작한다.
+   */
+  snsDailyRatio?: number;
+  /**
+   * 갱신 1회당 "여파 글" 상한 (기본 1, 0=끔). 사건을 직접 겪지 않은 그 세계
+   * 사람이 공개적으로 드러난 파장(사이렌·통제된 길·문 닫은 가게·도는 소문)에
+   * 자기 일상이 영향받은 것만 쓰는 글. 내막·이름은 모른 채다 — 당사자만
+   * 사건을 쓰게 한 v3 규칙이 이 종류를 통째로 없애서 되살린 예외다.
+   */
+  snsBystanderCap?: number;
   /** 세션 생성문에서 방송 상황을 감지해 자동으로 방송을 시작 (PH4, 기본 꺼짐). */
   streamAutoDetect?: boolean;
   /** 스텔라튜브 사용 (v2 §7) — 끄면 노드 반응 생성 없음 (undefined = 켬). */
   tubeEnabled?: boolean;
   /** 스텔라튜브 채팅 프롬프트 (phoneTube 버킷) — 미지정 = 기본. */
   tubePromptId?: string;
+  /** 방송 시작 판정 프롬프트 (phoneStreamDetect 버킷) — 미지정 = 기본. */
+  streamDetectPromptId?: string;
   /**
    * 폰 이미지 모델 (PH5) — 카메라 촬영·SNS 사진 생성에 사용. 미지정 = 기본 이미지
    * 프로필. 이미지 프로필이 하나도 없으면 SNS 사진은 캡션 텍스트로만 표시된다.
@@ -776,11 +871,17 @@ export function normalizeSessionStream(raw: unknown): SessionStreamFile | null {
   };
 }
 
-/** 방송 자동 감지 키워드 — 보수적으로 (오판 방지: 흔한 단어 제외). */
+/**
+ * 방송 자동 감지 키워드 — 시작 스위치가 아니라 **판정 요청 신호**라(실제 시작은
+ * AI 판정이 거른다) 넓게 잡아도 안전하다. 부분 일치라 "방송국"·"配信中" 등도
+ * "방송"·"配信" 으로 걸린다.
+ */
 export const STREAM_DETECT_KEYWORDS: readonly string[] = [
-  "방송", "생중계", "스트리밍", "생방송",
-  "streaming", "broadcast", "live stream", "going live",
-  "配信", "生放送", "生中継",
+  "방송", "생중계", "스트리밍", "생방송", "라이브", "온에어", "송출",
+  "스트리머", "시청자", "채팅창", "도네이션", "도네",
+  "streaming", "broadcast", "live stream", "livestream", "going live",
+  "on air", "streamer", "viewers", "webcam",
+  "配信", "生放送", "生中継", "ライブ", "視聴者", "リスナー",
 ];
 
 /** 생성문에 방송 시작 정황이 있는지 (대소문자 무시 부분 일치). */

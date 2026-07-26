@@ -14,6 +14,7 @@ import {
 import { EditGuard } from "./edit-guard";
 import { FieldDef, renderForm } from "./form-renderer";
 import { ConfirmModal } from "./modals";
+import { exportLorebook } from "./entity-actions";
 
 const SAVE_DEBOUNCE_MS = 400;
 
@@ -136,10 +137,14 @@ export class LorebookEditorSection {
     renderEditableTitle(header, this.book.meta.name || "Lorebook", (next) => {
       if (this.book) this.book.meta.name = next;
       this.queueSave();
-      this.renderShell();
     });
 
     const actions = header.createDiv({ cls: "ggai-editor-actions" });
+    renderIconActionButton(actions, {
+      icon: "upload",
+      label: "내보내기",
+      onClick: () => void this.handleExport(),
+    });
     renderIconActionButton(actions, {
       icon: "copy",
       label: "복제",
@@ -535,6 +540,14 @@ export class LorebookEditorSection {
         `저장 실패: ${err instanceof Error ? err.message : String(err)}`
       );
     }
+  }
+
+  /** 월드인포 JSON 으로 내보내기 — 미저장 편집을 먼저 반영한 뒤 실행. */
+  private async handleExport(): Promise<void> {
+    const lorebookFile = this.lorebookFile;
+    if (!lorebookFile) return;
+    await this.flushNow();
+    await exportLorebook(this.plugin, lorebookFile);
   }
 
   private async handleDuplicate(): Promise<void> {

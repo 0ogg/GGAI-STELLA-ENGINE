@@ -11,6 +11,7 @@ import {
 } from "./editor-cover";
 import { type FieldDef, renderForm } from "./form-renderer";
 import { ConfirmModal, ScenarioSessionCopyModal } from "./modals";
+import { exportScenarioCard } from "./entity-actions";
 import { parseTalkativeness } from "../util/group-speaker";
 
 const SAVE_DEBOUNCE_MS = 400;
@@ -158,7 +159,6 @@ export class ScenarioEditorSection {
     renderEditableTitle(header, data.name || "이름 없는 시나리오", (next) => {
       data.name = next;
       this.queueSave();
-      this.render();
     });
 
     const actions = header.createDiv({ cls: "ggai-editor-actions" });
@@ -166,6 +166,11 @@ export class ScenarioEditorSection {
       icon: "braces",
       label: "JSON 파일 열기",
       onClick: () => void this.openJsonFile(),
+    });
+    renderIconActionButton(actions, {
+      icon: "upload",
+      label: "내보내기",
+      onClick: () => void this.handleExport(),
     });
     renderIconActionButton(actions, {
       icon: "copy",
@@ -424,6 +429,14 @@ export class ScenarioEditorSection {
     } else {
       new Notice(`파일을 찾을 수 없습니다: ${this.scenarioFile}`);
     }
+  }
+
+  /** 캐릭터카드로 내보내기 — 미저장 편집을 먼저 반영한 뒤 실행. */
+  private async handleExport(): Promise<void> {
+    const scenarioFile = this.scenarioFile;
+    if (!scenarioFile) return;
+    await this.flushNow();
+    await exportScenarioCard(this.plugin, scenarioFile);
   }
 
   private async handleDuplicate(): Promise<void> {

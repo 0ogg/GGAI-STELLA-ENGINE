@@ -1,4 +1,4 @@
-import { setIcon } from "obsidian";
+import { Notice, setIcon } from "obsidian";
 import type { SettingsPanel, SettingsPanelContext } from "../../../services/settings-panel-registry";
 import type { StellaScenario } from "../../../types/scenario";
 import type { RegexExtensionTarget, RegexScript } from "../../../types/regex";
@@ -6,6 +6,7 @@ import { createBlankRegexScript, REGEX_PLACEMENT, timingOf } from "../../../type
 import { readScenarioRegexScripts, writeScenarioRegexScripts } from "../../../util/regex-scripts";
 import { scenarioFileOfSessionFile } from "../../../util/build-session-context";
 import { uuidv4 } from "../../../util/uuid";
+import { exportRegexScript } from "../../entity-actions";
 import { RegexEditModal } from "../../regex-edit-modal";
 
 /** 목록 종류 — full = 본문(대상/시점 있음), post = 확장 후가공(받자마자 무조건 적용). */
@@ -177,6 +178,13 @@ function renderScriptList(
     setIcon(editBtn, "pencil");
     editBtn.addEventListener("click", () => openEditor(ctx, scripts, index, save, mode));
 
+    const exportBtn = row.createEl("button", {
+      cls: "ggai-btn ggai-regex-row-btn",
+      attr: { "aria-label": "내보내기" },
+    });
+    setIcon(exportBtn, "download");
+    exportBtn.addEventListener("click", () => exportRegexScript(script));
+
     const delBtn = row.createEl("button", {
       cls: "ggai-btn ggai-regex-row-btn",
       attr: { "aria-label": "삭제" },
@@ -187,10 +195,55 @@ function renderScriptList(
     });
   });
 
-  const addBtn = parent.createEl("button", { cls: "ggai-btn ggai-regex-add" });
+  const actions = parent.createDiv({ cls: "ggai-regex-actions" });
+  const addBtn = actions.createEl("button", { cls: "ggai-btn ggai-regex-add" });
   setIcon(addBtn.createSpan(), "plus");
   addBtn.createSpan({ text: "정규식 추가" });
   addBtn.addEventListener("click", () => openEditor(ctx, scripts, -1, save, mode));
+
+  const importBtn = actions.createEl("button", { cls: "ggai-btn ggai-regex-add" });
+  setIcon(importBtn.createSpan(), "upload");
+  importBtn.createSpan({ text: "가져오기" });
+  importBtn.addEventListener("click", () => runRegexImport(ctx, scripts, save));
+}
+
+/**
+ * 실리태번 정규식 파일(.json)을 **이 목록**으로 가져온다.
+ * 판별은 중앙 디스패처(`store.importFile`) 경유 — 포맷 시그니처를 여기서 다시 쓰지 않는다.
+ * (대시보드/사이드바의 [가져오기]로 집어넣으면 전역 목록으로 간다.)
+ */
+function runRegexImport(
+  ctx: SettingsPanelContext,
+  scripts: RegexScript[],
+  save: (next: RegexScript[]) => Promise<void>
+): void {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = ".json";
+  input.style.display = "none";
+  input.addEventListener("change", async () => {
+    const file = input.files?.[0];
+    input.remove();
+    if (!file) return;
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const result = await ctx.plugin.store.importFile(bytes, file.name);
+      if (result.kind !== "regex") {
+        new Notice(
+          result.kind === "error"
+            ? `가져오기 실패: ${result.error}`
+            : `이 곳에서는 정규식 파일만 가져옵니다 (감지: ${result.kind}).`
+        );
+        return;
+      }
+      await save([...scripts, result.script]);
+      new Notice(`정규식 가져오기: ${result.script.scriptName}`);
+    } catch (err) {
+      new Notice(`가져오기 실패: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+  document.body.appendChild(input);
+  input.click();
 }
 
 /** index >= 0 이면 그 스크립트 편집, -1 이면 새로 추가. */

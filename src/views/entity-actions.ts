@@ -6,8 +6,14 @@
  * 호출부 콜백으로 잇는다. 목록 재렌더 자체는 store 이벤트가 이미 전파한다.
  */
 
-import { Notice, Platform, TFile } from "obsidian";
+import { Menu, Notice, Platform, TFile } from "obsidian";
+import {
+  buildDefaultPromptPreset,
+  NEW_PRESET_BASE_NAME,
+} from "../util/default-prompt-preset";
 import type { ReadingExportMode } from "../util/export-session";
+import { buildCharacterCardExport } from "../export/to-character-card";
+import { embedCharacterCardInPng, toPngBytes } from "../export/png-card";
 import type { ImportResult } from "../import";
 import type { NaiStoryProgress } from "../import/parse-nai-story";
 import {
@@ -24,6 +30,8 @@ import {
 } from "../util/new-session";
 import type { SessionMode, StellaSession } from "../types/session";
 import type { ActiveSettings } from "../types/preset";
+import type { RegexScript } from "../types/regex";
+import { runAutoQuickRepliesFor } from "./session-host";
 import type StellaEnginePlugin from "../main";
 import { createEmptySessionSummaries } from "../types/summary";
 import { buildSpans, pathToLeaf, spansToText } from "../util/session-text";
@@ -128,6 +136,12 @@ export async function createAndOpenSession(
     await plugin.store.saveSession(result.sessionFile, result.session);
     await openSessionByPath(plugin, result.sessionFile);
     new Notice(`세션 생성: ${name}`);
+    // "새 세션을 시작할 때" 자동 실행 QR — 세션창이 열린 뒤에 돈다(기다리지 않는다).
+    void runAutoQuickRepliesFor(
+      plugin.app.workspace,
+      result.sessionFile,
+      "executeOnNewChat"
+    );
   } catch (err) {
     new Notice(
       `세션 생성 실패: ${err instanceof Error ? err.message : String(err)}`
@@ -310,7 +324,7 @@ export async function startNextEpisode(
     step = "설정 읽기";
     const settings = await plugin.resolveActiveSettings(sessionFile);
     if (boundaryNodeId && settings.summarize?.enabled === true) {
-      new Notice("이전 화 요약 정리 중…");
+      // 진행 안내는 Core 가 label + 모델명으로 띄운다 (CLAUDE.md 7).
       try {
         await plugin.summary.summarize(sessionFile, boundaryNodeId);
       } catch (err) {
@@ -459,8 +473,30 @@ export async function copyScenarioWithPrompt(
 }
 
 /**
- * 프롬프트 세트를 SillyTavern 호환 JSON 파일로 **기기에 다운로드**한다(vault 안이 아니라
- * OS 다운로드 폴더 — 실리태번 등 외부 앱에 바로 옮길 수 있게). 사이드바/디테일/대시보드 공유.
+ * 내보낸 파일을 **기기에 다운로드**한다(vault 안이 아니라 OS 다운로드 폴더 —
+ * 실리태번 등 외부 앱으로 바로 옮길 수 있게). 모든 익스포트가 이 함수를 쓴다.
+ */
+function downloadExport(
+  filename: string,
+  data: string | Uint8Array,
+  mime: string
+): void {
+  const part: BlobPart =
+    typeof data === "string" ? data : (data.slice().buffer as ArrayBuffer);
+  const url = URL.createObjectURL(new Blob([part], { type: mime }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  new Notice(`다운로드: ${filename}`);
+}
+
+/**
+ * 프롬프트 세트를 SillyTavern 호환 JSON 파일로 다운로드한다.
+ * 사이드바/디테일/대시보드 공유.
  */
 export async function exportPromptPreset(
   plugin: StellaEnginePlugin,
@@ -470,16 +506,115 @@ export async function exportPromptPreset(
     const { name, json } = await plugin.store.buildPromptPresetExportJson(
       presetFile
     );
-    const blob = new Blob([json], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${name}.json`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-    new Notice(`다운로드: ${name}.json`);
+    downloadExport(`${name}.json`, json, "application/json");
+  } catch (err) {
+    new Notice(
+      `내보내기 실패: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
+
+/**
+ * 정규식 스크립트 한 개를 SillyTavern 호환 JSON 파일로 다운로드한다.
+ * ST 도 파일 하나 = 스크립트 하나로 내보내고, 우리 `RegexScript` 가 곧 ST 의
+ * `RegexScriptData` 라 그대로 직렬화하면 왕복이 맞는다(`maxDepth: NaN` 은
+ * JSON 에서 `null` 이 되는데 ST 의 "무제한" 표현과 같다).
+ */
+export function exportRegexScript(script: RegexScript): void {
+  const name = script.scriptName.trim() || "정규식";
+  downloadExport(
+    `${sanitizeFileName(name)}.json`,
+    JSON.stringify(script, null, 2),
+    "application/json"
+  );
+}
+
+/**
+ * 다운로드 파일명에 못 쓰는 글자만 걷어낸다.
+ * store 의 익스포트(프롬프트/로어북/카드)는 vault 경로용 `sanitizeFolderName` 을
+ * 이미 통과한 이름을 돌려주지만, 정규식은 store 소유 데이터가 아니라 여기서 처리한다.
+ */
+function sanitizeFileName(name: string): string {
+  return name.replace(/[\\/:*?"<>|\n\r]/g, "_").trim().slice(0, 80);
+}
+
+/**
+ * 시나리오를 캐릭터카드로 다운로드한다 — PNG 카드 / JSON 중 선택.
+ * 썸네일이 없으면 PNG 를 만들 수 없으므로 JSON 만 내보낸다.
+ * 연결된 로어북은 카드 안(character_book)에 함께 들어간다.
+ */
+export async function exportScenarioCard(
+  plugin: StellaEnginePlugin,
+  scenarioFile: string
+): Promise<void> {
+  let source: Awaited<ReturnType<typeof plugin.store.buildScenarioExportSource>>;
+  try {
+    source = await plugin.store.buildScenarioExportSource(scenarioFile);
+  } catch (err) {
+    new Notice(
+      `내보내기 실패: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return;
+  }
+
+  const writeJson = () => {
+    const { v3 } = buildCharacterCardExport(source.scenario, source.books, false);
+    downloadExport(
+      `${source.name}.json`,
+      JSON.stringify(v3, null, 2),
+      "application/json"
+    );
+  };
+
+  const writePng = async () => {
+    if (!source.thumbnail) return;
+    try {
+      const base = await toPngBytes(
+        new Uint8Array(source.thumbnail.bytes),
+        source.thumbnail.ext
+      );
+      const { v3, v2 } = buildCharacterCardExport(source.scenario, source.books, true);
+      const png = embedCharacterCardInPng(base, {
+        ccv3: JSON.stringify(v3),
+        chara: JSON.stringify(v2),
+      });
+      downloadExport(`${source.name}.png`, png, "image/png");
+    } catch (err) {
+      new Notice(
+        `PNG 카드 생성 실패: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  };
+
+  if (!source.thumbnail) {
+    new Notice("썸네일 이미지가 없어 JSON 카드로 내보냅니다.");
+    writeJson();
+    return;
+  }
+
+  new ChoiceModal(
+    plugin.app,
+    "시나리오 내보내기",
+    "실리태번 등에서 읽을 캐릭터카드로 내보냅니다. 연결된 로어북도 카드 안에 함께 들어갑니다.",
+    [
+      { text: "PNG 카드", value: "png", cta: true },
+      { text: "JSON", value: "json" },
+    ],
+    (value) => {
+      if (value === "png") void writePng();
+      else if (value === "json") writeJson();
+    }
+  ).open();
+}
+
+/** 로어북을 SillyTavern 월드인포 JSON 파일로 다운로드한다. */
+export async function exportLorebook(
+  plugin: StellaEnginePlugin,
+  lorebookFile: string
+): Promise<void> {
+  try {
+    const { name, json } = await plugin.store.buildLorebookExportJson(lorebookFile);
+    downloadExport(`${name}.json`, json, "application/json");
   } catch (err) {
     new Notice(
       `내보내기 실패: ${err instanceof Error ? err.message : String(err)}`
@@ -797,6 +932,70 @@ async function resolveScenarioNameById(
 
 // ─── 생성 ─────────────────────────────────────────────
 
+/**
+ * 공용 "새로 만들기" 메뉴 — 좌측 사이드바 [추가]와 대시보드 홈 [+ NEW]가 같은 목록을
+ * 쓰도록 항목/라벨/아이콘을 한 곳에서 정의한다. 아이콘은 대시보드 탭 아이콘과 일치.
+ * 새 생성 항목이 늘면 여기만 고치면 두 화면에 동시에 반영된다.
+ */
+export function populateCreateMenu(
+  plugin: StellaEnginePlugin,
+  menu: Menu
+): Menu {
+  menu.addItem((i) =>
+    i
+      .setTitle("시나리오")
+      .setIcon("scroll-text")
+      .onClick(() => promptNewScenario(plugin))
+  );
+  menu.addItem((i) =>
+    i
+      .setTitle("그룹")
+      .setIcon("users")
+      .onClick(() => void openGroupCreator(plugin))
+  );
+  menu.addItem((i) =>
+    i
+      .setTitle("페르소나")
+      .setIcon("user")
+      .onClick(() => promptNewUser(plugin))
+  );
+  menu.addItem((i) =>
+    i
+      .setTitle("로어북")
+      .setIcon("book-open")
+      .onClick(() => promptNewLorebook(plugin))
+  );
+  menu.addItem((i) =>
+    i
+      .setTitle("프롬프트 세트")
+      .setIcon("list-tree")
+      .onClick(() => void createPromptSet(plugin))
+  );
+  return menu;
+}
+
+/**
+ * 프롬프트 세트 생성 — 이름은 묻지 않고 기본 이름으로 만든 뒤 편집기를 연다
+ * (다른 생성 항목과 달리 세트는 편집기에서 이름을 바꾸는 흐름). 사이드바/대시보드 공유.
+ */
+export async function createPromptSet(
+  plugin: StellaEnginePlugin
+): Promise<void> {
+  try {
+    const init = buildDefaultPromptPreset(NEW_PRESET_BASE_NAME);
+    const result = await plugin.store.createPromptPreset(
+      NEW_PRESET_BASE_NAME,
+      init
+    );
+    await plugin.openStellaEditor("prompt", result.presetFile);
+    new Notice(`프롬프트 세트 생성: ${NEW_PRESET_BASE_NAME}`);
+  } catch (err) {
+    new Notice(
+      `세트 생성 실패: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
+
 export function promptNewScenario(plugin: StellaEnginePlugin): void {
   new PromptModal(plugin.app, "새 시나리오", "시나리오 이름", "새 시나리오", (name) => {
     if (name == null || !name.trim()) return;
@@ -1043,6 +1242,13 @@ export function runImportPicker(plugin: StellaEnginePlugin): void {
         return;
       }
       const result = await plugin.store.importFile(bytes, file.name);
+      // 정규식은 vault 파일이 아니라 설정이라 디스패처가 기록하지 못한다 — 여기서
+      // 전역 목록에 얹는다(특정 시나리오/후가공 목록으로는 정규식 패널에서 가져오기).
+      if (result.kind === "regex") {
+        await plugin.savePluginData({
+          regexScripts: [...(plugin.data.regexScripts ?? []), result.script],
+        });
+      }
       reportImportResult(plugin, file.name, result);
       // 시나리오 임포트는 후속 열기까지 처리 (진행분이 있으면 세션으로 바로 돌입).
       if (result.kind === "scenario" && result.write.ok) {
@@ -1144,12 +1350,15 @@ async function performStChatImport(
       return;
     }
 
-    // 2) 노드 트리 빌드 후 빈 세션에 심는다.
+    // 2) 대화 트리를 먼저 다 만들어 **세션 생성 첫 쓰기에 통째로** 심는다.
+    //    만들고 나서 두 번째 저장으로 채우면, 그 사이 어디서든 실패했을 때 대화가
+    //    하나도 없는 빈 세션만 디스크에 남는다(임포트한 세션이 텅 비던 원인).
     const now = Date.now();
     const built = buildChatImportSession(parsed, choice.mode, now);
     const scenarios = await plugin.store.getScenarios();
     const item = scenarios.find((s) => s.scenarioFile === scenarioFile);
     const name = item ? defaultSessionName(item) : parsed.characterName || "채팅";
+    const persona = await plugin.resolveActiveUserProfile();
 
     const result = await plugin.store.createSession(
       scenarioFolder,
@@ -1157,14 +1366,9 @@ async function performStChatImport(
       name,
       "",
       plugin.data.current,
-      choice.mode
+      choice.mode,
+      { ...built, personaFile: persona.userFile }
     );
-    result.session.nodes = built.nodes;
-    result.session.meta.rootId = built.rootId;
-    result.session.meta.activeLeafId = built.activeLeafId;
-    const persona = await plugin.resolveActiveUserProfile();
-    result.session.meta.personaFile = persona.userFile;
-    await plugin.store.saveSession(result.sessionFile, result.session);
 
     await openSessionByPath(plugin, result.sessionFile);
     new Notice(
@@ -1219,5 +1423,15 @@ function reportImportResult(
     } else {
       new Notice(`프롬프트 임포트 중단 (${filename}): ${w.reason}`);
     }
+    return;
+  }
+  if (result.kind === "quick-reply") {
+    new Notice(`빠른 답장 임포트: ${result.name}`);
+    return;
+  }
+  if (result.kind === "regex") {
+    new Notice(
+      `정규식 임포트: ${result.script.scriptName} · 확장 탭 → 정규식 치환 (모든 세션 공통)`
+    );
   }
 }

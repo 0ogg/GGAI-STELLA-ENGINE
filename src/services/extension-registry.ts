@@ -113,6 +113,21 @@ export interface GenerationCompleteInput {
   profile: GenerationProfileLite;
 }
 
+/**
+ * 사용자가 이야기에 직접 쓴 텍스트 (챗 전송/소설 유저 입력) — 생성이 아니라
+ * **사용자 입력**이 서사를 진행시키는 순간의 훅. AI 생성만 보는
+ * `onGenerationComplete` 로는 "내가 방송을 켰다"처럼 사용자가 쓴 전개를 놓친다.
+ * 손편집(문단 수정) 같은 잦은 변경은 대상이 아니다 — 확정된 입력 1회만.
+ */
+export interface UserTextInput {
+  plugin: StellaEnginePlugin;
+  sessionFile: string;
+  /** 새로 만들어진 user-write 노드 id. */
+  nodeId: string;
+  /** 사용자가 이번에 쓴 텍스트. */
+  text: string;
+}
+
 /** 로어북 선택 대체 이음새 입력. */
 export interface LorebookSelectorInput {
   plugin: StellaEnginePlugin;
@@ -140,6 +155,11 @@ export interface StellaExtension {
   ): ContextContribution[] | Promise<ContextContribution[]>;
   /** 생성 완료 직후 자동 실행. 에러는 격리되어 다른 확장/생성 저장을 막지 않는다. */
   onGenerationComplete?(input: GenerationCompleteInput): void | Promise<void>;
+  /**
+   * 사용자가 이야기에 직접 쓴 직후 자동 실행 (챗 전송/소설 유저 입력).
+   * 사용자 입력도 서사 진행이므로 생성과 같은 자격으로 훅이 돈다.
+   */
+  onUserText?(input: UserTextInput): void | Promise<void>;
   /**
    * 로어북 선택 대체(단일 소유). 여러 확장이 등록하면 마지막 등록이 이긴다(경고 로그).
    * 없으면 기본 키워드 매칭.
@@ -216,6 +236,24 @@ export class StellaExtensionRegistry {
             await ext.onGenerationComplete!({ plugin: this.plugin, ...input });
           } catch (err) {
             console.warn(`[GGAI Stella] 확장 생성-완료 훅 실패 (${ext.id}):`, err);
+          }
+        })
+    );
+  }
+
+  /**
+   * 사용자 입력 훅을 모두 실행한다 (생성-완료 훅과 같은 격리/병렬 규약).
+   * 사용자 입력은 전송을 막지 않도록 호출부에서 await 하지 않아도 된다.
+   */
+  async runUserText(input: Omit<UserTextInput, "plugin">): Promise<void> {
+    await Promise.all(
+      [...this.extensions.values()]
+        .filter((ext) => ext.onUserText)
+        .map(async (ext) => {
+          try {
+            await ext.onUserText!({ plugin: this.plugin, ...input });
+          } catch (err) {
+            console.warn(`[GGAI Stella] 확장 사용자-입력 훅 실패 (${ext.id}):`, err);
           }
         })
     );

@@ -63,6 +63,8 @@ import {
   openExtensionActionsMenu,
   renderHeaderCommandBar,
 } from "./session-command-bar";
+import { SessionQuickReplyBar } from "./session-quick-reply-bar";
+import type { AutoExecuteFlagKey } from "../types/quick-reply";
 import { buildSpans, spansToText } from "../util/session-text";
 import { trimChatCompletionOutput } from "../util/text-completion-prompt";
 import {
@@ -88,6 +90,8 @@ import {
   type GalleryItem,
 } from "./gallery-modal";
 import { IllustrationCarousel } from "./illustration-carousel";
+import { createNoteWidgetEl } from "./note-widget";
+import { notesOfNode, type SessionNotes } from "../types/note";
 import { IllustrationRegenModal } from "./illustration-regen-modal";
 import { ParagraphRegenModal } from "./paragraph-regen-modal";
 import { ViewStylePopover } from "./view-style-popover";
@@ -128,6 +132,8 @@ export class ChatSessionView extends ItemView {
   // ── 미디어/보기 (C3) ──
   private translations: SessionTranslations | null = null;
   private illustrations: SessionIllustrations | null = null;
+  /** 세션 노트 (notes.json — QR /comment). 말풍선 밑 접이식 위젯으로 표시. */
+  private notes: SessionNotes | null = null;
   private translationViewActive = false;
   private translating = false;
   private illustrating = false;
@@ -177,6 +183,8 @@ export class ChatSessionView extends ItemView {
   private messagesEl: HTMLElement | null = null;
   private inputEl: HTMLTextAreaElement | null = null;
   private sendBtn: HTMLButtonElement | null = null;
+  /** 빠른 답장(QR) 바 — 입력바 바로 위. */
+  private qrBar: SessionQuickReplyBar | null = null;
   private streamBubbleEl: HTMLElement | null = null;
   private streamPaintQueued = false;
 
@@ -223,6 +231,8 @@ export class ChatSessionView extends ItemView {
       this.plugin.rememberActiveSessionFile(next);
       await this.loadSession();
       this.render();
+      // "세션을 열 때" 자동 실행 QR — 화면이 다 그려진 뒤에 돈다(기다리지 않는다).
+      void this.qrBar?.runAuto("executeOnChatChange");
     }
     return super.setState(state, result);
   }
@@ -240,6 +250,11 @@ export class ChatSessionView extends ItemView {
   /** AI 생성(스트리밍) 진행 중 — 이 탭은 다른 세션으로 갈아끼우면 안 된다 (session-host 규약). */
   isGenerating(): boolean {
     return this.generation != null;
+  }
+
+  /** 자동 실행 QR (session-host 규약) — 판단·실행은 전부 바가 소유한다. */
+  async runAutoQuickReplies(trigger: AutoExecuteFlagKey): Promise<void> {
+    await this.qrBar?.runAuto(trigger);
   }
 
   async flushPendingEdits(): Promise<void> {
@@ -317,6 +332,10 @@ export class ChatSessionView extends ItemView {
         this.render();
       })
     );
+    // 대시보드에서 QR 세트를 고치면 열려 있는 세션 바도 즉시 따라간다.
+    this.registerEvent(
+      this.store.on("quick-replies-changed", () => void this.qrBar?.refresh())
+    );
     this.registerEvent(
       this.store.on(
         "session-translations-changed",
@@ -346,6 +365,15 @@ export class ChatSessionView extends ItemView {
           });
         }
       )
+    );
+    this.registerEvent(
+      this.store.on("session-notes-changed", (file: string) => {
+        if (file !== this.sessionFile) return;
+        void this.store.getSessionNotes(file).then((n) => {
+          this.notes = n;
+          runWhenImeIdle(() => this.renderMessages());
+        });
+      })
     );
     this.render();
     // 모바일 — 뷰어 도구(갤러리/번역 전환)를 뷰 헤더 액션에 1회 등록.
@@ -384,6 +412,7 @@ export class ChatSessionView extends ItemView {
     }
     this.translations = await this.store.getSessionTranslations(this.sessionFile);
     this.illustrations = await this.store.getSessionIllustrations(this.sessionFile);
+    this.notes = await this.store.getSessionNotes(this.sessionFile);
     this.translationViewActive = this.translations?.displayMode === "translation";
     this.viewStyle = this.plugin.getViewStyle();
     await this.refreshMacroContext();
@@ -756,6 +785,14 @@ export class ChatSessionView extends ItemView {
     );
     this.applyViewStyle();
 
+    // 빠른 답장(QR) 바 — 입력바 바로 위 좌측. 열림/닫힘은 전역 영속.
+    this.qrBar = new SessionQuickReplyBar(root, this.plugin, {
+      sessionFile: () => this.sessionFile,
+      currentInput: () => this.inputEl?.value ?? "",
+      runText: (text, send) => this.applyQuickReplyText(text, send),
+    });
+    void this.qrBar.refresh();
+
     // 콕핏 입력바 — 입력창을 가운데 두고 리모컨을 좌/우 날개로 접어 넣는다.
     // 좌측 날개(되감기·미디어 2줄) + 가운데(입력+전송) + 우측 날개(세이브·보기·패널).
     // 재생성·형제이동은 마지막 말풍선 아래(renderTailControls)가 담당한다.
@@ -1046,6 +1083,8 @@ export class ChatSessionView extends ItemView {
       if (msg.role === "assistant" && !generatingThis) {
         this.renderBubbleIllustrations(stack, msg.nodeId);
       }
+      // 말풍선 밑 노트(QR /comment) — 노드 기준, 같은 노드에 여러 개.
+      if (!generatingThis) this.renderBubbleNotes(stack, msg.nodeId);
     });
 
     // 생성 중인데 노드 텍스트가 아직 비어 메시지로 안 잡히면 자리 말풍선을 만든다
@@ -1093,6 +1132,21 @@ export class ChatSessionView extends ItemView {
   }
 
   /** AI 말풍선 밑 삽화 캐러셀 — variant 가 있을 때만. */
+  /** 말풍선 밑 노트(QR `/comment`) — 노드 귀속, 접이식 위젯(소설 뷰와 같은 위젯). */
+  private renderBubbleNotes(stack: HTMLElement, nodeId: string): void {
+    if (!this.notes || !this.sessionFile) return;
+    for (const note of notesOfNode(this.notes, nodeId)) {
+      stack.appendChild(
+        createNoteWidgetEl(note, {
+          onDelete: (n) => {
+            const file = this.sessionFile;
+            if (file) void this.store.deleteSessionNote(file, n.id);
+          },
+        })
+      );
+    }
+  }
+
   private renderBubbleIllustrations(stack: HTMLElement, nodeId: string): void {
     const ill = this.illustrations;
     if (!ill || !this.sessionFile) return;
@@ -2181,6 +2235,19 @@ export class ChatSessionView extends ItemView {
     // 말풍선 내용은 이미 사용자가 친 그대로 — 재렌더 없이 캐시만 갱신됐다.
   }
 
+  // ── 빠른 답장 (QR) ───────────────────────────────────────────────
+
+  /** QR 버튼 결과를 입력창에 넣고, send 면 그대로 전송한다. */
+  private async applyQuickReplyText(text: string, send: boolean): Promise<void> {
+    if (this.inputEl) {
+      this.inputEl.value = text;
+      this.autosizeInput();
+      this.updateSendButton();
+      if (!send) this.inputEl.focus();
+    }
+    if (send) await this.handleSend();
+  }
+
   // ── 전송 / 생성 ──────────────────────────────────────────────────
 
   private async handleSend(): Promise<void> {
@@ -2222,6 +2289,13 @@ export class ChatSessionView extends ItemView {
       await this.persistSession("메시지 저장 실패");
       this.followTail = true;
       this.renderMessages();
+      // 사용자 입력도 서사 진행 — 확장 훅(폰 키워드/방송 감지 등)이 생성과 같은
+      // 자격으로 돈다. 전송 흐름을 막지 않게 백그라운드.
+      void this.plugin.extensions.runUserText({
+        sessionFile: this.sessionFile,
+        nodeId: node.id,
+        text,
+      });
     }
 
     // 그룹 챗 — 발화자 결정(지목 > 이름 불림 > 가중 랜덤) + 자동 연쇄 라운드 시작.
@@ -2256,6 +2330,11 @@ export class ChatSessionView extends ItemView {
       new Notice("GGAI Core 가 활성화되어 있지 않습니다.");
       return;
     }
+
+    // "생성 직전" 자동 실행 QR — planSessionRequest 앞이라 `/inject` 로 심은 지시문이
+    // 이번 전송에 실린다. 여기서 기다린다(끝나야 전송본이 확정된다).
+    await this.qrBar?.runAuto("executeBeforeGeneration");
+    if (!this.session || !this.sessionFile) return; // QR 실행 중 세션이 바뀌었을 수 있다
 
     const sessionFile = this.sessionFile;
     // 프리셋 랜덤 순환 — 소설 세션창과 같은 규칙. 값만 이 생성 1회의 전송에 얹고

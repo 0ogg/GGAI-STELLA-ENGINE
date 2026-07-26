@@ -9,7 +9,9 @@ import { SUMMARY_IO_INSTRUCTIONS } from "../../util/summarize-session";
 import { PARAGRAPH_REGEN_IO_INSTRUCTIONS } from "../../util/paragraph-regen";
 import { PRO_CONVERT_IO_INSTRUCTIONS } from "../../util/pro-convert";
 import {
+  PHONE_CAST_IO_INSTRUCTIONS,
   PHONE_SNS_IO_INSTRUCTIONS,
+  PHONE_STREAM_DETECT_IO_INSTRUCTIONS,
   PHONE_TUBE_IO_INSTRUCTIONS,
 } from "../../util/phone-prompts";
 import { LorebookSelectModal } from "../lorebook-select-modal";
@@ -42,6 +44,8 @@ export function getBucketIoInstructions(bucket: PromptBucket): string | null {
   if (bucket === "paragraphRegen") return PARAGRAPH_REGEN_IO_INSTRUCTIONS;
   if (bucket === "phoneSns") return PHONE_SNS_IO_INSTRUCTIONS;
   if (bucket === "phoneTube") return PHONE_TUBE_IO_INSTRUCTIONS;
+  if (bucket === "phoneStreamDetect") return PHONE_STREAM_DETECT_IO_INSTRUCTIONS;
+  if (bucket === "phoneCast") return PHONE_CAST_IO_INSTRUCTIONS;
   if (bucket === "proConvert") return PRO_CONVERT_IO_INSTRUCTIONS;
   return null;
 }

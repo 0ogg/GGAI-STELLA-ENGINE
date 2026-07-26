@@ -21,6 +21,7 @@ import type {
   IllustrationActiveSettings,
   LorebookPlusActiveSettings,
   ProActiveSettings,
+  QuickReplyActiveSettings,
   SummaryActiveSettings,
   TranslationActiveSettings,
 } from "./preset";
@@ -173,6 +174,8 @@ export interface SessionMeta {
   summarize?: SummaryActiveSettings;
   /** 로어북 확장 — 키워드/AI 매칭 스위치와 AI 선별 옵션. */
   lorebookPlus?: LorebookPlusActiveSettings;
+  /** 빠른 답장(QR) — 이 세션에서 켜 둔 세트. */
+  quickReply?: QuickReplyActiveSettings;
   /** 집필 프로(PRO) 활성 설정 — proWriting 세션의 한→영 집필 변환. */
   pro?: ProActiveSettings;
   /**

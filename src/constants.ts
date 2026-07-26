@@ -46,6 +46,7 @@ export const SUBFOLDERS = [
   "USERS",
   "GROUPS",
   "PHONE",
+  "QUICKREPLIES",
 ] as const;
 
 export type SubFolder = (typeof SUBFOLDERS)[number];

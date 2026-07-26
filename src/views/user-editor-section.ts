@@ -113,7 +113,6 @@ export class UserEditorSection {
     renderEditableTitle(header, profile.name || "페르소나", (next) => {
       profile.name = next;
       this.requestSave();
-      this.render();
     });
 
     const actions = header.createDiv({ cls: "ggai-editor-actions" });

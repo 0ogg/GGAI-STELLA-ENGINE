@@ -203,7 +203,7 @@ async function generateTitle(
   plugin: StellaEnginePlugin,
   s: SessionListItem
 ): Promise<void> {
-  new Notice("제목 생성 중…");
+  // 진행 안내는 Core 가 label + 모델명으로 띄운다 (CLAUDE.md 7).
   const result = await generateSessionTitleNow(plugin, s.sessionFile);
   if (!result.ok) {
     new Notice(`제목 생성 실패: ${result.error}`);

@@ -19,6 +19,9 @@
  *       detail.origin 으로 발신 뷰 토큰 전달. 없으면 전체 변경으로 취급.
  *   "session-translations-changed" (sessionFile) - 특정 세션의 translations.json (문단 번역) 변경
  *   "session-summaries-changed" (sessionFile)    - 특정 세션의 summaries.json (노드 앵커 요약) 변경
+ *   "session-notes-changed" (sessionFile)        - 특정 세션의 notes.json (QR /comment 노트) 변경
+ *   "quick-replies-changed"              - 빠른 답장(QR) 세트 목록 또는 내용 변경
+ *   "quick-reply-changed" (setFile)      - 특정 QR 세트 변경
  *   "groups-changed"                     - 그룹 목록 또는 내용 변경 (G1)
  *   "phone-messages-changed" (personaId) - 스텔라 폰 문자함 변경 (PH1)
  *   "sns-feed-changed"                   - 스텔라 폰 SNS 피드 변경 (PH3)
@@ -46,6 +49,11 @@ import {
   resolveUniquePromptFile,
   writePromptPresetFile,
 } from "../import/write-prompt";
+import {
+  resolveUniqueQuickReplyFile,
+  writeQuickReplySetFile,
+} from "../import/write-quick-reply";
+import { lorebookToSillyTavern } from "../export/to-sillytavern-worldinfo";
 import { defaultLorebookMeta, type StellaLorebook } from "../types/lorebook";
 import {
   createEmptySessionTranslations,
@@ -60,6 +68,12 @@ import {
   normalizeSessionSummaries,
   type SessionSummaries,
 } from "../types/summary";
+import {
+  createEmptySessionNotes,
+  normalizeSessionNotes,
+  type SessionNote,
+  type SessionNotes,
+} from "../types/note";
 import {
   backfillAccountsFromSnsFeed,
   createEmptyPhoneGallery,
@@ -78,6 +92,12 @@ import {
 } from "../types/phone";
 import type { StellaPreset } from "../types/preset";
 import type { StellaPromptPreset } from "../types/prompt";
+import {
+  createEmptyQuickReplySet,
+  serializeQuickReplySet,
+  uniqueQuickReplySetName,
+  type StellaQuickReplySet,
+} from "../types/quick-reply";
 import type { StellaScenario } from "../types/scenario";
 import type { StellaSession } from "../types/session";
 import {
@@ -92,10 +112,15 @@ import { readGroup } from "../util/read-group";
 import { readLorebook } from "../util/read-lorebook";
 import { readPreset } from "../util/read-preset";
 import { readPromptPreset } from "../util/read-prompt";
+import { readQuickReplySet } from "../util/read-quick-reply";
 import { scanGroups, GroupListItem } from "../util/scan-groups";
 import { scanLorebooks, LorebookListItem } from "../util/scan-lorebooks";
 import { scanPresets, PresetListItem } from "../util/scan-presets";
 import { scanPrompts, PromptListItem } from "../util/scan-prompts";
+import {
+  scanQuickReplies,
+  QuickReplyListItem,
+} from "../util/scan-quick-replies";
 import {
   scanScenarios,
   ScenarioListItem,
@@ -163,6 +188,10 @@ export class StellaStore extends Events {
   /** prompt preset 캐시 — list 와 file 단위 둘 다. file 캐시는 list 와 같은 객체 참조 공유. */
   private promptsCache: PromptListItem[] | null = null;
   private promptByFile = new Map<string, StellaPromptPreset>();
+
+  /** 빠른 답장(QR) 세트 캐시 — list + file 단위. */
+  private quickRepliesCache: QuickReplyListItem[] | null = null;
+  private quickReplyByFile = new Map<string, StellaQuickReplySet>();
 
   /** preset (북마크) 캐시. */
   private presetsCache: PresetListItem[] | null = null;
@@ -454,6 +483,52 @@ export class StellaStore extends Events {
     return { newFolder, newScenarioFile, copiedSessions };
   }
 
+  /**
+   * 시나리오 익스포트 재료 — 카드 조립(CCv3/PNG)은 호출부가 `export/` 순수 함수로 한다.
+   * 연결 로어북(기본 + 추가)은 카드의 character_book 으로 들어갈 수 있게 함께 읽는다.
+   */
+  async buildScenarioExportSource(scenarioFile: string): Promise<{
+    name: string;
+    scenario: StellaScenario;
+    books: StellaLorebook[];
+    thumbnail: { bytes: ArrayBuffer; ext: string } | null;
+  }> {
+    const list = await this.getScenarios();
+    const item = list.find((i) => i.scenarioFile === scenarioFile);
+    if (!item) throw new Error("시나리오를 찾을 수 없습니다.");
+
+    const stella = item.scenario.data?.extensions?.stella;
+    const ids = [
+      ...(stella?.defaultLorebookId ? [stella.defaultLorebookId] : []),
+      ...(stella?.extraLorebookIds ?? []),
+    ];
+    const books: StellaLorebook[] = [];
+    for (const id of Array.from(new Set(ids))) {
+      const found = await this.getLorebookById(id);
+      if (found) books.push(found.lorebook);
+    }
+
+    let thumbnail: { bytes: ArrayBuffer; ext: string } | null = null;
+    if (item.thumbnailPath) {
+      const ext = (item.thumbnailPath.split(".").pop() ?? "").toLowerCase();
+      try {
+        thumbnail = {
+          bytes: await this.vault.adapter.readBinary(item.thumbnailPath),
+          ext,
+        };
+      } catch {
+        thumbnail = null;
+      }
+    }
+
+    return {
+      name: sanitizeFolderName(item.scenario.data?.name || item.folderName) || "시나리오",
+      scenario: item.scenario,
+      books,
+      thumbnail,
+    };
+  }
+
   async setScenarioThumbnail(
     scenarioFile: string,
     bytes: ArrayBuffer,
@@ -604,9 +679,15 @@ export class StellaStore extends Events {
    * (좌측 목록 재스캔이 세션창의 활성 세션 데이터를 삭제하던 사고). 목록 표시엔
    * meta(이름/즐겨찾기/시각)만 쓰므로 캐시 객체가 오히려 항상 같거나 더 최신이다.
    * getSessions 의 "이미 있으면 안 덮어씀" 과 동일한 참조 보호 정책.
+   *
+   * 그래서 캐시에 있는 세션은 `reuse` 로 **파일을 읽지도 않는다** — 어차피 버릴 내용을
+   * 세션 저장마다(좌측 목록이 펼쳐져 있으면 매번) 파싱하던 낭비를 없앤 것으로, 동작은
+   * 아래 루프가 하던 것과 동일하다.
    */
   async refreshSessions(scenarioFolder: string): Promise<SessionListItem[]> {
-    const list = await scanSessions(this.vault, scenarioFolder);
+    const list = await scanSessions(this.vault, scenarioFolder, {
+      reuse: (file) => this.sessionByFile.get(file),
+    });
     for (const item of list) {
       const existing = this.sessionByFile.get(item.sessionFile);
       if (existing) {
@@ -681,7 +762,8 @@ export class StellaStore extends Events {
     name: string,
     seed: import("../util/new-session").SessionSeed = "",
     initial?: import("../types/preset").ActiveSettings,
-    mode: import("../types/session").SessionMode = "novel"
+    mode: import("../types/session").SessionMode = "novel",
+    prefill?: import("../util/session-ops").SessionPrefill
   ): Promise<{ folder: string; sessionFile: string; session: StellaSession }> {
     const result = await diskCreateSession(
       this.vault,
@@ -690,7 +772,8 @@ export class StellaStore extends Events {
       name,
       seed,
       initial,
-      mode
+      mode,
+      prefill
     );
     this.markSelfWrite(result.sessionFile);
     this.sessionByFile.set(result.sessionFile, result.session);
@@ -1265,6 +1348,58 @@ export class StellaStore extends Events {
     this.trigger("session-summaries-changed", sessionFile);
   }
 
+  // ─────────────────────────── session notes (notes.json) ───────────────────────────
+
+  /**
+   * 세션 폴더의 notes.json (QR `/comment` 노트). 없으면 빈 구조 반환 (디스크에 만들지 않음).
+   * 캐시 없이 매번 읽는다 (표시/추가 시점에만 접근). 이벤트: "session-notes-changed".
+   */
+  async getSessionNotes(sessionFile: string): Promise<SessionNotes> {
+    const path = notesFileOfSessionFile(sessionFile);
+    if (path) {
+      const f = this.vault.getAbstractFileByPath(path);
+      if (f instanceof TFile) {
+        try {
+          return normalizeSessionNotes(JSON.parse(await this.vault.read(f)));
+        } catch (err) {
+          console.warn("[GGAI Stella] notes.json 로드 실패:", err);
+        }
+      }
+    }
+    return createEmptySessionNotes();
+  }
+
+  async saveSessionNotes(
+    sessionFile: string,
+    notes: SessionNotes
+  ): Promise<void> {
+    const path = notesFileOfSessionFile(sessionFile);
+    if (!path) throw new Error("Invalid session path");
+    this.markSelfWrite(path);
+    const body = JSON.stringify(notes, null, 2);
+    const f = this.vault.getAbstractFileByPath(path);
+    if (f instanceof TFile) await this.vault.modify(f, body);
+    else await this.vault.create(path, body);
+    this.trigger("session-notes-changed", sessionFile);
+  }
+
+  /** 노트 1개 추가 — 같은 노드에 여러 개가 쌓인다(대체하지 않는다). */
+  async addSessionNote(
+    sessionFile: string,
+    note: SessionNote
+  ): Promise<void> {
+    const notes = await this.getSessionNotes(sessionFile);
+    notes.notes.push(note);
+    await this.saveSessionNotes(sessionFile, notes);
+  }
+
+  async deleteSessionNote(sessionFile: string, noteId: string): Promise<void> {
+    const notes = await this.getSessionNotes(sessionFile);
+    const next = notes.notes.filter((n) => n.id !== noteId);
+    if (next.length === notes.notes.length) return;
+    await this.saveSessionNotes(sessionFile, { ...notes, notes: next });
+  }
+
   // ─────────────────────────── session illustrations (illustrations.json) ───────────────────────────
 
   /**
@@ -1441,6 +1576,140 @@ export class StellaStore extends Events {
     this.trigger("prompt-presets-changed");
   }
 
+  // ────────────────────── 빠른 답장 (QR) 세트 ──────────────────────
+
+  async getQuickReplySets(): Promise<QuickReplyListItem[]> {
+    if (this.quickRepliesCache) return this.quickRepliesCache;
+    const list = await scanQuickReplies(this.vault);
+    this.quickRepliesCache = list;
+    for (const item of list) {
+      this.quickReplyByFile.set(item.setFile, item.set);
+    }
+    return list;
+  }
+
+  async getQuickReplySet(setFile: string): Promise<StellaQuickReplySet | null> {
+    const cached = this.quickReplyByFile.get(setFile);
+    if (cached) return cached;
+    const set = await readQuickReplySet(this.vault, setFile);
+    if (set) this.quickReplyByFile.set(setFile, set);
+    return set;
+  }
+
+  /** stella 메타 id 로 검색 — 활성 설정(setIds)이 참조하는 방식. */
+  async getQuickReplySetById(id: string): Promise<QuickReplyListItem | null> {
+    const list = await this.getQuickReplySets();
+    return list.find((q) => q.set.meta.id === id) ?? null;
+  }
+
+  async saveQuickReplySet(
+    setFile: string,
+    set: StellaQuickReplySet
+  ): Promise<void> {
+    this.markSelfWrite(setFile);
+    this.quickReplyByFile.set(setFile, set);
+    if (this.quickRepliesCache) {
+      const item = this.quickRepliesCache.find((q) => q.setFile === setFile);
+      if (item) item.set = set;
+    }
+    await writeQuickReplySetFile(this.vault, setFile, set);
+    this.trigger("quick-reply-changed", setFile);
+    this.trigger("quick-replies-changed");
+  }
+
+  /** 새 세트 생성. 같은 이름이 있으면 -2, -3 접미사. */
+  async createQuickReplySet(
+    name: string
+  ): Promise<{ setFile: string; set: StellaQuickReplySet }> {
+    // 이름도 파일명과 함께 고유하게 — 하위 메뉴가 세트를 이름으로 참조하므로.
+    const existing = await this.getQuickReplySets();
+    const clean = uniqueQuickReplySetName(
+      name,
+      existing.map((i) => i.set.name)
+    );
+    const target = await resolveUniqueQuickReplyFile(this.vault, clean);
+    const set = createEmptyQuickReplySet(clean);
+    this.markSelfWrite(target);
+    await writeQuickReplySetFile(this.vault, target, set);
+    this.quickReplyByFile.set(target, set);
+    this.quickRepliesCache = null;
+    this.trigger("quick-replies-changed");
+    return { setFile: target, set };
+  }
+
+  async deleteQuickReplySet(setFile: string): Promise<void> {
+    const f = this.vault.getAbstractFileByPath(setFile);
+    if (f instanceof TFile) await this.vault.trash(f, true);
+    this.quickReplyByFile.delete(setFile);
+    this.quickRepliesCache = null;
+    this.trigger("quick-replies-changed");
+  }
+
+  /**
+   * 세트 이름 변경 — 파일도 함께 옮긴다(파일명 = 표시 이름).
+   * 하위 메뉴(contextList)는 세트를 **이름으로** 참조하므로(ST 규칙),
+   * 다른 세트들의 참조도 같이 고쳐야 링크가 끊기지 않는다.
+   */
+  async renameQuickReplySet(setFile: string, nextName: string): Promise<string> {
+    const set = await this.getQuickReplySet(setFile);
+    if (!set) throw new Error("QR 세트를 찾을 수 없습니다");
+    const raw = (nextName ?? "").trim();
+    if (!raw || raw === set.name) return setFile;
+    // 다른 세트와 이름이 겹치면 -2, -3 — 하위 메뉴 링크가 엉키지 않게.
+    const others = (await this.getQuickReplySets()).filter(
+      (i) => i.setFile !== setFile
+    );
+    const clean = uniqueQuickReplySetName(
+      raw,
+      others.map((i) => i.set.name)
+    );
+
+    const prevName = set.name;
+    const target = await resolveUniqueQuickReplyFile(this.vault, clean);
+    set.name = clean;
+
+    // 새 경로에 쓰고 옛 파일 제거 (rename 은 view 금지 규칙과 무관하게 store 소관).
+    this.markSelfWrite(target);
+    await writeQuickReplySetFile(this.vault, target, set);
+    const old = this.vault.getAbstractFileByPath(setFile);
+    if (old instanceof TFile) await this.vault.trash(old, true);
+    this.quickReplyByFile.delete(setFile);
+    this.quickReplyByFile.set(target, set);
+    this.quickRepliesCache = null;
+
+    // 다른 세트의 하위 메뉴 참조 갱신.
+    for (const item of await this.getQuickReplySets()) {
+      if (item.setFile === target) continue;
+      let touched = false;
+      for (const qr of item.set.qrList) {
+        for (const link of qr.contextList) {
+          if (link.set === prevName) {
+            link.set = clean;
+            touched = true;
+          }
+        }
+      }
+      if (touched) await this.saveQuickReplySet(item.setFile, item.set);
+    }
+
+    this.trigger("quick-replies-changed");
+    return target;
+  }
+
+  async toggleQuickReplyFavorite(setFile: string): Promise<void> {
+    const set = await this.getQuickReplySet(setFile);
+    if (!set) return;
+    set.meta.favorite = !set.meta.favorite;
+    await this.saveQuickReplySet(setFile, set);
+  }
+
+  /** 익스포트용 JSON 문자열 — stella 메타를 뺀 순수 ST QR v2 파일. */
+  async buildQuickReplyExportJson(setFile: string): Promise<string | null> {
+    const set = await this.getQuickReplySet(setFile);
+    if (!set) return null;
+    return JSON.stringify(serializeQuickReplySet(set, { forExport: true }), null, 2);
+  }
+
   async togglePromptFavorite(presetFile: string): Promise<void> {
     const preset = await this.getPromptPreset(presetFile);
     if (!preset) return;
@@ -1597,6 +1866,21 @@ export class StellaStore extends Events {
   async refreshLorebook(lorebookFile: string): Promise<StellaLorebook | null> {
     this.lorebookByFile.delete(lorebookFile);
     return this.getLorebook(lorebookFile);
+  }
+
+  /**
+   * 로어북을 SillyTavern 월드인포 JSON 문자열로 만든다 (vault 에는 쓰지 않는다 —
+   * 실제 파일 저장은 호출부의 브라우저 다운로드). 반환 = 파일 이름(확장자 제외) + 본문.
+   */
+  async buildLorebookExportJson(
+    lorebookFile: string
+  ): Promise<{ name: string; json: string }> {
+    const book = await this.getLorebook(lorebookFile);
+    if (!book) throw new Error("로어북을 찾을 수 없습니다.");
+    return {
+      name: sanitizeFolderName(book.meta.name) || "로어북",
+      json: JSON.stringify(lorebookToSillyTavern(book), null, 2),
+    };
   }
 
   /** 책 단위 id (StellaLorebookMeta.id) 로 검색. */
@@ -2048,6 +2332,12 @@ export class StellaStore extends Events {
       this.trigger("session-stream-changed", sessionFile);
       return;
     }
+    // notes.json 변경 (QR /comment 노트)
+    if (path.endsWith("/notes.json")) {
+      const sessionFile = `${path.slice(0, -"/notes.json".length)}/session.json`;
+      this.trigger("session-notes-changed", sessionFile);
+      return;
+    }
     // illustrations.json 변경 (노드 삽화)
     if (path.endsWith("/illustrations.json")) {
       const sessionFile = `${path.slice(0, -"/illustrations.json".length)}/session.json`;
@@ -2076,6 +2366,17 @@ export class StellaStore extends Events {
       this.promptsCache = null;
       this.trigger("prompt-preset-changed", path);
       this.trigger("prompt-presets-changed");
+      return;
+    }
+    // QUICKREPLIES/<이름>.json 변경 (빠른 답장 세트)
+    if (
+      path.startsWith(`${BASE_FOLDER}/QUICKREPLIES/`) &&
+      path.endsWith(".json")
+    ) {
+      this.quickReplyByFile.delete(path);
+      this.quickRepliesCache = null;
+      this.trigger("quick-reply-changed", path);
+      this.trigger("quick-replies-changed");
       return;
     }
     // PRESETS/<이름>.json 변경 (프리셋 북마크)
@@ -2307,6 +2608,12 @@ const PHONE_ACCOUNTS_PATH = `${BASE_FOLDER}/PHONE/accounts.json`;
 function summariesFileOfSessionFile(sessionFile: string): string | null {
   const folder = sessionFolderOfSessionFilePath(sessionFile);
   return folder ? `${folder}/summaries.json` : null;
+}
+
+/** .../session.json → .../notes.json (QR /comment 노트) */
+function notesFileOfSessionFile(sessionFile: string): string | null {
+  const folder = sessionFolderOfSessionFilePath(sessionFile);
+  return folder ? `${folder}/notes.json` : null;
 }
 
 /** .../session.json → .../illustrations.json */

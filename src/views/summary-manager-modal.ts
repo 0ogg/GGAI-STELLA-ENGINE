@@ -404,7 +404,7 @@ export class SummaryManagerModal extends Modal {
   private async regenAnchor(nodeId: string): Promise<void> {
     if (this.busy) return;
     this.busy = true;
-    new Notice("요약을 다시 생성하는 중…");
+    // 진행 안내는 Core 가 label + 모델명으로 띄운다 (CLAUDE.md 7).
     const result = await this.plugin.summary.summarize(this.sessionFile, nodeId);
     this.translatedContext = null;
     this.busy = false;

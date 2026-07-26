@@ -41,7 +41,7 @@ import {
   formatStylePairs,
   PRO_STYLE_PAIRS_DEFAULT,
 } from "../util/pro-convert";
-import type { LorebookPlusActiveSettings, MediaPromptItem } from "../types/preset";
+import type { MediaPromptItem } from "../types/preset";
 import type { SessionTranslations, TranslationUndoItem } from "../types/media";
 
 /** 청크당 최대 문단 수 / 원문 글자 수 — 먼저 차는 기준으로 끊는다. */
@@ -201,16 +201,20 @@ export class TranslationService {
 
   /**
    * 세션과 무관한 항목 배열(스텔라 폰의 문자/SNS 글) 일괄 번역.
-   * 프롬프트/모델은 전역 번역 설정(`PluginData.current`), 로어북은 호출자 지정
-   * (폰 설정의 폰 전용 로어북). translations.json 에 반영하지 않는다 — 결과
+   * 프롬프트/모델/로어북 모두 전역 번역 설정(`PluginData.current`)을 쓴다 —
+   * 로어북 id 는 호출자가 그 설정에서 읽어 넘긴다. translations.json 에 반영하지 않는다 — 결과
    * 저장은 호출자 몫. 항목은 청크로 끊어 순차 호출하고, 중간 실패 시 이미 받은
    * 번역은 results 에 남는다 (부분 성공).
    */
   async translateItems(
     items: { id: string; source: string }[],
     lorebookIds: string[] | undefined,
-    /** 로어북 AI 선별을 호출자가 직접 제어할 때(폰 전용 토글) — 허브로 그대로 전달. */
-    lorebookPlusOverride?: LorebookPlusActiveSettings
+    /**
+     * Core "생성 중" 토스트에 뜰 이름 (예: "번역 (스텔라 폰 문자)").
+     * 진행 안내는 Core 가 label + 모델명으로 띄우므로(CLAUDE.md 7) 무엇을 번역하는
+     * 중인지 여기서 구별해 준다. 생략하면 그냥 "번역".
+     */
+    label?: string
   ): Promise<{ ok: boolean; results: Map<string, string>; error?: string }> {
     const results = new Map<string, string>();
     const targets = items.filter((i) => i.source.trim() !== "");
@@ -261,14 +265,15 @@ export class TranslationService {
         scanText: segments.map((s) => s.source).join("\n"),
         taskPrompt: prompt.prompt,
         taskLabel: "번역",
-        lorebookPlusOverride,
       });
       try {
         const responseText = await this.callModel(
           profile,
           prompt.prompt,
           segments,
-          lorebookText
+          lorebookText,
+          "",
+          label
         );
         const parsed = parseTranslationResponse(responseText);
         if (!parsed || parsed.length === 0) {
@@ -653,7 +658,9 @@ export class TranslationService {
     instruction: string,
     segments: ReturnType<typeof buildTranslationRequest>,
     lorebookText: string,
-    pairsText = ""
+    pairsText = "",
+    /** Core 진행 토스트에 뜰 이름 — 생략하면 "번역". */
+    label = "번역"
   ): Promise<string> {
     const payload = JSON.stringify(segments);
     // 본문(JSON 페이로드)은 지침의 {{main}}, 로어북은 {{lorebook}}, 집필 프로 문체
@@ -664,7 +671,7 @@ export class TranslationService {
       const r = await this.plugin.ai.generate({
         profileId: profile.id,
         prompt: `${TRANSLATION_IO_INSTRUCTIONS}\n\n${combined}`,
-        label: "번역",
+        label,
       });
       return r.text;
     }
@@ -674,7 +681,7 @@ export class TranslationService {
         { role: "system", content: TRANSLATION_IO_INSTRUCTIONS },
         { role: "user", content: combined },
       ],
-      label: "번역",
+      label,
     });
     return r.text;
   }

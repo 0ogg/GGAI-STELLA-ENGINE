@@ -2,13 +2,26 @@ import assert from "node:assert/strict";
 import type { StellaLorebook, StellaLorebookEntry } from "../src/types/lorebook";
 import type { Span, StellaSession } from "../src/types/session";
 import { defaultLorebookEntry } from "../src/types/lorebook";
-import type { AgentDefinition } from "../src/types/agent";
 import {
-  extractAgentOutput,
-  renderAgentPrompt,
-  runAgent,
-  runAgentBatch,
-} from "../src/services/agent-runner";
+  collectAutoQuickReplies,
+  createQuickReply,
+  describeQuickReply,
+  normalizeQuickReply,
+  normalizeQuickReplySet,
+  serializeQuickReplySet,
+  uniqueQuickReplySetName,
+} from "../src/types/quick-reply";
+import {
+  compareQrRule,
+  isQrCommandScript,
+  parseDetailsBlock,
+  parseQrCommand,
+  parseQrLabels,
+  parseQrScript,
+  runQrRegex,
+  unquoteQrBody,
+} from "../src/util/qr-script";
+import { detectFormat } from "../src/import/detect";
 import { parseNovelAILorebook } from "../src/import/parse-novelai";
 import { buildContext, buildFallbackPreset } from "../src/util/context-builder";
 import { matchLorebookEntries } from "../src/util/lorebook-match";
@@ -52,6 +65,10 @@ import {
   planChatEpisodeTail,
 } from "../src/util/new-session";
 import { buildChatImportSession } from "../src/util/build-chat-import";
+import {
+  isSillyTavernChat,
+  parseSillyTavernChat,
+} from "../src/import/parse-sillytavern-chat";
 import {
   applyChatTurnNames,
   buildTextCompletionPrompt,
@@ -123,6 +140,15 @@ import {
   readScenarioRegexScripts,
 } from "../src/util/regex-scripts";
 import type { StellaScenario } from "../src/types/scenario";
+import { parseSillyTavernWorldInfo } from "../src/import/parse-sillytavern";
+import { parseCharacterCard } from "../src/import/parse-charactercard";
+import { lorebookToSillyTavern } from "../src/export/to-sillytavern-worldinfo";
+import { buildCharacterCardExport } from "../src/export/to-character-card";
+import { embedCharacterCardInPng } from "../src/export/png-card";
+import {
+  extractCharacterCardJsonFromPng,
+  readPngTextChunks,
+} from "../src/import/png-chunk";
 
 function makeSession(): StellaSession {
   return {
@@ -253,84 +279,6 @@ const asyncTests: Promise<void>[] = [];
   assert.equal(entry.group, "");
   assert.equal(entry.addMemo, false);
 }
-
-const testAgent: AgentDefinition = {
-  id: "test-agent",
-  name: "Test Agent",
-  description: "Test",
-  phase: "post_processing",
-  enabledByDefault: false,
-  promptTemplate: "Main={{mainResponse}} Recent={{recentContext}} Style={{style}}",
-};
-
-{
-  assert.equal(
-    renderAgentPrompt(testAgent, {
-      mainResponse: "body",
-      recentContext: "before",
-      style: "quiet",
-    }),
-    "Main=body Recent=before Style=quiet"
-  );
-  assert.equal(
-    extractAgentOutput(
-      `<agent_output id="test-agent">\nfirst\n</agent_output>`,
-      "test-agent"
-    ),
-    "first"
-  );
-}
-
-asyncTests.push((async () => {
-  const calls: any[] = [];
-  const fakeAI = {
-    async chat(req: any) {
-      calls.push(req);
-      return {
-        text: "single result",
-        stopReason: "end",
-        usage: { inputTokens: 10, outputTokens: 5 },
-      };
-    },
-  };
-  const result = await runAgent(
-    testAgent,
-    { mainResponse: "body", recentContext: "before", style: "quiet" },
-    fakeAI as any,
-    "profile"
-  );
-  assert.deepEqual(result, {
-    agentId: "test-agent",
-    output: "single result",
-    tokensUsed: 15,
-  });
-  assert.equal(calls[0].profileId, "profile");
-  assert.equal(calls[0].paramsOverride.maxTokens, 500);
-  assert.equal(calls[0].messages[0].content.includes("Main=body"), true);
-})());
-
-asyncTests.push((async () => {
-  const agents: AgentDefinition[] = [
-    { ...testAgent, id: "a" },
-    { ...testAgent, id: "b" },
-  ];
-  const fakeAI = {
-    async chat() {
-      return {
-        text:
-          `<agent_output id="a">alpha</agent_output>\n` +
-          `<agent_output id="b">beta</agent_output>`,
-        stopReason: "end",
-        usage: { inputTokens: 20, outputTokens: 8 },
-      };
-    },
-  };
-  const result = await runAgentBatch(agents, {}, fakeAI as any);
-  assert.deepEqual(result, [
-    { agentId: "a", output: "alpha", tokensUsed: 28 },
-    { agentId: "b", output: "beta", tokensUsed: 28 },
-  ]);
-})());
 
 {
   const variables = { score: "2" };
@@ -2913,6 +2861,68 @@ void Promise.all(asyncTests)
   assert.equal(built2.nodes[built2.rootId].kind, "root");
 }
 
+// ─── ST 채팅 임포트 — 실제 .jsonl 원문에서 세션 저장본까지 (텅 빈 세션 회귀 방지) ───
+{
+  const jsonl = [
+    {
+      user_name: "유리",
+      character_name: "스텔라",
+      create_date: "2025-10-08@05h55m32s",
+      chat_metadata: { integrity: "x" },
+    },
+    // 인사말 — 스와이프 여러 개, 활성은 두 번째.
+    {
+      name: "스텔라",
+      is_user: false,
+      is_system: false,
+      mes: "인사말 B",
+      swipe_id: 1,
+      swipes: ["인사말 A", "인사말 B"],
+      swipe_info: [],
+    },
+    // 시스템 알림(UI 메시지)은 대화에 들어가지 않는다.
+    { name: "System", is_user: false, is_system: true, mes: "무시될 알림" },
+    { name: "유리", is_user: true, mes: "안녕하세요." },
+    {
+      name: "스텔라",
+      is_user: false,
+      mes: "번역된 표시본",
+      extra: { original_text_for_translation: "원문 본문" },
+    },
+  ]
+    .map((o) => JSON.stringify(o))
+    .join("\r\n");
+
+  assert.equal(isSillyTavernChat(jsonl), true);
+  const parsedFile = parseSillyTavernChat(jsonl);
+  assert.equal(parsedFile.messages.length, 3, "시스템 메시지는 제외");
+
+  const builtFile = buildChatImportSession(parsedFile, "chat", 1000);
+  // 임포트 결과는 **세션 생성 첫 쓰기**에 그대로 들어간다 — 저장/재로딩 왕복 후에도
+  // 대화가 살아 있어야 한다(두 번째 저장이 실패하면 텅 빈 세션이 남던 회귀).
+  const created = createBlankSession("가져온 채팅", "scn", "", undefined, "chat");
+  created.nodes = builtFile.nodes;
+  created.meta.rootId = builtFile.rootId;
+  created.meta.activeLeafId = builtFile.activeLeafId;
+  const reloaded = JSON.parse(JSON.stringify(created)) as StellaSession;
+
+  assert.deepEqual(
+    buildChatMessages(reloaded).map((m) => [m.role, m.text.trim()]),
+    [
+      ["assistant", "인사말 B"],
+      ["user", "안녕하세요."],
+      ["assistant", "원문 본문"],
+    ],
+    "활성 스와이프 경로 + 원문(번역 아님)이 저장본에서 그대로 재구성된다"
+  );
+  // 비활성 스와이프도 형제 노드로 보존된다.
+  assert.equal(
+    Object.values(reloaded.nodes).filter((n) => n.parent === null).length,
+    2,
+    "인사말 스와이프 2개 = 형제 루트 2개"
+  );
+}
+
 // ── 그룹 챗 (G2): 다음 발화자 결정 — group-speaker.ts ───────────────
 {
   const members = [
@@ -3618,4 +3628,581 @@ function regexScript(overrides: Partial<RegexScript>): RegexScript {
   const none = collectUnscannedAuthoredPairs(tr, 400, 10);
   assert.equal(none.pairs.length, 0);
   assert.equal(none.lastAt, 400);
+}
+
+// ── 빠른 답장(QR): ST QR v2 라운드트립 — types/quick-reply.ts ──────
+{
+  // 실리태번이 내보내는 세트 모양 (모르는 키 stExtra 포함).
+  const stExport = {
+    version: 2,
+    name: "가이드 생성",
+    disableSend: true,
+    placeBeforeInput: false,
+    injectInput: true,
+    color: "#334455",
+    onlyBorderColor: true,
+    idIndex: 2,
+    stExtra: { keep: "me" },
+    qrList: [
+      {
+        id: 0,
+        icon: "fa-dice",
+        showLabel: true,
+        label: "랜덤전개",
+        title: "툴팁",
+        message: "/gen 다음 전개",
+        contextList: [{ set: "감정팩", isChained: true }],
+        preventAutoExecute: false,
+        isHidden: false,
+        executeOnStartup: false,
+        executeOnUser: false,
+        executeOnAi: false,
+        executeOnChatChange: false,
+        executeOnGroupMemberDraft: false,
+        executeOnNewChat: false,
+        executeBeforeGeneration: true,
+        automationId: "auto-1",
+      },
+      { id: 1, label: "인사", message: "안녕" },
+    ],
+  };
+
+  const set = normalizeQuickReplySet(stExport, "fallback");
+  assert.equal(set.name, "가이드 생성");
+  assert.equal(set.disableSend, true);
+  assert.equal(set.injectInput, true);
+  assert.equal(set.onlyBorderColor, true);
+  assert.equal(set.qrList.length, 2);
+  assert.equal(set.qrList[0].executeBeforeGeneration, true);
+  assert.equal(set.qrList[0].contextList[0].set, "감정팩");
+  assert.equal(set.qrList[0].contextList[0].isChained, true);
+  // 빠진 필드는 ST 기본값 — preventAutoExecute 만 true 가 기본.
+  assert.equal(set.qrList[1].preventAutoExecute, true);
+  assert.equal(set.qrList[1].icon, "");
+  assert.equal(set.qrList[1].contextList.length, 0);
+  // stella 메타가 없던 파일이면 id 를 새로 뽑는다.
+  assert.ok(set.meta.id.length > 0);
+
+  // 익스포트 = stella 메타 제거 + 모르는 키 보존.
+  const exported = serializeQuickReplySet(set, { forExport: true }) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(exported.stella, undefined);
+  assert.deepEqual(exported.stExtra, { keep: "me" });
+  assert.equal(exported.version, 2);
+  assert.equal(exported.name, "가이드 생성");
+  assert.deepEqual(
+    (exported.qrList as Array<Record<string, unknown>>)[0].contextList,
+    [{ set: "감정팩", isChained: true }]
+  );
+
+  // 저장본(stella 포함) → 다시 읽어도 같은 내용 + 같은 id.
+  const saved = serializeQuickReplySet(set);
+  assert.deepEqual((saved.stella as Record<string, unknown>).id, set.meta.id);
+  const reread = normalizeQuickReplySet(saved, "fallback");
+  assert.equal(reread.meta.id, set.meta.id);
+  assert.deepEqual(reread.qrList, set.qrList);
+
+  // idIndex 가 실제 최대 id 보다 작으면 밀어 올린다(손편집 파일에서 id 충돌 방지).
+  const stale = normalizeQuickReplySet(
+    { name: "x", idIndex: 0, qrList: [{ id: 7, label: "a" }] },
+    "x"
+  );
+  assert.equal(stale.idIndex, 8);
+  const fresh = createQuickReply(stale);
+  assert.equal(fresh.id, 8);
+  assert.equal(stale.idIndex, 9);
+
+  // 동작 요약 꼬리표.
+  assert.equal(describeQuickReply(set.qrList[0]), "하위메뉴 → 감정팩");
+  assert.equal(describeQuickReply(set.qrList[1]), "입력/전송");
+  assert.equal(
+    describeQuickReply(normalizeQuickReply({ message: "/echo hi" }, 0)),
+    "커맨드"
+  );
+
+  // 빈 입력도 죽지 않는다.
+  const empty = normalizeQuickReplySet(null, "이름없음");
+  assert.equal(empty.name, "이름없음");
+  assert.equal(empty.qrList.length, 0);
+  assert.equal(empty.idIndex, 0);
+
+  // 세트 이름 고유화 — 하위 메뉴가 이름으로 참조하므로 중복이 생기면 안 된다.
+  assert.equal(uniqueQuickReplySetName("감정팩", []), "감정팩");
+  assert.equal(uniqueQuickReplySetName("감정팩", ["감정팩"]), "감정팩-2");
+  assert.equal(
+    uniqueQuickReplySetName("감정팩", ["감정팩", "감정팩-2"]),
+    "감정팩-3"
+  );
+  // 이름 변경은 자기 자신을 뺀 목록으로 판정하므로 제자리 이름은 그대로 유지된다.
+  assert.equal(uniqueQuickReplySetName("감정팩", ["다른팩"]), "감정팩");
+  // 앞뒤 공백은 비교 전에 정리하고, 빈 이름은 기본값으로 떨어진다.
+  assert.equal(uniqueQuickReplySetName("  감정팩  ", ["감정팩"]), "감정팩-2");
+  assert.equal(uniqueQuickReplySetName("   ", []), "새 세트");
+
+  // 버튼 1개짜리 파일(ST 가 단일 버튼을 세트 껍데기 없이 내보낸 것) — 세트로 감싸 읽는다.
+  // 실물 `🏭 서사공장.qr.json` 이 이 모양이라 예전엔 unknown 으로 튕겼다.
+  const singleButton = {
+    id: 72,
+    showLabel: false,
+    label: "🏭 서사공장",
+    title: "",
+    message: "/input 소재는? | /setvar key=소재 {{pipe}}",
+    contextList: [],
+    preventAutoExecute: true,
+    isHidden: false,
+  };
+  assert.equal(detectFormat(singleButton), "sillytavern-quick-reply");
+  const wrapped = normalizeQuickReplySet(singleButton, "🏭 서사공장.qr");
+  assert.equal(wrapped.name, "🏭 서사공장"); // 세트 이름은 버튼 라벨에서
+  assert.equal(wrapped.qrList.length, 1);
+  assert.equal(wrapped.qrList[0].id, 72);
+  assert.equal(wrapped.qrList[0].message, singleButton.message);
+  // 버튼 필드가 세트의 raw(모르는 키 보존)로 새지 않아야 한다.
+  assert.equal(wrapped.raw, undefined);
+
+  // ── 자동 실행 대상 고르기 (슬라이스 3) ──
+  const autoSetA = normalizeQuickReplySet(
+    {
+      name: "A",
+      qrList: [
+        { id: 1, label: "시작", message: "/echo hi", executeOnStartup: true },
+        { id: 2, label: "응답뒤", message: "/echo ai", executeOnAi: true },
+        { id: 3, label: "손으로만", message: "그냥 글자" },
+        // 숨김 버튼도 자동 실행 대상이다 — 바에서만 숨긴다(EDEN 의 숨김 버튼 용례).
+        { id: 4, label: "숨김", message: "/echo hidden", executeOnAi: true, isHidden: true },
+      ],
+    },
+    "A"
+  );
+  const autoSetB = normalizeQuickReplySet(
+    {
+      name: "B",
+      qrList: [{ id: 1, label: "응답뒤B", message: "/echo b", executeOnAi: true }],
+    },
+    "B"
+  );
+
+  const onAi = collectAutoQuickReplies([autoSetA, autoSetB], "executeOnAi");
+  // 세트 순서 → 세트 안 버튼 순서.
+  assert.deepEqual(
+    onAi.map((t) => t.qr.label),
+    ["응답뒤", "숨김", "응답뒤B"]
+  );
+  // 실행할 때 세트 플래그(disableSend 등)를 봐야 하므로 세트도 함께 돌려준다.
+  assert.equal(onAi[2].set.name, "B");
+
+  assert.deepEqual(
+    collectAutoQuickReplies([autoSetA, autoSetB], "executeOnStartup").map(
+      (t) => t.qr.label
+    ),
+    ["시작"]
+  );
+  // 아무것도 안 켠 버튼만 있는 시점은 빈 목록 — 호출부가 그냥 아무것도 안 한다.
+  assert.deepEqual(
+    collectAutoQuickReplies([autoSetA, autoSetB], "executeOnUser"),
+    []
+  );
+  // preventAutoExecute 는 ST 기본값이 true 라 게이트로 쓰면 전부 죽는다 — 보지 않는다.
+  assert.equal(autoSetA.qrList[0].preventAutoExecute, true);
+  assert.equal(
+    collectAutoQuickReplies([autoSetA], "executeOnStartup").length,
+    1
+  );
+
+  console.log("quick-reply round-trip harness passed");
+}
+
+// ── QR 스크립트 파서 (슬라이스 2a) ─────────────────────────────────────────
+// 합격 기준은 "🏭 서사공장 QR 이 실제로 돈다" (QR 스펙.md). 그 파일의 message 구조를
+// 그대로 옮겨 파싱 결과를 검증한다 — 파이프/클로저/이름붙은 인자/매크로 원문 보존.
+{
+  const 서사공장 = [
+    "/input 서사공장을 가동할 소재는? (인물/관계/상황/키워드) | /setvar key=소재 {{pipe}} ||",
+    "",
+    '/if left={{getvar::소재}} right="" rule=eq {:',
+    "",
+    '    /echo color=blue "작성 취소!" |',
+    "",
+    "    /abort :} ||",
+    "",
+    "/gen <System> Pause the RP momentarily. Develop a piece on: [{{getvar::소재}}]",
+    "",
+    "- Divide the piece into 7-11 sections (e.g. ## 1. Section title).",
+    '- Create dialogue that makes you feel "this is so like this character."',
+    "</System> |",
+    "/comment <details>",
+    "  <summary>(소재: {{getvar::소재}})에 따른 서사공장 결과</summary>",
+    "",
+    "{{pipe}}",
+    "",
+    "</details> |",
+  ].join("\n");
+
+  assert.equal(isQrCommandScript(서사공장), true);
+  assert.equal(isQrCommandScript("안녕하세요"), false);
+
+  const cmds = parseQrScript(서사공장);
+  assert.deepEqual(
+    cmds.map((c) => c.name),
+    ["input", "setvar", "if", "gen", "comment"]
+  );
+
+  // /input — 질문은 맨 인자로, `|` 하나로 끊겨 다음 커맨드에 pipe 를 넘긴다.
+  assert.equal(cmds[0].body, "서사공장을 가동할 소재는? (인물/관계/상황/키워드)");
+  assert.equal(cmds[0].breaksPipe, false);
+
+  // /setvar — key 는 이름붙은 인자, 값은 매크로 원문 그대로(치환은 실행 시점).
+  assert.deepEqual(cmds[1].named, { key: "소재" });
+  assert.equal(cmds[1].body, "{{pipe}}");
+  assert.equal(cmds[1].breaksPipe, true); // `||` — 파이프 끊김
+
+  // /if — 이름붙은 인자 3개 + 클로저 1개. 클로저 안의 `|` 는 최상위 분리 대상이 아니다.
+  assert.deepEqual(cmds[2].named, {
+    left: "{{getvar::소재}}",
+    right: "",
+    rule: "eq",
+  });
+  assert.equal(cmds[2].body, "");
+  assert.equal(cmds[2].closures.length, 1);
+  const branch = parseQrScript(cmds[2].closures[0]);
+  assert.deepEqual(
+    branch.map((c) => c.name),
+    ["echo", "abort"]
+  );
+  assert.deepEqual(branch[0].named, { color: "blue" });
+  assert.equal(unquoteQrBody(branch[0].body), "작성 취소!");
+
+  // /gen — 본문 중간의 따옴표 쌍·`##`·하이픈이 이름붙은 인자로 오해되지 않는다.
+  assert.ok(cmds[3].body.startsWith("<System> Pause the RP"));
+  assert.ok(cmds[3].body.includes('"this is so like this character."'));
+  assert.deepEqual(cmds[3].named, {});
+
+  // /comment — details 블록은 원문 그대로 넘어오고, 제목/본문 분리는 표시 계층이 한다.
+  assert.ok(cmds[4].body.includes("{{pipe}}"));
+  const details = parseDetailsBlock(
+    "<details>\n  <summary>제목입니다</summary>\n\n본문 줄1\n본문 줄2\n\n</details>"
+  );
+  assert.equal(details.title, "제목입니다");
+  assert.equal(details.body, "본문 줄1\n본문 줄2");
+  // details 가 없으면 제목 없는 블록.
+  assert.deepEqual(parseDetailsBlock("그냥 메모"), { title: "", body: "그냥 메모" });
+
+  // 이스케이프한 파이프는 본문 글자다 (커맨드를 자르지 않는다).
+  const escaped = parseQrScript("/echo a \\| b | /abort");
+  assert.deepEqual(
+    escaped.map((c) => c.name),
+    ["echo", "abort"]
+  );
+  assert.equal(escaped[0].body, "a | b");
+
+  // 중첩 클로저 — 안쪽 `{: :}` 는 바깥 클로저 원문에 그대로 남는다.
+  const nested = parseQrCommand("/if left=1 right=1 rule=eq {: /if left=2 right=2 rule=eq {: /echo 깊다 :} :}");
+  assert.equal(nested.closures.length, 1);
+  const inner = parseQrScript(nested.closures[0]);
+  assert.equal(inner[0].name, "if");
+  assert.equal(parseQrScript(inner[0].closures[0])[0].body, "깊다");
+
+  // /if 의 else 클로저 = 두 번째 블록.
+  const ifElse = parseQrCommand('/if left=a right=b rule=neq {: /echo 다름 :} {: /echo 같음 :}');
+  assert.equal(ifElse.closures.length, 2);
+  assert.equal(parseQrScript(ifElse.closures[1])[0].body, "같음");
+
+  // 비교 규칙 — 숫자면 숫자로, 아니면 문자열로. 모르는 규칙은 null(건너뛰기 신호).
+  assert.equal(compareQrRule("3", "10", "lt"), true);
+  assert.equal(compareQrRule("abc", "abc", "eq"), true);
+  assert.equal(compareQrRule("", "", "eq"), true);
+  assert.equal(compareQrRule("사과 주스", "주스", "in"), true);
+  assert.equal(compareQrRule("a", "b", "존재하지않음"), null);
+
+  // ── 슬라이스 2b 문법 — 실물 EDEN QR 의 커맨드 형태 그대로 ──
+  // `/buttons labels=[...]` — 배열 안 공백이 인자를 끊지 않아야 한다(라벨에 공백이 흔하다).
+  const buttons = parseQrCommand(
+    '/buttons labels=["학생 정보","자유게시판","실시간 스트리밍"] 어떤 메뉴를 이용하시겠습니까?'
+  );
+  assert.equal(buttons.name, "buttons");
+  assert.deepEqual(parseQrLabels(buttons.named.labels), [
+    "학생 정보",
+    "자유게시판",
+    "실시간 스트리밍",
+  ]);
+  assert.equal(buttons.body, "어떤 메뉴를 이용하시겠습니까?");
+
+  // 값 없는 플래그 인자(`first=`)도 인자로 잡힌다 — 뒤 본문이 맨 인자로 남는다.
+  const reExec = parseQrCommand(
+    '/re-exec first= find="/[Cc]aste[=:]\\s*([A-Za-z]+)/" {{lastMessage}}'
+  );
+  assert.equal(reExec.name, "re-exec");
+  assert.equal(reExec.named.first, "");
+  assert.equal(reExec.body, "{{lastMessage}}");
+  // 캡처 그룹이 있으면 그 값, 없으면 매치 전체. 못 찾으면 "".
+  assert.equal(runQrRegex(reExec.named.find, "결과: Caste: Alpha 입니다", true), "Alpha");
+  assert.equal(runQrRegex("/\\d+/", "a1 b2 c3", true), "1");
+  assert.equal(runQrRegex("/\\d+/", "a1 b2 c3", false), "1\n2\n3");
+  assert.equal(runQrRegex("/없음/", "아무것도", true), "");
+  assert.equal(runQrRegex("/(/", "깨진 패턴", true), "");
+
+  // `/inject` — 이름붙은 인자 5개 뒤 본문(매크로 원문 보존).
+  const inject = parseQrCommand(
+    "/inject ephemeral=true id=instructions position=chat depth=0 {{getvar::instructions}}"
+  );
+  assert.deepEqual(inject.named, {
+    ephemeral: "true",
+    id: "instructions",
+    position: "chat",
+    depth: "0",
+  });
+  assert.equal(inject.body, "{{getvar::instructions}}");
+
+  // `/sendas name="..."` / `/flushvar 이름`
+  const sendas = parseQrCommand('/sendas name="{{groupNotMuted}}" 안녕하세요');
+  assert.deepEqual(sendas.named, { name: "{{groupNotMuted}}" });
+  assert.equal(sendas.body, "안녕하세요");
+  assert.equal(parseQrCommand("/flushvar choiceText").body, "choiceText");
+
+  console.log("qr-script parser harness passed");
+}
+
+// ── 실리태번 익스포트 왕복 ────────────────────────────────────────────────
+// 익스포트가 임포트의 역방향인지 확인한다. 매핑이 한쪽만 바뀌면 여기서 깨진다.
+{
+  const stWorldInfo = {
+    entries: {
+      "0": {
+        uid: 0,
+        key: ["엘라", "Ella"],
+        keysecondary: ["기사단"],
+        comment: "엘라 소개",
+        content: "엘라는 은빛 기사단의 단장이다.",
+        constant: false,
+        selective: true,
+        selectiveLogic: 1,
+        addMemo: true,
+        order: 42,
+        position: 4,
+        role: 2,
+        depth: 7,
+        disable: false,
+        excludeRecursion: true,
+        preventRecursion: true,
+        delayUntilRecursion: false,
+        probability: 80,
+        group: "인물",
+        groupWeight: 60,
+        scanDepth: 3,
+        caseSensitive: true,
+        matchWholeWords: false,
+        sticky: 2,
+        cooldown: 5,
+        delay: 1,
+      },
+    },
+  };
+
+  const book = parseSillyTavernWorldInfo(stWorldInfo, "테스트 로어북");
+  const exported = lorebookToSillyTavern(book) as {
+    name: string;
+    entries: Record<string, any>;
+  };
+  const back = parseSillyTavernWorldInfo(exported, "재임포트");
+
+  assert.equal(exported.name, "테스트 로어북");
+  // entries 는 숫자 uid 키 딕셔너리여야 ST 가 읽는다.
+  assert.deepEqual(Object.keys(exported.entries), ["0"]);
+  assert.equal(exported.entries["0"].uid, 0);
+
+  const before = book.entries[0];
+  const after = back.entries[0];
+  for (const key of [
+    "name",
+    "content",
+    "enabled",
+    "constant",
+    "selective",
+    "selectiveLogic",
+    "order",
+    "position",
+    "depth",
+    "role",
+    "probability",
+    "excludeRecursion",
+    "preventRecursion",
+    "delayUntilRecursion",
+    "group",
+    "groupWeight",
+    "scanDepth",
+    "caseSensitive",
+    "matchWholeWords",
+    "sticky",
+    "cooldown",
+    "delay",
+  ] as const) {
+    assert.deepEqual(after[key], before[key], `월드인포 왕복 필드 불일치: ${key}`);
+  }
+  assert.deepEqual(after.keys, before.keys);
+  assert.deepEqual(after.secondaryKeys, before.secondaryKeys);
+
+  // 비활성 엔트리는 ST 의 disable=true 로 나가야 한다 (의미가 반전된 필드).
+  const disabled = parseSillyTavernWorldInfo(
+    { entries: { "0": { key: ["x"], content: "y", disable: true } } },
+    "off"
+  );
+  const disabledOut = lorebookToSillyTavern(disabled) as { entries: Record<string, any> };
+  assert.equal(disabledOut.entries["0"].disable, true);
+
+  // 캐릭터카드 익스포트 — 연결 로어북이 character_book 으로 들어가고 stella 메타는 빠진다.
+  const scenario: StellaScenario = {
+    spec: "chara_card_v3",
+    spec_version: "3.0",
+    data: {
+      name: "엘라",
+      description: "설명",
+      tags: ["판타지"],
+      creator: "나",
+      character_version: "1.0",
+      mes_example: "",
+      extensions: {
+        stella: {
+          id: "scenario-id",
+          favorite: true,
+          lastPlayedAt: 123,
+          playCount: 9,
+          thumbnail: "thumbnail.png",
+        },
+        regex_scripts: [{ scriptName: "보존" }],
+      },
+      system_prompt: "",
+      post_history_instructions: "",
+      first_mes: "첫 인사",
+      alternate_greetings: ["다른 인사"],
+      personality: "다정함",
+      scenario: "왕국",
+      creator_notes: "메모",
+      group_only_greetings: [],
+    },
+  };
+
+  const card = buildCharacterCardExport(scenario, [book], false);
+  assert.equal(card.v3.spec, "chara_card_v3");
+  assert.equal(card.v3.data.extensions.stella, undefined);
+  // 시나리오 정규식은 ST 와 같은 자리라 그대로 남는다.
+  assert.equal(card.v3.data.extensions.regex_scripts.length, 1);
+  assert.equal(card.v3.data.character_book.entries.length, 1);
+  assert.equal(card.v3.data.character_book.entries[0].content, before.content);
+  // ST 가 월드인포로 되돌릴 때 읽는 위치 정보는 entry.extensions 에 있어야 한다.
+  assert.equal(card.v3.data.character_book.entries[0].extensions.position, 4);
+  assert.equal(card.v3.data.character_book.entries[0].extensions.depth, 7);
+  assert.equal(card.v3.data.character_book.entries[0].extensions.role, 2);
+  // V2 폴백 카드에는 V3 전용 필드가 없어야 한다.
+  assert.equal(card.v2.spec, "chara_card_v2");
+  assert.equal(card.v2.data.group_only_greetings, undefined);
+  assert.equal(card.v2.name, "엘라");
+
+  // 카드 → 재임포트로 본문이 살아있는지 확인.
+  const reimported = parseCharacterCard(card.v3);
+  assert.equal(reimported.scenario.data.name, "엘라");
+  assert.equal(reimported.scenario.data.first_mes, "첫 인사");
+  assert.deepEqual(reimported.scenario.data.alternate_greetings, ["다른 인사"]);
+  assert.equal(reimported.lorebook?.entries.length, 1);
+  assert.equal(reimported.lorebook?.entries[0].content, before.content);
+
+  // PNG 카드 — 만든 파일을 우리 임포터가 그대로 읽어야 한다(ccv3 우선, chara 폴백).
+  const fakePng = makeFakePng();
+  const withCard = embedCharacterCardInPng(fakePng, {
+    ccv3: JSON.stringify(card.v3),
+    chara: JSON.stringify(card.v2),
+  });
+  const chunks = readPngTextChunks(withCard);
+  assert.deepEqual(
+    chunks.map((c) => c.keyword),
+    ["ccv3", "chara"]
+  );
+  const extracted = extractCharacterCardJsonFromPng(withCard);
+  assert.equal(extracted?.chunk, "ccv3");
+  assert.equal(extracted?.data.data.name, "엘라");
+  // 한글이 base64/UTF-8 왕복에서 깨지지 않아야 한다.
+  assert.equal(extracted?.data.data.first_mes, "첫 인사");
+  // 카드가 이미 심긴 이미지를 다시 내보내면 옛 청크는 남지 않는다(먼저 읽혀 사고).
+  const again = embedCharacterCardInPng(withCard, {
+    ccv3: JSON.stringify({ ...card.v3, marker: "new" }),
+    chara: JSON.stringify(card.v2),
+  });
+  assert.equal(readPngTextChunks(again).length, 2);
+  assert.equal(extractCharacterCardJsonFromPng(again)?.data.marker, "new");
+
+  // ── 정규식 스크립트 파일 왕복 (ST 는 파일 하나 = 스크립트 하나) ──
+  const stRegexFile = {
+    id: "b1e9",
+    scriptName: "생각 지우기",
+    findRegex: "/<thinking>[\\s\\S]*?<\\/thinking>/g",
+    replaceString: "",
+    trimStrings: ["  "],
+    placement: [2],
+    disabled: false,
+    markdownOnly: false,
+    promptOnly: true,
+    runOnEdit: false,
+    substituteRegex: 0,
+    minDepth: null,
+    maxDepth: null,
+  };
+  assert.equal(detectFormat(stRegexFile), "sillytavern-regex");
+  // 다른 포맷이 정규식으로 새지 않아야 한다.
+  assert.notEqual(detectFormat({ entries: {} }), "sillytavern-regex");
+  assert.notEqual(detectFormat(card.v3), "sillytavern-regex");
+
+  const importedRegex = normalizeRegexScript(stRegexFile, "fallback-id");
+  assert.ok(importedRegex);
+  assert.equal(importedRegex.id, "b1e9");
+  assert.equal(importedRegex.scriptName, "생각 지우기");
+  assert.equal(importedRegex.findRegex, stRegexFile.findRegex);
+  assert.equal(importedRegex.promptOnly, true);
+  // UI 미노출 필드도 보존돼야 한다(남의 ST 정규식을 손실 없이 받는다).
+  assert.deepEqual(importedRegex.trimStrings, ["  "]);
+  assert.deepEqual(importedRegex.placement, [2]);
+  // ST 의 null 깊이 = 무제한. 우리 표현은 minDepth -1 / maxDepth NaN.
+  assert.equal(importedRegex.minDepth, -1);
+  assert.ok(Number.isNaN(importedRegex.maxDepth));
+
+  // 내보내기 = 그대로 직렬화. JSON 을 거치면 NaN 이 null 이 되어 ST 표현으로 돌아간다.
+  const exportedRegex = JSON.parse(JSON.stringify(importedRegex));
+  assert.equal(exportedRegex.maxDepth, null);
+  assert.equal(detectFormat(exportedRegex), "sillytavern-regex");
+  const reimportedRegex = normalizeRegexScript(exportedRegex, "fallback-id");
+  assert.ok(reimportedRegex);
+  assert.deepEqual(
+    { ...reimportedRegex, maxDepth: 0 },
+    { ...importedRegex, maxDepth: 0 }
+  );
+  assert.ok(Number.isNaN(reimportedRegex.maxDepth));
+
+  // findRegex 가 없으면 스크립트로 보지 않는다(빈 항목이 목록에 쌓이지 않게).
+  assert.equal(normalizeRegexScript({ scriptName: "빈 것" }, "x"), null);
+
+  console.log("sillytavern export round-trip harness passed");
+}
+
+/** 청크 구조만 갖춘 최소 PNG (시그니처 + IHDR + IEND). CRC 는 검사하지 않는다. */
+function makeFakePng(): Uint8Array {
+  const chunk = (type: string, body: number[]): number[] => {
+    const len = body.length;
+    return [
+      (len >>> 24) & 0xff,
+      (len >>> 16) & 0xff,
+      (len >>> 8) & 0xff,
+      len & 0xff,
+      ...Array.from(type, (c) => c.charCodeAt(0)),
+      ...body,
+      0,
+      0,
+      0,
+      0,
+    ];
+  };
+  return new Uint8Array([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    ...chunk("IHDR", [0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0]),
+    ...chunk("IEND", []),
+  ]);
 }

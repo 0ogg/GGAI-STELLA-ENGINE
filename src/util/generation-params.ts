@@ -37,3 +37,23 @@ export function paramsToOverride(
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
+
+/**
+ * 출력 길이 상한만 뗀 paramsOverride — 샘플링(temperature/topP/…)은 그대로 둔다.
+ *
+ * 본문 이어쓰기의 출력 제한은 "한 번에 이만큼만 써라"는 **본문 분량 설정**이다.
+ * 부산물 생성(QR `/gen` 등)은 용도가 달라 그 상한을 물려받으면 안 된다 — 긴 결과가
+ * 중간에 잘린다. 키를 빼면 Core 가 그 프로필에 설정된 출력 길이로 떨어진다.
+ * (문단 재생성은 애초에 paramsOverride 를 안 보내 같은 상태다.)
+ */
+export function withoutOutputCap(
+  override: Record<string, unknown> | undefined
+): Record<string, unknown> | undefined {
+  if (!override) return undefined;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(override)) {
+    if (k === "maxTokens" || k === "max_tokens") continue;
+    out[k] = v;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
