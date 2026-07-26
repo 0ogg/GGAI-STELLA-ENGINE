@@ -7924,12 +7924,10 @@ body.is-mobile .ggai-phone-root.is-kb .ggai-phone-composer {
   /* 세로로 눌리지 않게 — 부모가 세로 flex(피드)라 기본값이면 칩이 납작해져
      위아래가 잘린다. overflow-x 가 세로도 함께 자르므로 반드시 고정. */
   flex: 0 0 auto;
-  /* 긴 피드를 내려도 리스트 전환·팔로우가 손에 닿게 위에 붙는다. */
-  position: sticky;
-  top: 0;
-  z-index: 3;
+  /* 피드 맨 위에만 있고 스크롤을 따라오지 않는다 — 리스트 전환·팔로우는 가끔
+     쓰는 기능이라 화면을 계속 차지할 만큼 중요하지 않다(2026-07-27 사용자 지적,
+     예전엔 sticky 였다). 진입점은 피드 최상단에 그대로 있다. */
   padding: 6px 0;
-  background: var(--background-primary);
 }
 .ggai-phone-sns-listbar::-webkit-scrollbar {
   display: none;

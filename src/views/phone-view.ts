@@ -180,6 +180,13 @@ class PhoneController extends Component {
   /** 답글 입력이 열려 있는 대상 — 게시글 id + (대댓글이면) 부모 답글 id. */
   private replyOpen: { postId: string; parentId?: string } | null = null;
   /**
+   * 작성 중인 글·답글 — **DOM 이 아니라 여기 산다**. 입력칸 값만 믿으면 사진을
+   * 첨부하거나(첨부 미리보기 = 재렌더) 번역·생성이 끝나 피드가 갱신될 때 써 둔
+   * 글이 조용히 사라진다(첨부는 필드라 살아남아 "사진만 올라감").
+   */
+  private snsDraft = "";
+  private replyDraft = "";
+  /**
    * 원문↔번역 표시 오버라이드 — null = 설정(자동 번역)을 따름, true = 번역 보기,
    * false = 원문 보기. 햄버거 토글이 설정한다. 문자/SNS/방송 공통(앱별 축).
    */
@@ -2399,6 +2406,11 @@ class PhoneController extends Component {
         placeholder: `${this.loginProfile?.name ?? "나"}(으)로 게시하기…`,
       },
     });
+    // 재렌더를 넘어 살아남는 초안 (필드가 진실 소스).
+    ta.value = this.snsDraft;
+    ta.addEventListener("input", () => {
+      this.snsDraft = ta.value;
+    });
     ta.addEventListener("blur", () => this.flushSnsDirty());
     // 첨부 미리보기.
     if (this.pendingAttach) {
@@ -2424,6 +2436,8 @@ class PhoneController extends Component {
     attachBtn.addEventListener("click", () => {
       new PhoneImagePickerModal(this.plugin, (picked) => {
         this.pendingAttach = picked;
+        // 쓰던 글로 커서를 돌려준다 (첨부 미리보기 때문에 다시 그려야 한다).
+        this.focusSnsComposer = true;
         this.renderBody();
       }).open();
     });
@@ -2436,6 +2450,7 @@ class PhoneController extends Component {
       if ((!text && !this.pendingAttach) || !this.loginProfile) return;
       const attach = this.pendingAttach;
       ta.value = "";
+      this.snsDraft = "";
       this.pendingAttach = null;
       this.snsDirty = false;
       void this.plugin.phone.postToSns(
@@ -2451,10 +2466,13 @@ class PhoneController extends Component {
       );
     });
 
-    // 공유로 진입한 직후 — 코멘트를 바로 쓸 수 있게 작성창 포커스.
+    // 공유로 진입했거나 사진을 첨부한 직후 — 쓰던 자리(글 끝)로 커서 복귀.
     if (this.focusSnsComposer) {
       this.focusSnsComposer = false;
-      window.requestAnimationFrame(() => ta.focus());
+      window.requestAnimationFrame(() => {
+        ta.focus();
+        ta.setSelectionRange(ta.value.length, ta.value.length);
+      });
     }
 
     // 표시 순서 = max(작성, 붐업) — 다시 화제가 된 글이 상위로 재부상 (v2).
@@ -2644,6 +2662,7 @@ class PhoneController extends Component {
           this.replyOpen?.postId === post.id && !this.replyOpen.parentId
             ? null
             : { postId: post.id };
+        this.replyDraft = ""; // 다른 글의 답글칸으로 옮겨가면 초안도 새로.
         this.renderBody();
       });
       // 번역 표시는 폰 설정의 "자동 번역"으로 일괄 제어한다 (항목별 버튼 없음).
@@ -2788,6 +2807,7 @@ class PhoneController extends Component {
         this.replyOpen?.postId === postId &&
         this.replyOpen?.parentId === reply.id;
       this.replyOpen = same ? null : { postId, parentId: reply.id };
+      this.replyDraft = "";
       this.renderBody();
     });
     // 우클릭(PC)/길게 누르기(모바일) — 댓글 삭제 (대댓글 포함).
@@ -2830,10 +2850,16 @@ class PhoneController extends Component {
       cls: "ggai-phone-sns-post-btn",
       text: "전송",
     });
+    // 글 작성칸과 같은 이유로 초안은 필드에 산다 (재렌더 생존).
+    rta.value = this.replyDraft;
+    rta.addEventListener("input", () => {
+      this.replyDraft = rta.value;
+    });
     sendBtn.addEventListener("click", () => {
       const text = rta.value.trim();
       if (!text || !this.loginProfile) return;
       this.replyOpen = null;
+      this.replyDraft = "";
       this.snsDirty = false;
       void this.plugin.phone.replyToSnsPost(
         this.loginProfile,
@@ -2843,7 +2869,10 @@ class PhoneController extends Component {
       );
     });
     rta.addEventListener("blur", () => this.flushSnsDirty());
-    window.setTimeout(() => rta.focus(), 0);
+    window.setTimeout(() => {
+      rta.focus();
+      rta.setSelectionRange(rta.value.length, rta.value.length);
+    }, 0);
   }
 
   /** SNS 번역본을 보여줄지 (공통 getter 위임). */
