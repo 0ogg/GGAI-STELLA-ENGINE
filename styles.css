@@ -7755,7 +7755,9 @@ textarea.ggai-regex-mono {
   overflow: visible;
 }
 .ggai-phone-modal .ggai-phone-frame-wrap {
-  padding: 0;
+  /* 폰 창과 프레임이 픽셀 단위로 같으면 베젤 가장자리(특히 아래)가 창의
+     overflow:hidden 에 잘린다 — 몇 px 만 숨 쉴 자리를 준다. */
+  padding: 3px;
 }
 /* 모바일 오버레이 — 프레임 없이 풀 화면. 화면에 딱 고정된 크기여야 한다:
    Obsidian 의 .modal-content(= .ggai-phone-root) 는 콘텐츠에 따라 높이가 늘어나서,
@@ -7816,11 +7818,12 @@ body.is-mobile .ggai-phone-root.is-kb .ggai-phone-composer {
   border: 10px solid var(--phone-bezel);
   border-radius: 40px;
   background: var(--phone-bezel);
-  box-shadow:
-    0 18px 50px rgba(0, 0, 0, 0.45),
-    0 0 0 1px rgba(255, 255, 255, 0.08) inset,
-    /* 테마 포인트색이 몸체 테두리에 얇게 비친다. */
-    0 0 0 1.5px color-mix(in srgb, var(--interactive-accent) 55%, transparent);
+  /* 테두리 두께를 높이에 포함 — 폰 창과 프레임이 같은 크기라, 아니면 베젤
+     아래쪽이 창 밖으로 밀려 잘린다. */
+  box-sizing: border-box;
+  /* 바깥으로 나가는 그림자·링은 두지 않는다(같은 이유로 잘린다). 포인트색
+     테두리는 화면 가장자리 이음선(.ggai-phone-screen)이 대신 그린다. */
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
   overflow: hidden;
   display: flex;
 }
@@ -7840,6 +7843,8 @@ body.is-mobile .ggai-phone-root.is-kb .ggai-phone-composer {
   background: var(--phone-screen-bg);
   color: var(--phone-text);
   border-radius: 30px;
+  /* 베젤과 화면 사이 포인트색 이음선 — 프레임 안쪽이라 잘릴 일이 없다. */
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--interactive-accent) 45%, transparent);
 }
 .ggai-phone-screen.is-bare {
   border-radius: 0;
