@@ -186,6 +186,8 @@ class PhoneController extends Component {
    */
   private snsDraft = "";
   private replyDraft = "";
+  /** 방금 좋아요를 누른 글 — 그 하트만 한 번 튀게 하는 1회용 표시. */
+  private justLikedId: string | null = null;
   /**
    * 원문↔번역 표시 오버라이드 — null = 설정(자동 번역)을 따름, true = 번역 보기,
    * false = 원문 보기. 햄버거 토글이 설정한다. 문자/SNS/방송 공통(앱별 축).
@@ -2643,14 +2645,22 @@ class PhoneController extends Component {
         !!this.loginProfile &&
         (post.likedBy ?? []).includes(this.loginProfile.id);
       const likeCount = (post.likes ?? 0) + (post.likedBy?.length ?? 0);
+      // 하트 튐 애니메이션은 **방금 내가 누른 글**에만 (좋아요 저장 → 피드
+      // 재렌더로 버튼이 새로 그려지므로, 한 번 쓰고 지우는 표시로 전달한다).
+      const justLiked = this.justLikedId === post.id;
+      if (justLiked) this.justLikedId = null;
       const likeBtn = actions.createEl("button", {
-        cls: `ggai-phone-sns-like${likedByMe ? " is-liked" : ""}`,
+        cls:
+          "ggai-phone-sns-like" +
+          (likedByMe ? " is-liked" : "") +
+          (justLiked ? " is-pop" : ""),
         attr: { "aria-label": "좋아요" },
       });
       setIcon(likeBtn.createSpan({ cls: "ggai-phone-sns-like-icon" }), "heart");
       if (likeCount > 0) likeBtn.createSpan({ text: formatCount(likeCount) });
       likeBtn.addEventListener("click", () => {
         if (!this.loginProfile) return;
+        this.justLikedId = likedByMe ? null : post.id; // 취소는 안 튄다.
         void this.plugin.phone.togglePostLike(this.loginProfile.id, post.id);
       });
       if (post.replies.length > 0) {
