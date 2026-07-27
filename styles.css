@@ -7749,15 +7749,26 @@ textarea.ggai-regex-mono {
 .ggai-phone-modal .modal-close-button {
   display: none;
 }
+/* 폰 창 안에서 크기의 진실 소스는 **모달 하나**다. 예전엔 모달과 루트가 각자
+   min(780px,88vh) 를 따로 계산하고 프레임이 또 min(780px,100%) 를 계산해,
+   테마가 준 여백(.modal-content 기본 margin 등)이 끼면 그 몫만큼 아래가 창 밖
+   으로 밀려 잘렸다(화면마다 잘리는 정도가 달라 보인 이유). 이제 아래로 내려갈
+   수록 100% + border-box 로만 줄어든다. */
 .ggai-phone-modal .ggai-phone-root {
   width: min(400px, 92vw);
-  height: min(780px, 88vh);
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
+  margin: 0;
+  flex: 1 1 auto;
   overflow: visible;
 }
 .ggai-phone-modal .ggai-phone-frame-wrap {
   /* 폰 창과 프레임이 픽셀 단위로 같으면 베젤 가장자리(특히 아래)가 창의
      overflow:hidden 에 잘린다 — 몇 px 만 숨 쉴 자리를 준다. */
   padding: 3px;
+  box-sizing: border-box;
+  min-height: 0;
 }
 /* 모바일 오버레이 — 프레임 없이 풀 화면. 화면에 딱 고정된 크기여야 한다:
    Obsidian 의 .modal-content(= .ggai-phone-root) 는 콘텐츠에 따라 높이가 늘어나서,
@@ -7806,6 +7817,7 @@ body.is-mobile .ggai-phone-root.is-kb .ggai-phone-composer {
 /* PC — 폰 프레임 (모바일은 .is-bare 로 프레임 없이 풀 화면). */
 .ggai-phone-frame-wrap {
   height: 100%;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -7813,7 +7825,10 @@ body.is-mobile .ggai-phone-root.is-kb .ggai-phone-composer {
 }
 .ggai-phone-frame {
   width: min(400px, 100%);
-  height: min(780px, 100%);
+  /* 높이는 부모(폰 창)에서 내려온다. 780px 은 탭 뷰처럼 부모가 훨씬 클 때만
+     걸리는 상한 — 창 안에서는 항상 100% 가 이긴다. */
+  height: 100%;
+  max-height: min(780px, 100%);
   /* 베젤 = 기기 몸체. 테마 경계선이 아니라 항상 어두운 금속/유리색. */
   border: 10px solid var(--phone-bezel);
   border-radius: 40px;
