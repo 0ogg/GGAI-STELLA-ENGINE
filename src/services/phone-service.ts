@@ -64,13 +64,7 @@ import type { StellaScenario } from "../types/scenario";
 import { uuidv4 } from "../util/uuid";
 import { getSessionHostLeaves, isSessionHostView } from "../views/session-host";
 
-export type PhoneSendResult =
-  | {
-      ok: true;
-      /** 시간차 배달 시 첫 답장의 도착 예정 시각 (즉시/읽씹이면 없음). */
-      firstDeliverAt?: number;
-    }
-  | { ok: false; error: string };
+export type PhoneSendResult = { ok: true } | { ok: false; error: string };
 
 /** 문자 대상 — 시나리오 캐릭터 스레드 또는 엑스트라(모르는 번호) 스레드. */
 export type PhoneSendTarget =
@@ -532,16 +526,6 @@ export class PhoneService {
       });
       // 답장이 한참 뒤 도착하면 (시간차 배달) 사용자가 폰을 떠났을 수 있으니
       // 도착 시각에 알림을 예약한다.
-      if (
-        result.ok &&
-        result.firstDeliverAt &&
-        result.firstDeliverAt - Date.now() > 60_000
-      ) {
-        this.scheduleIncomingNotice(
-          system.charName ?? "문자",
-          result.firstDeliverAt
-        );
-      }
       return result;
     } finally {
       this.inFlight.delete(key);
@@ -812,9 +796,7 @@ export class PhoneService {
         system: system.text,
         stripPrefix: system.charName,
       });
-      if (result.ok) {
-        this.scheduleIncomingNotice(contact.name, result.firstDeliverAt);
-      }
+      if (result.ok) this.notifyIncoming(contact.name);
     } finally {
       this.inFlight.delete(key);
       this.plugin.store.trigger("phone-replying-changed", persona.id);
@@ -852,7 +834,7 @@ export class PhoneService {
         system: system.text,
         stripPrefix: system.charName,
       });
-      if (result.ok) this.scheduleIncomingNotice(contact.name, result.firstDeliverAt);
+      if (result.ok) this.notifyIncoming(contact.name);
     } finally {
       this.inFlight.delete(key);
       this.plugin.store.trigger("phone-replying-changed", persona.id);
@@ -904,7 +886,7 @@ export class PhoneService {
         system: system.text,
         stripPrefix: null,
       });
-      if (result.ok) this.scheduleIncomingNotice("알 수 없는 번호", result.firstDeliverAt);
+      if (result.ok) this.notifyIncoming("알 수 없는 번호");
     } finally {
       this.inFlight.delete(key);
       this.plugin.store.trigger("phone-replying-changed", persona.id);
@@ -4359,22 +4341,6 @@ export class PhoneService {
     };
   }
 
-  /**
-   * 수신 알림을 배달 시각에 맞춰 예약 (v2 §3.2) — 시간차 배달이면 문자가
-   * "도착"하는 순간 울린다. 즉시 배달/과거면 바로.
-   */
-  private scheduleIncomingNotice(
-    senderName: string,
-    deliverAt: number | undefined
-  ): void {
-    const delay = (deliverAt ?? 0) - Date.now();
-    if (delay <= 0) {
-      this.notifyIncoming(senderName);
-      return;
-    }
-    window.setTimeout(() => this.notifyIncoming(senderName), delay);
-  }
-
   /** 수신 알림 — 인앱 Notice, 클릭하면 폰이 열린다. */
   private notifyIncoming(senderName: string): void {
     const notice = new Notice(`📱 새 문자 — ${senderName}`, 8_000);
@@ -4493,10 +4459,7 @@ export class PhoneService {
     }
     const threads = data.threads
       .map((t) => {
-        const delivered = t.messages.filter(
-          (m) => !m.deliverAt || m.deliverAt <= now
-        );
-        const last = delivered[delivered.length - 1];
+        const last = t.messages[t.messages.length - 1];
         return last ? { t, last } : null;
       })
       .filter((v): v is { t: PhoneThread; last: PhoneMessage } => !!v)
@@ -4706,19 +4669,9 @@ export class PhoneService {
     // 말풍선 수 고착 방지 — 모델이 이력의 자기 패턴(항상 2통이면 영원히 2통)을
     // 모방하므로, 매 생성 랜덤 목표 통 수를 힌트로 준다 (2026-07-14 관찰).
     const bubbleTarget = [1, 1, 1, 2, 2, 3][Math.floor(Math.random() * 6)];
-    // 시간차 배달 (v2 §3.2) — 답장 최대 지연 0 이면 v1 즉시 모드 (평문 출력).
-    const delayCapMin = Math.max(
-      0,
-      plugin.data.phone?.maxReplyDelayMinutes ?? 10
-    );
-    const delayed = delayCapMin > 0;
-    const system =
-      opts.system +
-      (delayed
-        ? `\n\n${buildPhoneTextIoInstructions(delayCapMin * 60, bubbleTarget)}`
-        : `\n\nFor this turn, aim for roughly ${bubbleTarget} text bubble(s). Vary ` +
-          `the number of texts naturally from turn to turn — do not simply match ` +
-          `how many you sent before.`);
+    // 답장은 항상 즉시 도착한다 (시간차 배달 폐지 — 사용자 결정 2026-07-27).
+    // JSON 프로토콜은 유지: 여러 통 분할과 읽씹(read:false)이 여기 실려 온다.
+    const system = `${opts.system}\n\n${buildPhoneTextIoInstructions(bubbleTarget)}`;
 
     const messages: ChatMessage[] = [{ role: "system", content: system }];
     const historyLimit = Math.max(
@@ -4757,25 +4710,21 @@ export class PhoneService {
     }
     if (!replyText) return { ok: false, error: "모델이 빈 응답을 보냈습니다." };
 
-    // JSON 답장 계획 (시간차 모드) — 파싱 실패는 평문 폴백 (즉시 배달).
-    const plan = delayed
-      ? parsePhoneReplyPlan(replyText, delayCapMin * 60)
-      : null;
+    // JSON 답장 계획 — 파싱 실패는 평문 폴백 (빈 줄로 나눠 여러 통).
+    const plan = parsePhoneReplyPlan(replyText);
     const stripPrefix = (s: string) =>
       opts.stripPrefix
         ? s.replace(new RegExp(`^${escapeRegExp(opts.stripPrefix)}\\s*:\\s*`), "")
         : s;
-    const bubbles: Array<{ text: string; delaySec: number }> = plan
-      ? plan.bubbles
-          .map((b) => ({ ...b, text: stripPrefix(b.text) }))
-          .filter((b) => b.text)
-          .slice(0, REPLY_BUBBLE_LIMIT)
-      : stripPrefix(replyText)
-          .split(/\n{2,}/)
-          .map((s) => s.trim())
-          .filter(Boolean)
-          .slice(0, REPLY_BUBBLE_LIMIT)
-          .map((text) => ({ text, delaySec: 0 }));
+    const bubbles: string[] = (
+      plan
+        ? plan.bubbles.map(stripPrefix)
+        : stripPrefix(replyText)
+            .split(/\n{2,}/)
+            .map((s) => s.trim())
+    )
+      .filter(Boolean)
+      .slice(0, REPLY_BUBBLE_LIMIT);
 
     // 생성하는 동안 다른 저장이 있었을 수 있으니 다시 읽는다.
     const data = await store.getPhoneMessages(opts.personaId);
@@ -4786,7 +4735,7 @@ export class PhoneService {
     // 읽음 (v2 §3.2) — 답장(생성)을 시작했다 = 읽었다. 읽씹(read:false)이면
     // 읽지 않은 채 "1" 유지, 저장할 답장도 없다.
     const read = !plan || plan.read;
-    if (read && delayed) {
+    if (read) {
       for (const m of thread.messages) {
         if (m.from === "persona" && !m.readAt) m.readAt = now;
       }
@@ -4800,41 +4749,34 @@ export class PhoneService {
       return { ok: false, error: "모델이 빈 응답을 보냈습니다." };
     }
 
-    let at = now + (plan ? Math.max(0, plan.replyDelaySec) * 1000 : 0);
-    let firstDeliverAt: number | undefined;
+    // 전부 지금 도착한다 (deliverAt 없음). +i 는 동시각 정렬 안정성.
     for (let i = 0; i < bubbles.length; i++) {
-      at += Math.max(0, bubbles[i].delaySec) * 1000;
-      const arrive = at + i; // 동시각 정렬 안정성
-      if (firstDeliverAt === undefined) firstDeliverAt = arrive;
-      const msg: PhoneMessage = {
+      thread.messages.push({
         id: uuidv4(),
         from: "other",
-        text: bubbles[i].text,
-        createdAt: arrive,
-        ...(arrive > now ? { deliverAt: arrive } : {}),
-      };
-      thread.messages.push(msg);
+        text: bubbles[i],
+        createdAt: now + i,
+      });
     }
     await store.savePhoneMessages(opts.personaId, data);
     // 자동 번역 (§4) — 켜져 있으면 도착한 답장을 바로 번역해 둔다.
     if (this.isAutoTranslateOn()) {
       void this.translateThread(opts.personaId, opts.target).catch(() => {});
     }
-    return { ok: true, firstDeliverAt };
+    return { ok: true };
   }
 }
 
 /**
- * 문자 답장 계획 파서 (v2 §3.2) — JSON {read, replyDelaySec, messages[]} 를
- * 관대하게 읽는다. JSON 이 아니면 null (평문 폴백 = 즉시 배달).
+ * 문자 답장 계획 파서 — JSON {read, messages[]} 를 관대하게 읽는다. JSON 이
+ * 아니면 null (평문 폴백). 구버전 프로토콜의 delaySec/replyDelaySec 은 무시 —
+ * 시간차 배달은 폐지됐다(답장은 항상 즉시 도착).
  */
 function parsePhoneReplyPlan(
-  raw: string,
-  capSec: number
+  raw: string
 ): {
   read: boolean;
-  replyDelaySec: number;
-  bubbles: Array<{ text: string; delaySec: number }>;
+  bubbles: string[];
 } | null {
   const start = raw.indexOf("{");
   const end = raw.lastIndexOf("}");
@@ -4848,27 +4790,14 @@ function parsePhoneReplyPlan(
   if (!parsed || typeof parsed !== "object") return null;
   const p = parsed as Record<string, unknown>;
   if (!("messages" in p) && !("read" in p)) return null;
-  const bubbles: Array<{ text: string; delaySec: number }> = [];
+  const bubbles: string[] = [];
   for (const m of Array.isArray(p.messages) ? p.messages : []) {
     if (!m || typeof m !== "object") continue;
-    const mm = m as { text?: unknown; delaySec?: unknown };
+    const mm = m as { text?: unknown };
     if (typeof mm.text !== "string" || !mm.text.trim()) continue;
-    bubbles.push({
-      text: mm.text.trim(),
-      delaySec:
-        typeof mm.delaySec === "number" && Number.isFinite(mm.delaySec)
-          ? Math.min(120, Math.max(0, mm.delaySec))
-          : 0,
-    });
+    bubbles.push(mm.text.trim());
   }
-  return {
-    read: p.read !== false,
-    replyDelaySec:
-      typeof p.replyDelaySec === "number" && Number.isFinite(p.replyDelaySec)
-        ? Math.min(capSec, Math.max(0, p.replyDelaySec))
-        : 0,
-    bubbles,
-  };
+  return { read: p.read !== false, bubbles };
 }
 
 /**

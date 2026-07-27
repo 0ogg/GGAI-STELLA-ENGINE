@@ -70,12 +70,8 @@ export function registerPhoneExtension(plugin: StellaEnginePlugin): () => void {
         (t) => t.kind === "scenario" && t.scenarioId === session.meta.scenarioId
       );
       if (thread && thread.messages.length > 0) {
-        // 미배달 문자(deliverAt 미래, v2 시간차 배달)는 아직 "일어나지 않은"
-        // 문자 — 세션 기억에서 제외.
-        const delivered = thread.messages.filter(
-          (m) => !m.deliverAt || m.deliverAt <= Date.now()
-        );
-        const recent = delivered.slice(-INJECT_MESSAGE_LIMIT);
+        // 시간차 배달 폐지(2026-07-27) — 저장된 문자는 곧 도착한 문자다.
+        const recent = thread.messages.slice(-INJECT_MESSAGE_LIMIT);
         const lines = recent.map((m) => {
           const photo = m.image ? ` [photo: ${m.image.caption || "attached photo"}]` : "";
           return `${m.from === "persona" ? userName : charName}: ${m.text}${photo}`;

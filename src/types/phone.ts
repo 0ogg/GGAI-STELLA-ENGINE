@@ -676,10 +676,7 @@ export interface PhonePluginData {
   triggers?: PhoneTriggerSettings;
   /** 미응답 수신 문자 상한 (기본 2, 0=무제한) — 답장 안 한 스레드가 이만큼 쌓이면 갱신이 쉼. */
   maxUnanswered?: number;
-  /**
-   * 답장 최대 지연 (분, v2 §3.2 시간차 배달 — 기본 10). 0 = 즉시 배달 모드
-   * (v1 동작: 생성 즉시 표시, 읽음/읽씹 판정도 끔).
-   */
+  /** @deprecated 시간차 배달 폐지(2026-07-27) — 답장은 항상 즉시 도착한다. */
   maxReplyDelayMinutes?: number;
   /** 갱신 1회당 SNS 활동(게시글/답글) 상한 (기본 6, 0=SNS 자동 갱신 끔). */
   snsPerRefresh?: number;

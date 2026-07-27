@@ -93,15 +93,6 @@ export function renderPhoneMessagesSettings(ctx: PhoneSettingsCtx): void {
     integer: true,
     onChange: (maxUnanswered) => void patch({ maxUnanswered }),
   });
-  renderNumberRow({
-    parent,
-    label: "답장 도착까지 최대 지연 (분, 0=바로 도착)",
-    value: phone.maxReplyDelayMinutes ?? 10,
-    fallback: 10,
-    min: 0,
-    integer: true,
-    onChange: (maxReplyDelayMinutes) => void patch({ maxReplyDelayMinutes }),
-  });
 }
 
 /** 스텔라 네트워크(SNS) 세부 설정 — 프롬프트 + 재료 분량 + 활동 상한. */

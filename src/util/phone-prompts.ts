@@ -324,22 +324,17 @@ export const PHONE_CAST_IO_INSTRUCTIONS = `${PHONE_CAST_HEADER}\n\n${buildCastIo
  * (`parsePhoneReplyPlan`)와 짝이므로 편집 대상이 아니다. 답장 최대 지연이
  * 0(즉시 모드)이면 이 프로토콜 없이 v1 평문 출력을 쓴다.
  */
-export function buildPhoneTextIoInstructions(
-  maxDelaySec: number,
-  bubbleTarget: number
-): string {
+export function buildPhoneTextIoInstructions(bubbleTarget: number): string {
+  // 시간차 배달(replyDelaySec/delaySec)은 제거됨 — 답장은 항상 즉시 도착한다
+  // (사용자 결정 2026-07-27: 일부러 기다리게 하는 재미는 한두 번뿐).
+  // 읽씹(read:false)만 남는다 — 이건 기다림이 아니라 "안 옴"이다.
   return (
     `## OUTPUT — raw JSON object only (no narration, no code fences):\n` +
-    `{"read": true, "replyDelaySec": 30, "messages": [` +
-    `{"text": "...", "delaySec": 4}, {"text": "...", "delaySec": 12}]}\n` +
+    `{"read": true, "messages": [{"text": "..."}, {"text": "..."}]}\n` +
     `- "read": false = they saw the notification but will NOT open or answer ` +
     `right now (busy mid-scene, asleep, sulking, leaving it on read). Then ` +
     `"messages" MUST be []. Use it when the fiction calls for it — being left ` +
     `on "1" is part of real texting.\n` +
-    `- "replyDelaySec": seconds between reading and the first reply — 0 for an ` +
-    `instant reply, up to ${maxDelaySec}. Fit the fiction: glued to their ` +
-    `phone = fast, mid-conversation elsewhere or 3am = slow or read:false.\n` +
-    `- Each "delaySec": typing gap (2-60s) since the previous bubble.\n` +
     `- This turn, aim for roughly ${bubbleTarget} message bubble(s). Vary the ` +
     `count naturally from turn to turn — do not simply match how many you ` +
     `sent before.`

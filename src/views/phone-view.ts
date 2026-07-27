@@ -301,15 +301,6 @@ class PhoneController extends Component {
     );
     this.updateClock();
     this.registerInterval(window.setInterval(() => this.updateClock(), 30_000));
-    // 시간차 배달 (v2) — 도착 예정 문자가 있으면 5초마다 배달 반영.
-    this.registerInterval(
-      window.setInterval(() => {
-        if (this.screen !== "messages") return;
-        if (!this.hasUndelivered()) return;
-        runWhenImeIdle(() => this.renderBody());
-      }, 5_000)
-    );
-
     this.headerEl = screen.createDiv({ cls: "ggai-phone-header" });
     this.bodyEl = screen.createDiv({ cls: "ggai-phone-body" });
     this.composerEl = screen.createDiv({ cls: "ggai-phone-composer" });
@@ -1387,30 +1378,13 @@ class PhoneController extends Component {
 
   // ─────────────────────────── 메시지 앱 ───────────────────────────
 
-  /** 배달된(표시 가능한) 문자만 — deliverAt 미래는 아직 도착 전 (v2 시간차 배달). */
+  /**
+   * 표시할 문자 — 전부. 시간차 배달이 폐지돼(2026-07-27) 숨길 문자가 없다.
+   * 구버전 파일에 미래 deliverAt 이 남아 있어도 그냥 보여 준다(안 그러면 그
+   * 문자들이 영영 안 뜬다).
+   */
   private visibleMessages(thread: PhoneThread): PhoneThread["messages"] {
-    const now = Date.now();
-    return thread.messages.filter((m) => !m.deliverAt || m.deliverAt <= now);
-  }
-
-  /** 도착 예정(미배달) 문자가 있는지 — 5초 배달 틱 게이트. */
-  private hasUndelivered(): boolean {
-    const now = Date.now();
-    return (this.messages?.threads ?? []).some((t) =>
-      t.messages.some((m) => m.deliverAt !== undefined && m.deliverAt > now)
-    );
-  }
-
-  /** 열린 스레드에 곧(20초 내) 도착할 문자가 있는지 — 타이핑 인디케이터. */
-  private deliveryImminent(thread: PhoneThread | null): boolean {
-    if (!thread) return false;
-    const now = Date.now();
-    return thread.messages.some(
-      (m) =>
-        m.deliverAt !== undefined &&
-        m.deliverAt > now &&
-        m.deliverAt - now <= 20_000
-    );
+    return thread.messages;
   }
 
   private currentThread(): PhoneThread | null {
@@ -1731,8 +1705,8 @@ class PhoneController extends Component {
       }
     }
 
-    // 답장 생성 중이거나 곧 도착할 문자가 있으면 — "입력 중…" 점 세 개.
-    if (this.isReplyingHere() || this.deliveryImminent(thread)) {
+    // 실제로 답장을 생성하는 동안만 "입력 중…" 점 세 개 (연출용 대기 없음).
+    if (this.isReplyingHere()) {
       const row = this.bodyEl.createDiv({ cls: "ggai-chat-msg is-assistant" });
       const avatar = row.createDiv({ cls: "ggai-chat-avatar" });
       renderThumb(this.app, avatar, charThumb, charName, "book-open");
