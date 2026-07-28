@@ -30,7 +30,6 @@ import {
   confirmDeleteScenario,
   confirmDeleteUser,
   createAndOpenSession,
-  exportLorebook,
   exportScenarioCard,
   getInviteToActiveSession,
   openSessionByPath,
@@ -39,6 +38,12 @@ import {
   runImportPicker,
 } from "./entity-actions";
 import { buildSessionMenu } from "./session-menu";
+import { buildLorebookMenu } from "./lorebook-menu";
+import {
+  buildLorebookGroups,
+  type LorebookGroups,
+  type OwnedLoreEntry,
+} from "../util/lorebook-owners";
 
 type SidebarTab = "scenario" | "user" | "lorebook";
 type SidebarCardLayout = "compact" | "cover";
@@ -59,6 +64,10 @@ type SimpleSortKey = "alpha" | "modified";
 export class SidebarView extends ItemView {
   private items: ScenarioListItem[] = [];
   private lorebooks: LorebookListItem[] = [];
+  /** 로어북 소속 분류 — 자동 생성 묶음 표시용. refreshLorebooks 에서 갱신. */
+  private loreGroups: LorebookGroups | null = null;
+  /** 자동 생성 묶음 접힘 상태. 기본 = 펼침. */
+  private autoLoreCollapsed = false;
   private users: UserListItem[] = [];
   private searchQuery = "";
   private sortKey: SortKey = "recent";
@@ -188,6 +197,9 @@ export class SidebarView extends ItemView {
 
   private async refreshLorebooks(): Promise<void> {
     this.lorebooks = await this.store.refreshLorebooks().catch(() => []);
+    this.loreGroups = await buildLorebookGroups(this.store, this.lorebooks).catch(
+      () => null
+    );
   }
 
   private async refreshUsers(): Promise<void> {
@@ -481,7 +493,55 @@ export class SidebarView extends ItemView {
       });
       return;
     }
-    for (const item of visible) this.renderLorebookCard(list, item);
+
+    // 내 서재 먼저, 자동 생성 북은 하나의 접힘 묶음으로 — 딴 데로 치우지 않고 자리만 정돈.
+    const owned = this.ownedLoreById();
+    const library = visible.filter((l) => !owned.has(l.lorebook.meta.id));
+    const auto = visible.filter((l) => owned.has(l.lorebook.meta.id));
+    for (const item of library) this.renderLorebookCard(list, item);
+    if (auto.length === 0) return;
+
+    // 검색 중에는 걸린 항목이 보여야 하므로 접힘을 무시하고 펼친다.
+    const searching = this.searchQuery.trim().length > 0;
+    const collapsed = !searching && this.autoLoreCollapsed;
+    const header = list.createEl("div", {
+      cls: "ggai-sidebar-group-header",
+    });
+    const chevron = header.createSpan({ cls: "ggai-sidebar-group-chevron" });
+    setIcon(chevron, collapsed ? "chevron-right" : "chevron-down");
+    header.createSpan({ text: `자동 생성 (${auto.length})` });
+    header.setAttr("role", "button");
+    header.setAttr("tabindex", "0");
+    header.setAttr("aria-expanded", String(!collapsed));
+    const toggle = (): void => {
+      this.autoLoreCollapsed = !this.autoLoreCollapsed;
+      this.renderListContents();
+    };
+    header.addEventListener("click", toggle);
+    header.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      toggle();
+    });
+    if (collapsed) return;
+    for (const item of auto) {
+      const entry = owned.get(item.lorebook.meta.id);
+      this.renderLorebookCard(list, item, {
+        badge: entry?.orphaned ? "주인 없음" : entry?.badge,
+      });
+    }
+  }
+
+  /** 자동 생성 북 id → 분류 정보(배지/고아 여부). 분류 전이면 빈 맵. */
+  private ownedLoreById(): Map<string, OwnedLoreEntry> {
+    const map = new Map<string, OwnedLoreEntry>();
+    const groups = this.loreGroups;
+    if (!groups) return map;
+    for (const g of groups.auto) {
+      for (const e of g.entries) map.set(e.item.lorebook.meta.id, e);
+    }
+    for (const e of groups.orphans) map.set(e.item.lorebook.meta.id, e);
+    return map;
   }
 
   private filteredLorebooks(): LorebookListItem[] {
@@ -616,12 +676,18 @@ export class SidebarView extends ItemView {
     );
   }
 
-  private renderLorebookCard(parent: HTMLElement, item: LorebookListItem): void {
+  private renderLorebookCard(
+    parent: HTMLElement,
+    item: LorebookListItem,
+    opts?: { badge?: string }
+  ): void {
     const card = parent.createEl("div", { cls: "ggai-scenario-card" });
     card.addClass(this.cardLayout === "cover" ? "is-layout-cover" : "is-layout-compact");
 
     const name = item.lorebook.meta.name || item.folderName;
-    const meta = `${item.lorebook.entries.length} 항목`;
+    const meta = [`${item.lorebook.entries.length} 항목`, opts?.badge]
+      .filter((s) => s)
+      .join(" · ");
     const thumbName = item.lorebook.meta.thumbnail;
     const thumbPath =
       thumbName &&
@@ -916,20 +982,11 @@ export class SidebarView extends ItemView {
     this.makeLorebookMenu(item).showAtPosition({ x, y });
   }
 
+  /** 로어북 공용 메뉴 — 항목 구성은 lorebook-menu.ts 한 곳에서만 관리한다. */
   private makeLorebookMenu(item: LorebookListItem): Menu {
-    return new Menu()
-      .addItem((menuItem) =>
-        menuItem.setTitle("편집").onClick(() => void this.openLorebookEditor(item))
-      )
-      .addItem((menuItem) =>
-        menuItem
-          .setTitle("내보내기")
-          .onClick(() => void exportLorebook(this.plugin, item.lorebookFile))
-      )
-      .addSeparator()
-      .addItem((menuItem) =>
-        menuItem.setTitle("삭제").onClick(() => this.confirmDeleteLorebook(item))
-      );
+    return buildLorebookMenu(this.plugin, item, {
+      onEdit: () => void this.openLorebookEditor(item),
+    });
   }
 
   private showUserMenu(e: MouseEvent, item: UserListItem): void {

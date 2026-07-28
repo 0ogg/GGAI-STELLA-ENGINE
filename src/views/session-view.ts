@@ -7,6 +7,7 @@ import {
 import type StellaEnginePlugin from "../main";
 import { AIService, type GenerationProfileLite } from "../services/ai-service";
 import type { ProSpliceOp } from "../services/pro-service";
+import { PRO_CONVERT_IDLE_MS } from "../util/pro-convert";
 import { StellaStore, type SessionChangeDetail } from "../state/store";
 import type {
   Patch,
@@ -89,10 +90,12 @@ import {
   collectUntranslatedParagraphs,
   getActiveTranslation,
   hasTranslation,
+  clearPendingReflections,
   recordTranslationVariant,
   redoLastTranslation,
   tokenizeParagraphs,
   undoLastTranslation,
+  upsertPendingReflection,
   type ParagraphToken,
 } from "../util/translate-paragraphs";
 import type {
@@ -147,9 +150,6 @@ export interface SessionViewState {
 }
 
 const IDLE_COMMIT_MS = 1500;
-
-/** 집필 프로 — 초고/문단 수정이 멈춘 뒤 영어판 반영(집필 변환)까지의 대기. */
-const PRO_CONVERT_IDLE_MS = 3000;
 
 /** 번역 뷰의 문단 편집 블록 하나 (translationBlocks 항목). */
 interface TranslationBlock {
@@ -516,7 +516,7 @@ export class SessionView extends ItemView {
     // 집필 프로 — 대기 초고/문단을 영어판에 반영 (소설 뷰는 no-op). 미리보기 =
     // 전송본 불변식에 초고도 포함되어야 하므로 여기서 함께 flush 한다. 실패해도
     // 여기서는 막지 않는다(호출자 다수) — 생성 시작 차단은 handleContinue 몫.
-    if (this.proWritingMode()) await this.runProConvert(true);
+    if (this.bidirectionalWriting()) await this.runProConvert(true);
   }
 
   /**
@@ -812,6 +812,7 @@ export class SessionView extends ItemView {
       this.cachedScenario = null;
       this.translations = null;
       this.translationViewActive = false;
+      this.proPendingDraft = "";
       return;
     }
     // 재실행/세션 전환 시 마지막 읽던 노드 위치 복원 준비 (render 끝에서 적용).
@@ -838,6 +839,10 @@ export class SessionView extends ItemView {
     this.translations = await this.store.getSessionTranslations(this.sessionFile);
     this.illustrations = await this.store.getSessionIllustrations(this.sessionFile);
     this.notes = await this.store.getSessionNotes(this.sessionFile);
+    // 집필 — 반영 전에 닫았던 초고를 대기함에서 복원 (재시작 생존).
+    this.proPendingDraft = this.bidirectionalWriting()
+      ? this.translations.proDraft ?? ""
+      : "";
     this.translationViewActive = this.translations.displayMode === "translation";
     this.outputMode = this.session?.meta.translation?.output ?? "replace";
     this.splitRatio = this.plugin.data.translationSplitRatio ?? 0.5;
@@ -1070,6 +1075,7 @@ export class SessionView extends ItemView {
     this.cachedScenario = null;
     this.translations = null;
     this.translationViewActive = false;
+    this.proPendingDraft = "";
     this.translating = false;
     this.illustrations = null;
     this.illustrating = false;
@@ -1094,6 +1100,18 @@ export class SessionView extends ItemView {
   /** 집필 프로 뷰(ProSessionView)가 true 로 오버라이드 — 대기 문단(pending) 모델 게이트. */
   protected proWritingMode(): boolean {
     return false;
+  }
+
+  /**
+   * 양방향 집필 게이트 — 대기 문단 모델(번역 화면 직접 쓰기/수정 → 원장 반영) 전체가
+   * 이 게이트를 본다. 집필 프로 세션(뷰 오버라이드)이거나, 번역 설정의 '양방향 번역'
+   * 토글이 켜진 소설 세션이면 참. 상세는 `양방향 번역 스펙.md`.
+   */
+  protected bidirectionalWriting(): boolean {
+    return (
+      this.proWritingMode() ||
+      this.session?.meta.translation?.bidirectional === true
+    );
   }
 
   /** 로비(대시보드)로 — 미저장 본문 편집을 커밋한 뒤 같은 탭에서 전환. */
@@ -2607,12 +2625,11 @@ export class SessionView extends ItemView {
   private async handleContinue(): Promise<void> {
     if (!this.session || this.generation) return;
     await this.commitPending({ force: true });
-    // 집필 프로 — 대기 초고를 먼저 영어판에 반영. 실패하면 생성을 시작하지 않는다
-    // (초고가 빠진 채 이어쓰면 스토리가 어긋난다). 초고는 대기 상태로 남는다.
-    if (this.proWritingMode() && !(await this.runProConvert(true))) {
-      new Notice("초고 변환에 실패해 생성을 시작하지 않았습니다.");
-      return;
-    }
+    // 양방향 — 대기 초고/수정을 먼저 원장에 반영하고 출발한다. 이어쓰기 버튼이 곧
+    // "필요한 걸 전부 하고 생성"이라, 직전 실패가 있어도 누를 때마다 다시 시도한다.
+    // 지금 이 시도가 실패했을 때만 멈춘다 — 알림은 반영 실행부가 이미 띄웠고
+    // (중복 토스트 금지) 초고는 대기 상태로 남는다.
+    if (this.bidirectionalWriting() && !(await this.runProConvert(true))) return;
     // 타이핑을 멈출 때마다 잘게 쌓인 유저 작성 노드를 생성 직전 하나로 합친다
     // (본문은 동일, 분기 트리만 정리). 합쳤으면 저장.
     if (mergeTrailingUserWrites(this.session)) {
@@ -3675,12 +3692,12 @@ export class SessionView extends ItemView {
     this.translationEditEl = editEl;
     editEl.addEventListener("input", () => {
       this.scheduleTranslationCommit();
-      if (this.proWritingMode()) this.onProPendingInput();
+      if (this.bidirectionalWriting()) this.onProPendingInput();
     });
     editEl.addEventListener("blur", () => this.flushTranslationEdits());
     // 집필 프로 — 여러 문단에 걸친 선택 삭제를 영어판 구조 삭제로 연동.
     editEl.addEventListener("keydown", (e) => {
-      if (this.proWritingMode()) this.onProDeleteKeydown(e);
+      if (this.bidirectionalWriting()) this.onProDeleteKeydown(e);
     });
 
     let docOffset = 0;
@@ -3712,7 +3729,7 @@ export class SessionView extends ItemView {
       });
       this.appendMarkdownRun(span, baseline, "", false);
       // 집필 프로 — 직접 수정돼 영어판 반영을 기다리는 문단 표시(불변식: active=user-edit).
-      if (this.proWritingMode() && translated && active!.kind === "user-edit") {
+      if (this.bidirectionalWriting() && translated && active!.kind === "user-edit") {
         span.addClass("ggai-tr-propending-block");
       }
 
@@ -3729,7 +3746,7 @@ export class SessionView extends ItemView {
       // 개별 문단 재번역은 문단 재생성 패널(문단 선택 모드 → 재번역 버튼)로 통합됐다.
     }
     // 집필 프로 — 본문 끝 이어쓰기(초고) 영역 + 남은 대기분 반영 재예약(자기 회복).
-    if (this.proWritingMode()) {
+    if (this.bidirectionalWriting()) {
       this.renderProPendingRegion(editEl);
       if (
         this.proPendingDraft.trim() !== "" ||
@@ -3794,6 +3811,11 @@ export class SessionView extends ItemView {
       text,
       kind: "user-edit",
     });
+    // 집필 — 수정을 반영 대기함에도 실체로 기록한다. 재렌더/재시작/변환 실패
+    // 어디에서도 "영어판 반영 대상"이라는 사실이 사라지지 않는다.
+    if (this.bidirectionalWriting()) {
+      upsertPendingReflection(this.translations, block.source, text);
+    }
     block.baseline = text;
     return true;
   }
@@ -3808,11 +3830,22 @@ export class SessionView extends ItemView {
     for (const block of this.translationBlocks) {
       if (this.commitTranslationEditSync(block)) changed = true;
     }
+    // 집필 — 끝 초고도 대기함(proDraft)에 영속화한다 (재시작 생존).
+    // DOM 이 아니라 proPendingDraft 를 소스로 쓴다 — 입력마다 onProPendingInput 이
+    // 동기화하고, 구조 삭제 직후처럼 DOM 이 한 박자 낡은 순간에도 값이 맞다.
+    if (this.bidirectionalWriting() && this.translations) {
+      const draft = this.proPendingDraft;
+      if ((this.translations.proDraft ?? "") !== draft) {
+        if (draft === "") delete this.translations.proDraft;
+        else this.translations.proDraft = draft;
+        changed = true;
+      }
+    }
     if (changed) {
       void this.saveTranslationsSuppressed();
       this.updateViewToggleBtn();
       // 집필 프로 — 방금 커밋된 수정 문단을 대기 표시하고 영어판 반영을 예약.
-      if (this.proWritingMode()) {
+      if (this.bidirectionalWriting()) {
         for (const block of this.translationBlocks) {
           if (this.isProPendingBlock(block)) {
             block.el.addClass("ggai-tr-propending-block");
@@ -3849,7 +3882,7 @@ export class SessionView extends ItemView {
   }
 
   private scheduleProConvert(): void {
-    if (!this.proWritingMode()) return;
+    if (!this.bidirectionalWriting()) return;
     if (this.proConvertTimer != null) window.clearTimeout(this.proConvertTimer);
     this.proConvertTimer = window.setTimeout(() => {
       this.proConvertTimer = null;
@@ -3858,11 +3891,14 @@ export class SessionView extends ItemView {
   }
 
   /**
-   * 영어판 반영 대기 문단 판별 — active 번역 variant 가 user-edit 인 문단(데이터
-   * 불변식이라 재렌더를 넘어 생존). 반영이 끝나면 새 영어 해시의 active 는
-   * authored 가 되므로 자동으로 대기에서 벗어난다.
+   * 영어판 반영 대기 문단 판별 — 1순위는 반영 대기함(translations.pendingReflections,
+   * 파일 실체라 재렌더·재시작 생존). 대기함 도입 전에 남은 수정(active 번역 variant 가
+   * user-edit)은 폴백 추론으로 계속 잡는다. 반영이 성공하면 대기함에서 빠지고
+   * 새 영어 해시의 active 는 authored 가 되므로 자동으로 대기에서 벗어난다.
    */
   private isProPendingBlock(block: { hash: string }): boolean {
+    const queued = this.translations?.pendingReflections?.[block.hash];
+    if (queued && queued.ko.trim() !== "") return true;
     const entry = this.translations?.paragraphs[block.hash];
     const active = entry ? entry.variants[entry.activeVariantId] : undefined;
     return active?.kind === "user-edit" && active.text.trim() !== "";
@@ -3900,12 +3936,16 @@ export class SessionView extends ItemView {
     for (const block of this.translationBlocks) {
       if (!this.isProPendingBlock(block)) continue;
       if (!force && this.selectionStartWithin(block.el)) continue;
+      // 한국어 원문은 대기함이 1순위 (파일 실체), 폴백은 active user-edit variant.
+      const queued = this.translations!.pendingReflections?.[block.hash];
       const entry = this.translations!.paragraphs[block.hash];
-      const active = entry.variants[entry.activeVariantId];
+      const active = entry ? entry.variants[entry.activeVariantId] : undefined;
+      const ko = queued?.ko ?? active?.text ?? "";
+      if (ko.trim() === "") continue;
       ops.push({
         from: block.offset,
         to: block.offset + block.source.length,
-        ko: active.text,
+        ko,
         expect: block.source,
       });
       blockEls.push(block.el);
@@ -3982,7 +4022,7 @@ export class SessionView extends ItemView {
    * force 일 때만 잔여분을 이어서 반영한다.
    */
   private async runProConvert(force: boolean): Promise<boolean> {
-    if (!this.proWritingMode() || !this.session || !this.sessionFile) return true;
+    if (!this.bidirectionalWriting() || !this.session || !this.sessionFile) return true;
     if (this.proConvertPromise) {
       const prev = await this.proConvertPromise;
       if (!force) return prev;
@@ -4070,6 +4110,12 @@ export class SessionView extends ItemView {
     // 확정된 프리픽스가 개행으로 끝났으니 remainder 선두의 남은 개행은 정리한다.
     remainder = remainder.replace(/^\n+/, "");
     this.proPendingDraft = remainder;
+    // 대기함의 초고도 남은 분량으로 맞춘다 (서비스가 소비 프리픽스를 잘랐지만,
+    // 변환 중 이어 쓴 꼬리는 뷰만 안다). 저장은 다음 flush 가 맡는다.
+    if (this.translations) {
+      if (remainder === "") delete this.translations.proDraft;
+      else this.translations.proDraft = remainder;
+    }
     this.unlockProOps();
 
     this.baselineSpans = buildSpans(this.session);
@@ -4207,6 +4253,8 @@ export class SessionView extends ItemView {
           text: remain,
           kind: "user-edit",
         });
+        // 부분 삭제로 생긴 수정본도 대기함에 실체로 — 반영 전 유실 방지.
+        upsertPendingReflection(this.translations, b.source, remain);
         b.baseline = remain;
         translationsChanged = true;
       }
@@ -4214,6 +4262,12 @@ export class SessionView extends ItemView {
 
     // 구조 삭제 — 인접 문단은 한 구간으로 병합하고 한쪽 구분자까지 지운다.
     if (fullyCovered.length > 0) {
+      // 지워지는 문단의 반영 대기 건도 함께 정리 (유령 대기 방지).
+      clearPendingReflections(
+        this.translations,
+        fullyCovered.map((b) => b.hash)
+      );
+      translationsChanged = true;
       fullyCovered.sort((a, b) => a.offset - b.offset);
       const ranges: Array<{ from: number; to: number }> = [];
       for (const b of fullyCovered) {

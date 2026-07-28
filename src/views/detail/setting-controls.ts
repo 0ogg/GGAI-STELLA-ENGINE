@@ -1,4 +1,4 @@
-import { setIcon } from "obsidian";
+import { Notice, setIcon } from "obsidian";
 import type {
   GenerationProfileLite,
   ImageProfileLite,
@@ -246,15 +246,18 @@ export function renderTextAreaRow(opts: {
 
 /**
  * 온오프 토글 — 박스 안에 라벨 + 체크박스. 박스 아무 곳이나 눌러도 토글.
+ * `help` 를 주면 라벨 옆에 동그란 물음표 버튼이 붙고, 누르면 토스트(Notice)로 설명이 뜬다.
  */
 export function renderEnableToggle(opts: {
   parent: HTMLElement;
   label: string;
   checked: boolean;
   onChange: (checked: boolean) => void;
+  help?: string;
 }): void {
   const block = opts.parent.createDiv({ cls: "ggai-media-block ggai-media-enable" });
   block.createSpan({ cls: "ggai-media-label", text: opts.label });
+  if (opts.help) renderHelpButton(block, opts.help);
   const toggle = block.createEl("input", {
     cls: "ggai-form-checkbox",
     type: "checkbox",
@@ -263,7 +266,25 @@ export function renderEnableToggle(opts: {
   toggle.addEventListener("change", () => opts.onChange(toggle.checked));
   block.addEventListener("click", (e) => {
     if (e.target === toggle) return;
+    if (e.target instanceof HTMLElement && e.target.closest(".ggai-help-btn")) {
+      return; // 도움말 버튼 클릭은 토글하지 않는다
+    }
     opts.onChange(!toggle.checked);
+  });
+}
+
+/**
+ * 동그란 물음표 도움말 버튼 — 누르면 토스트(Notice)로 설명. 설정 항목 어디든 재사용.
+ */
+export function renderHelpButton(parent: HTMLElement, help: string): void {
+  const btn = parent.createEl("button", {
+    cls: "ggai-help-btn",
+    text: "?",
+    attr: { type: "button", "aria-label": "설명 보기" },
+  });
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    new Notice(help, 12000);
   });
 }
 

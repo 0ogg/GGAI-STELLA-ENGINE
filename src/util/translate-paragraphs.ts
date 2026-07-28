@@ -117,9 +117,10 @@ export function collectUntranslatedParagraphsFrom(
 }
 
 /**
- * 번역 대상을 요청 단위로 분할 — 대량 번역을 한 번에 보내지 않고 순차 전송해
- * 중간 실패 시에도 이미 받은 번역을 보존하기 위함. 문단 수/글자 수 중 먼저
- * 차는 기준으로 끊는다 (단일 문단이 maxChars 를 넘으면 그 문단 하나가 한 청크).
+ * 번역 대상을 요청 단위로 분할 — 대량 번역을 한 요청에 몰아넣지 않고 나눠 보내
+ * 중간 실패 시에도 이미 받은 번역을 보존하기 위함(청크는 동시 발사된다). 문단
+ * 수/글자 수 중 먼저 차는 기준으로 끊는다 (단일 문단이 maxChars 를 넘으면 그
+ * 문단 하나가 한 청크).
  */
 export function chunkParagraphs(
   targets: SourceParagraph[],
@@ -448,6 +449,41 @@ export function resolvePendingEditVariants(
       .find((v) => v.id !== active.id && v.kind !== "user-edit");
     entry.activeVariantId = fallback?.id ?? "";
   }
+}
+
+// ─────────────────────────── 양방향(집필) 반영 대기함 ───────────────────────────
+
+/**
+ * 저자의 한국어 수정/집필을 반영 대기함에 올린다 (같은 문단은 최신 내용으로 갱신).
+ * 대기 상태를 화면/variant 추론이 아니라 파일 실체로 만들어, 재렌더·재시작·실패
+ * 어디에서도 "수정했는데 사라짐"이 생기지 않게 하는 단일 진실 소스다.
+ */
+export function upsertPendingReflection(
+  translations: SessionTranslations,
+  source: string,
+  ko: string,
+  now = Date.now()
+): void {
+  const hash = hashText(source);
+  const map = (translations.pendingReflections ??= {});
+  const prev = map[hash];
+  map[hash] = {
+    ko,
+    en: source,
+    createdAt: prev?.createdAt ?? now,
+    updatedAt: now,
+  };
+}
+
+/** 반영이 **성공한** 문단들의 대기 건을 제거한다. 실패한 건은 남아서 재시도된다. */
+export function clearPendingReflections(
+  translations: SessionTranslations,
+  hashes: string[]
+): void {
+  const map = translations.pendingReflections;
+  if (!map) return;
+  for (const h of hashes) delete map[h];
+  if (Object.keys(map).length === 0) delete translations.pendingReflections;
 }
 
 /** active variant 를 지정 variant 로 이동. 대상이 없으면 false. */

@@ -664,10 +664,22 @@ export class PhoneService {
 
   /**
    * 수동 새로고침 (§5) — 폰 새로고침 버튼. 스로틀·트리거 게이트를 건너뛰고
-   * 지금 바로 SNS 새 글·댓글과 (방송 중이면) 시청자 채팅을 갱신한다. caps 와
-   * busy 가드는 유지. 결과는 버튼 상태/알림용.
+   * 지금 바로 갱신한다. caps 와 busy 가드는 유지. 결과는 버튼 상태/알림용.
+   *
+   * **보고 있는 앱만 갱신한다** — 뷰가 지금 화면에 맞는 scope 를 넘긴다. 방송
+   * 채팅은 원래 "세션이 진행될 때"만 생기는데, 전역 새로고침이 네트워크 화면에서도
+   * 진행 중인 모든 방송에 채팅 생성을 쏘고 있었다(보지도 않는 방송에 요청·비용).
+   *  - `sns`  = SNS 새 글·댓글만
+   *  - `tube` = 지금 보고 있는 방송(sessionFile 미지정이면 진행 중 전부)의 현재
+   *             노드에 채팅 이어 붙이기
+   *  - `all`  = 둘 다 (홈 화면)
    */
-  async manualRefresh(): Promise<{ ok: true } | { ok: false; error: string }> {
+  async manualRefresh(
+    scope: { sns?: boolean; tube?: boolean; tubeSessionFile?: string } = {
+      sns: true,
+      tube: true,
+    }
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
     if (!this.plugin.ai.isAvailable()) {
       return { ok: false, error: "GGAI Core 가 활성화되어 있지 않습니다." };
     }
@@ -675,7 +687,7 @@ export class PhoneService {
     if (!profile) return { ok: false, error: "챗 모델 프로필이 없습니다." };
     const { userFile, profile: persona } = await this.getLoginPersona();
     // SNS 새 글·댓글.
-    if ((this.plugin.data.phone?.snsPerRefresh ?? 10) > 0) {
+    if (scope.sns && (this.plugin.data.phone?.snsPerRefresh ?? 10) > 0) {
       await this.generateSnsActivity(persona, userFile, profile, {
         notify: false,
       }).catch((err) =>
@@ -683,10 +695,17 @@ export class PhoneService {
       );
     }
     // 진행 중 방송 — 지금 장면에 채팅을 더 받는다 (같은 노드 이어 붙이기).
-    for (const f of [...this.tubeLiveSessions]) {
-      await this.onSessionNodeGenerated(f, { force: true }).catch((err) =>
-        console.warn("[GGAI Stella] 수동 새로고침 방송 실패:", err)
-      );
+    if (scope.tube) {
+      const files = scope.tubeSessionFile
+        ? this.tubeLiveSessions.has(scope.tubeSessionFile)
+          ? [scope.tubeSessionFile]
+          : []
+        : [...this.tubeLiveSessions];
+      for (const f of files) {
+        await this.onSessionNodeGenerated(f, { force: true }).catch((err) =>
+          console.warn("[GGAI Stella] 수동 새로고침 방송 실패:", err)
+        );
+      }
     }
     // 등록 앱 갱신 참여 (§9).
     await this.runAppRefresh("manual");

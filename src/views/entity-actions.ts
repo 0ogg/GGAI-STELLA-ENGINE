@@ -42,6 +42,10 @@ import {
 } from "../util/summarize-session";
 import { uuidv4 } from "../util/uuid";
 import type { LorebookListItem } from "../util/scan-lorebooks";
+import {
+  collectLorebookLinks,
+  describeLinkCounts,
+} from "../util/lorebook-owners";
 import type { ScenarioListItem } from "../util/scan-scenarios";
 import type { SessionListItem } from "../util/scan-sessions";
 import type { UserListItem } from "../util/scan-users";
@@ -1151,9 +1155,44 @@ export function confirmDeleteSession(
         try {
           await plugin.store.deleteSession(s.folder);
           new Notice(`삭제됨: ${s.folder} · 휴지통에서 복구할 수 있어요`);
+          await askDeleteSessionAutoLorebook(plugin, s);
         } catch (err) {
           new Notice(
             `삭제 실패: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      })();
+    }
+  ).open();
+}
+
+/**
+ * 세션 삭제 후 딸린 자동 생성 북(세션 기억) 처리 확인.
+ * "아니오"여도 영구 잔류가 아니다 — 그 책은 고아가 되어 로어북 탭의 일괄 정리 대상이 된다.
+ * 보관(meta.keep) 표시된 책은 묻지 않는다.
+ */
+async function askDeleteSessionAutoLorebook(
+  plugin: StellaEnginePlugin,
+  s: SessionListItem
+): Promise<void> {
+  const bookId = s.session.meta.autoLorebookId;
+  if (!bookId) return;
+  const item = await plugin.store.getLorebookById(bookId).catch(() => null);
+  if (!item || item.lorebook.meta.keep === true) return;
+  new ConfirmModal(
+    plugin.app,
+    "딸린 로어북 삭제",
+    `이 세션이 자동으로 만든 로어북 "${item.lorebook.meta.name || item.folderName}"(${item.lorebook.entries.length} 항목)이 남았습니다. 함께 삭제할까요? 남겨두면 로어북 탭의 "고아" 구역에서 언제든 정리할 수 있습니다.`,
+    "함께 삭제",
+    (confirmed) => {
+      if (!confirmed) return;
+      void (async () => {
+        try {
+          await plugin.store.deleteLorebook(item.folder.path);
+          new Notice(`로어북도 삭제됨 · 휴지통에서 복구할 수 있어요`);
+        } catch (err) {
+          new Notice(
+            `로어북 삭제 실패: ${err instanceof Error ? err.message : String(err)}`
           );
         }
       })();
@@ -1190,10 +1229,29 @@ export function confirmDeleteLorebook(
   plugin: StellaEnginePlugin,
   item: LorebookListItem
 ): void {
+  void (async () => {
+    const links = await collectLorebookLinks(
+      plugin.store,
+      item.lorebook.meta.id
+    ).catch(() => []);
+    const used = describeLinkCounts(links);
+    openLorebookDeleteConfirm(plugin, item, used);
+  })();
+}
+
+/** 삭제 확인 — 사용처가 있으면 어디서 쓰는지 개수를 함께 보여준다. */
+function openLorebookDeleteConfirm(
+  plugin: StellaEnginePlugin,
+  item: LorebookListItem,
+  used: string
+): void {
+  const usage = used
+    ? `이 책은 현재 ${used}에서 사용 중입니다 — 삭제하면 그 연결이 끊깁니다. `
+    : "이 책을 사용하는 시나리오/세션은 없습니다. ";
   new ConfirmModal(
     plugin.app,
     "로어북 삭제",
-    `"${item.lorebook.meta.name || item.folderName}" 폴더를 휴지통으로 옮깁니다. 이 책을 참조하는 시나리오/세션의 연결은 끊깁니다. 계속할까요?`,
+    `"${item.lorebook.meta.name || item.folderName}" 폴더를 휴지통으로 옮깁니다. ${usage}계속할까요?`,
     "삭제",
     (confirmed) => {
       if (!confirmed) return;

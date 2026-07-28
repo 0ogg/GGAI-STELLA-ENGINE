@@ -10,6 +10,7 @@ import {
   openSessionByPath,
   promptRenameSession,
 } from "./entity-actions";
+import { LorebookLinksModal } from "./lorebook-links-modal";
 import { NextEpisodeModal } from "./next-episode-modal";
 
 export interface SessionMenuOptions {
@@ -52,6 +53,18 @@ export function buildSessionMenu(
       .setIcon("book-plus")
       .onClick(() =>
         new NextEpisodeModal(plugin.app, plugin, s.sessionFile).open()
+      )
+  );
+  menu.addItem((mi) =>
+    mi
+      .setTitle("연결된 로어북 보기")
+      .setIcon("book-open")
+      .onClick(() =>
+        LorebookLinksModal.openForSession(
+          plugin,
+          s.sessionFile,
+          s.session.meta.name || s.folderName
+        )
       )
   );
   menu.addItem((mi) =>

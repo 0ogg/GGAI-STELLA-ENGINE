@@ -40,6 +40,7 @@ import { ScenarioSelectModal } from "./scenario-select-modal";
 import {
   renderPhoneCommonSettings,
   renderPhoneMessagesSettings,
+  renderPhonePhotoSettings,
   renderPhoneSnsSettings,
   renderPhoneTubeSettings,
   type PhoneSettingsCtx,
@@ -120,9 +121,10 @@ const PHONE_SETTINGS_TABS: Array<{
   render: (ctx: PhoneSettingsCtx) => void;
 }> = [
   { id: "common", label: "공통", render: renderPhoneCommonSettings },
-  { id: "messages", label: "메시지", render: renderPhoneMessagesSettings },
+  { id: "photo", label: "사진", render: renderPhonePhotoSettings },
+  { id: "messages", label: "문자", render: renderPhoneMessagesSettings },
   { id: "sns", label: "네트워크", render: renderPhoneSnsSettings },
-  { id: "tube", label: "스텔라튜브", render: renderPhoneTubeSettings },
+  { id: "tube", label: "방송", render: renderPhoneTubeSettings },
 ];
 
 /** 답글 알림 한 건 — 내 게시글/댓글에 달린 (내가 아닌) 답글. */
@@ -3838,18 +3840,37 @@ class PhoneController extends Component {
     this.sendBtn.toggleClass("is-busy", busy);
   }
 
-  /** 수동 새로고침 (§5) — SNS 새 글·댓글 + 진행 중 방송 채팅을 지금 갱신. */
+  /**
+   * 수동 새로고침 (§5) — **지금 보고 있는 앱만** 갱신한다. 네트워크에서는 SNS 새
+   * 글·댓글만, 스텔라튜브에서는 그 방송 채팅만, 홈에서는 둘 다. 안 보는 앱에까지
+   * 생성 요청을 쏘지 않는다(특히 방송 채팅은 원래 세션 진행 때만 생기는 것).
+   */
   private async handleManualRefresh(): Promise<void> {
     if (this.refreshBusy) return;
     this.refreshBusy = true;
     this.refreshNavBtn.addClass("is-busy");
     try {
-      const result = await this.plugin.phone.manualRefresh();
+      const result = await this.plugin.phone.manualRefresh(this.refreshScope());
       if (!result.ok) new Notice(`스텔라 폰: ${result.error}`);
     } finally {
       this.refreshBusy = false;
       this.refreshNavBtn.removeClass("is-busy");
     }
+  }
+
+  /** 새로고침이 건드릴 범위 — 현재 화면 기준. */
+  private refreshScope(): {
+    sns?: boolean;
+    tube?: boolean;
+    tubeSessionFile?: string;
+  } {
+    if (this.screen === "sns") return { sns: true };
+    if (this.screen === "tube") {
+      // 지금 보고 있는 방송만. 목록 화면이면 진행 중인 방송 전부.
+      return { tube: true, tubeSessionFile: this.currentTubeItem()?.sessionFile };
+    }
+    // 홈·그 밖의 화면 = 폰 전체 갱신 (기존 동작).
+    return { sns: true, tube: true };
   }
 
   /** 문자 첨부 미리보기 국소 갱신 (입력창은 건드리지 않음). */

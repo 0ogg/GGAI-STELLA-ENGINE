@@ -59,6 +59,7 @@ import { getRegexedString } from "../util/regex-engine";
 import { readScenarioRegexScripts } from "../util/regex-scripts";
 import { listParagraphRanges } from "../util/paragraph-regen";
 import { attachLongPress } from "../util/long-press";
+import { PressMenuController } from "../util/press-menu";
 import {
   openExtensionActionsMenu,
   renderHeaderCommandBar,
@@ -77,7 +78,13 @@ import {
   getActiveTranslation,
   recordTranslationVariant,
   tokenizeParagraphs,
+  upsertPendingReflection,
 } from "../util/translate-paragraphs";
+import type { ProSpliceOp } from "../services/pro-service";
+import {
+  collectChatReflectionOps,
+  PRO_CONVERT_IDLE_MS,
+} from "../util/pro-convert";
 import { uuidv4 } from "../util/uuid";
 import { clampSessionViewStyle, type SessionViewStyle } from "../util/view-style";
 import { removeIllustrationVariant } from "../util/illustrations";
@@ -123,6 +130,12 @@ export class ChatSessionView extends ItemView {
   private generation: ChatGenerationState | null = null;
   /** 발신자 토큰 — 이 뷰의 저장이 쏜 session-changed 를 detail.origin 으로 구분. */
   private readonly storeOrigin = `chat-view:${uuidv4()}`;
+
+  /** 양방향 번역 — 입력 변환이 진행 중인 동안 재전송 방지. */
+  private bidiSending = false;
+  /** 양방향 번역 — 말풍선 수정 반영 디바운스 타이머 / 진행 중 실행. */
+  private bidiReflectTimer: number | null = null;
+  private bidiReflecting: Promise<boolean> | null = null;
   private readonly guard = new EditGuard();
   /** 말풍선 편집 중 미뤄진 재렌더 — 편집이 끝나면(blur) 반영. */
   private renderPending = false;
@@ -147,6 +160,8 @@ export class ChatSessionView extends ItemView {
   private viewToggleBtn: HTMLElement | null = null;
   /** undo 로 되돌린 리프 스택 — 새 커밋(전송/편집/생성)이 생기면 비운다. */
   private redoStack: string[] = [];
+  /** 말풍선 우클릭(모바일: 꾹) 메뉴 부착기. */
+  private readonly pressMenu = new PressMenuController();
   // 리모컨 버튼 refs (소설 툴바와 같은 구성, 가운데 이어쓰기만 없음)
   private undoBtn: HTMLButtonElement | null = null;
   private redoBtn: HTMLButtonElement | null = null;
@@ -267,6 +282,13 @@ export class ChatSessionView extends ItemView {
     if (bubble) await this.commitBubbleEdit(bubble);
     // 번역 보기에서 편집 중인 말풍선도 커밋 (translations.json 에만 저장).
     if (this.trEdit) await this.endTranslationBubbleEdit(this.trEdit.bubble);
+    // 양방향 번역 — 대기 중인 말풍선 수정을 원문에 반영한다(디바운스를 앞당김).
+    // 미리보기·전송본이 수정 전 원문으로 나가지 않게 하는 단일 진실 소스 규약.
+    if (this.bidiReflectTimer != null) {
+      window.clearTimeout(this.bidiReflectTimer);
+      this.bidiReflectTimer = null;
+    }
+    if (this.bidirectional()) await this.runBidiReflect();
   }
 
   scrollToNode(nodeId: string): boolean {
@@ -1049,6 +1071,12 @@ export class ChatSessionView extends ItemView {
       if (speaker) nameEl.addClass(`is-speaker-${speaker.colorIndex % 6}`);
       const bubble = stack.createDiv({ cls: "ggai-chat-bubble" });
       bubble.dataset.index = String(index);
+      // 말풍선 우클릭(모바일: 꾹) = 메시지 메뉴. 끝 메시지가 아니어도 지울 수 있다.
+      this.pressMenu.attachContextMenu(
+        bubble,
+        (e) => this.openMessageMenu(index, e.clientX, e.clientY),
+        (x, y) => this.openMessageMenu(index, x, y)
+      );
 
       const generatingThis =
         this.generation != null && this.generation.nodeId === msg.nodeId;
@@ -1943,6 +1971,90 @@ export class ChatSessionView extends ItemView {
     this.renderMessages();
   }
 
+  // ── 메시지 메뉴 (우클릭/롱프레스) ────────────────────────────────
+
+  private openMessageMenu(index: number, x: number, y: number): void {
+    if (!this.session || this.generation) return;
+    const menu = new Menu();
+    menu.addItem((item) =>
+      item
+        .setTitle("메시지 삭제")
+        .setIcon("trash-2")
+        .onClick(() => void this.deleteMessages(index, false))
+    );
+    // 여기부터 아래 전부 — 되감기(Undo)가 재생성 분기까지 한 칸씩 되짚어야 하는
+    // 걸 대신한다. 마지막 메시지에서는 위 항목과 같아지므로 안 띄운다.
+    const below = this.messages.length - index;
+    if (below > 1) {
+      menu.addItem((item) =>
+        item
+          .setTitle(`여기부터 아래 전부 삭제 (${below}개)`)
+          .setIcon("scissors")
+          .onClick(() => void this.deleteMessages(index, true))
+      );
+    }
+    menu.showAtPosition({ x, y });
+  }
+
+  /**
+   * 메시지 삭제 — `toEnd` 면 이 메시지부터 끝까지, 아니면 이 메시지 하나만.
+   * 해당 구간을 지우는 user-edit 노드를 파생한다. 원문(노드)은 그대로 남으므로
+   * Undo 로 되살아나고, 재생성 변형(형제 분기)도 깨지지 않는다. 삭제된 메시지는
+   * 목록에서 빠지고 전송본에서도 제외된다.
+   */
+  private async deleteMessages(index: number, toEnd: boolean): Promise<void> {
+    if (!this.session || !this.sessionFile || this.generation) return;
+    this.cancelAutoChain();
+    await this.flushPendingEdits();
+    if (!this.session || !this.sessionFile) return;
+
+    // 커밋 직전 세션 기준으로 오프셋 재계산 (편집 flush 로 밀렸을 수 있다).
+    const msgs = buildChatMessages(this.session);
+    if (!msgs[index]) return;
+    const lastIndex = toEnd ? msgs.length - 1 : index;
+    if (index === 0 && lastIndex === msgs.length - 1) {
+      new Notice("모든 메시지를 지울 수는 없습니다. 최소 한 개는 남겨주세요.");
+      return;
+    }
+
+    let start = 0;
+    for (let i = 0; i < index; i++) start += msgs[i].text.length;
+    let expected = msgs
+      .slice(index, lastIndex + 1)
+      .map((m) => m.text)
+      .join("");
+    // 첫 메시지를 지울 땐 다음 메시지의 선행 구분자까지 걷어낸다 (본문이 빈 줄로
+    // 시작하지 않게 — 두 번째부터는 자기 앞 구분자를 이미 품고 있다).
+    if (start === 0 && msgs[lastIndex + 1]?.text.startsWith(CHAT_MESSAGE_SEPARATOR)) {
+      expected += CHAT_MESSAGE_SEPARATOR;
+    }
+    const from = start;
+    const to = start + expected.length;
+
+    // 원문 불변 검증 — 구간 원문이 기대와 다르면 지우지 않는다.
+    const flat = spansToText(buildSpans(this.session));
+    if (flat.slice(from, to) !== expected) {
+      new Notice("본문이 바뀌어 삭제할 수 없습니다. 다시 시도해주세요.");
+      this.renderMessages();
+      return;
+    }
+
+    const node: SessionNode = {
+      id: uuidv4(),
+      parent: this.session.meta.activeLeafId,
+      kind: "user-edit",
+      patches: [{ op: "delete", from, to }],
+      createdAt: Date.now(),
+    };
+    this.session.nodes[node.id] = node;
+    this.session.meta.activeLeafId = node.id;
+    this.redoStack = [];
+    await this.persistSession("메시지 삭제 저장 실패");
+    // 잘라내기는 새 끝을 보여준다. 한 개 삭제는 읽던 위치를 그대로 둔다.
+    if (toEnd) this.followTail = true;
+    this.renderMessages();
+  }
+
   // ── 말풍선 직접 편집 (EditGuard + user-edit 파생 노드) ────────────
 
   private makeBubbleEditable(bubble: HTMLElement): void {
@@ -2130,6 +2242,10 @@ export class ChatSessionView extends ItemView {
         text,
         kind: "user-edit",
       });
+      // 양방향 번역 — 수정을 반영 대기함에 실체로 기록한다(재시작/실패에도 생존).
+      if (this.bidirectional()) {
+        upsertPendingReflection(this.translations, b.source, text);
+      }
       b.baseline = text;
       changed = true;
     }
@@ -2137,6 +2253,73 @@ export class ChatSessionView extends ItemView {
     await this.store.saveSessionTranslations(this.sessionFile, this.translations, {
       origin: this.storeOrigin,
     });
+    if (this.bidirectional()) this.scheduleBidiReflect();
+  }
+
+  // ── 양방향 번역 — 말풍선 수정 → 원문 메시지 반영 ──────────────────
+  //
+  // 소설 뷰의 대기 문단 모델과 같은 기계다. 다른 점은 접합 구간이 "메시지 안의
+  // 문단"이라는 것뿐 — 오프셋 체계가 같아(buildSpans 평탄화) 같은 프리미티브
+  // (convertAndSplice, replace op)를 그대로 쓴다. 상세는 `양방향 번역 스펙.md` §2.5.
+
+  private bidirectional(): boolean {
+    return this.session?.meta.translation?.bidirectional === true;
+  }
+
+  private scheduleBidiReflect(): void {
+    if (this.bidiReflectTimer != null) window.clearTimeout(this.bidiReflectTimer);
+    this.bidiReflectTimer = window.setTimeout(() => {
+      this.bidiReflectTimer = null;
+      void this.runBidiReflect();
+    }, PRO_CONVERT_IDLE_MS);
+  }
+
+  /**
+   * 대기함에 쌓인 말풍선 수정을 원문 언어로 변환해 메시지에 반영한다.
+   * 실패하면 대기함이 그대로 남아 다음 기회에 다시 시도된다(조용한 유실 없음).
+   * 반환 false = 실패(생성 게이트가 이걸 보고 전송을 막는다).
+   */
+  private async runBidiReflect(): Promise<boolean> {
+    if (!this.bidirectional() || !this.session || !this.sessionFile) return true;
+    if (this.bidiReflecting) return await this.bidiReflecting;
+    if (this.generation) return true; // 생성 중엔 본문 소유권이 생성 플로우에 있다
+    const ops = this.collectBidiOps();
+    if (ops.length === 0) return true;
+    const run = this.performBidiReflect(ops);
+    this.bidiReflecting = run;
+    return await run.finally(() => {
+      this.bidiReflecting = null;
+    });
+  }
+
+  private async performBidiReflect(ops: ProSpliceOp[]): Promise<boolean> {
+    const sessionFile = this.sessionFile;
+    if (!sessionFile) return false;
+    const r = await this.plugin.pro.convertAndSplice(sessionFile, ops, {
+      origin: this.storeOrigin,
+    });
+    if (!r.ok) {
+      if (!r.cancelled) {
+        new Notice(
+          "양방향 반영 실패: " +
+            (r.errors[0] ?? "알 수 없는 오류") +
+            " — 수정은 그대로 남아 있습니다."
+        );
+      }
+      return false;
+    }
+    // 서비스가 세션/번역을 이미 저장했다(origin=이 뷰라 이벤트로 안 돌아온다).
+    await this.reloadFromStore();
+    return true;
+  }
+
+  /** 반영할 구간 수집 — 순수 로직은 util (오프셋 규칙은 commitBubbleEdit 과 동일). */
+  private collectBidiOps(): ProSpliceOp[] {
+    if (!this.session) return [];
+    return collectChatReflectionOps(
+      buildChatMessages(this.session),
+      this.translations?.pendingReflections
+    );
   }
 
   /** 편집 종료(blur/flush) — 커밋 후 표시본으로 복귀. */
@@ -2257,9 +2440,42 @@ export class ChatSessionView extends ItemView {
       return;
     }
     this.cancelAutoChain();
+    // 전송 버튼 = "필요한 걸 전부 하고 보내기". flush 가 말풍선 수정 커밋 + 대기
+    // 반영(원장 변환)까지 지금 이 자리에서 처리한다 — 누를 때마다 새로 시도하므로
+    // 직전 실패가 전송을 계속 막는 "락"은 없다. 방금 이 시도가 실패했을 때만 멈춘다
+    // (알림은 반영 실행부가 1회 띄웠다 — 중복 토스트 금지, 수정·입력은 그대로 남는다).
     await this.flushPendingEdits();
+    if (this.bidirectional() && this.collectBidiOps().length > 0) return;
+    if (!this.session || !this.sessionFile) return;
 
     const text = this.inputEl?.value.trim() ?? "";
+    // 양방향 번역 — 내 언어로 친 메시지를 스토리 원문 언어로 변환해 저장한다.
+    // 실패/취소 시 전송하지 않고 입력창의 원문을 그대로 남긴다 (조용한 유실 금지).
+    let messageText = text;
+    if (text && this.session.meta.translation?.bidirectional === true) {
+      if (this.bidiSending) return; // 변환 대기 중 재전송 방지 (더블 클릭/Enter)
+      this.bidiSending = true;
+      let conv;
+      try {
+        conv = await this.plugin.pro.convertChatMessage(this.sessionFile, text, {
+          origin: this.storeOrigin,
+        });
+      } finally {
+        this.bidiSending = false;
+      }
+      if (!this.session || !this.sessionFile) return; // 변환 중 세션이 바뀌었을 수 있다
+      if (!conv.ok) {
+        if (!conv.cancelled) {
+          new Notice(
+            "양방향 변환 실패: " +
+              (conv.errors[0] ?? "알 수 없는 오류") +
+              " — 입력은 그대로 남아 있습니다."
+          );
+        }
+        return;
+      }
+      messageText = conv.text;
+    }
     if (text) {
       const flatLen = spansToText(buildSpans(this.session)).length;
       const node: SessionNode = {
@@ -2272,7 +2488,7 @@ export class ChatSessionView extends ItemView {
             spans: [
               {
                 author: "user",
-                text: (flatLen > 0 ? CHAT_MESSAGE_SEPARATOR : "") + text,
+                text: (flatLen > 0 ? CHAT_MESSAGE_SEPARATOR : "") + messageText,
               },
             ],
           },
@@ -2294,7 +2510,7 @@ export class ChatSessionView extends ItemView {
       void this.plugin.extensions.runUserText({
         sessionFile: this.sessionFile,
         nodeId: node.id,
-        text,
+        text: messageText,
       });
     }
 

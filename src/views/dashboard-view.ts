@@ -45,13 +45,11 @@ import {
   type SortKey,
 } from "../util/scenario-list-helpers";
 import {
-  confirmDeleteLorebook,
   confirmDeleteScenario,
   confirmDeleteSession,
   confirmDeleteUser,
   copyScenarioWithPrompt,
   createAndOpenSession,
-  exportLorebook,
   exportPromptPreset,
   exportScenarioCard,
   openSessionByPath,
@@ -62,6 +60,11 @@ import {
   runImportPicker,
 } from "./entity-actions";
 import { buildSessionMenu } from "./session-menu";
+import { buildLorebookMenu } from "./lorebook-menu";
+import {
+  buildLorebookGroups,
+  type LorebookGroups,
+} from "../util/lorebook-owners";
 import { BranchSection } from "./detail/branch-section";
 import { PromptSetEditorSection } from "./detail/prompt-set-editor-section";
 import { UserEditorSection } from "./user-editor-section";
@@ -185,6 +188,12 @@ export class DashboardView extends ItemView {
   private sessionSeriesView = false;
   private users: UserListItem[] = [];
   private lorebooks: LorebookListItem[] = [];
+  /** 로어북 3구역 분류(내 서재 / 자동 생성 / 고아). refreshLoreData 에서 갱신. */
+  private loreGroups: LorebookGroups | null = null;
+  /** 접힌 자동 생성 그룹의 시나리오 id. 기본 = 펼침. */
+  private loreGroupCollapsed = new Set<string>();
+  /** 이번 고아 정리에서 제외(체크 해제)한 책 id — 순간적 제외라 재렌더까지만 유효. */
+  private loreOrphanExcluded = new Set<string>();
   private promptPresets: PromptListItem[] = [];
 
   /** 갤러리 탭 집계(전 세션 삽화) — null 이면 아직/다시 로드해야 함. */
@@ -586,6 +595,9 @@ export class DashboardView extends ItemView {
 
   private async refreshLoreData(): Promise<void> {
     this.lorebooks = await this.store.refreshLorebooks().catch(() => []);
+    this.loreGroups = await buildLorebookGroups(this.store, this.lorebooks).catch(
+      () => null
+    );
   }
 
   private async refreshPromptData(): Promise<void> {
@@ -849,7 +861,8 @@ export class DashboardView extends ItemView {
         break;
       case "lorebook":
         this.renderLoreToolbar(page);
-        this.listEl = page.createDiv({ cls: "ggai-dash-lore-grid" });
+        // 구역(내 서재/자동 생성/고아)을 세로로 쌓고, 격자는 구역 안쪽에서 만든다.
+        this.listEl = page.createDiv({ cls: "ggai-dash-lore-tab" });
         break;
       case "prompt":
         this.renderPromptToolbar(page);
@@ -3140,13 +3153,18 @@ export class DashboardView extends ItemView {
     );
   }
 
+  /**
+   * 로어북 탭 — 한 화면 안에서 세 구역으로 나눠 그린다.
+   *   내 서재(직접 만든 책) / 자동 생성(시나리오별 접힘 그룹) / 고아(일괄 정리).
+   * 자동 북도 항상 클릭 한 번 거리에 둔다 — 숨기는 게 아니라 자리를 정돈하는 것.
+   */
   private renderLoreList(): void {
     const body = this.listEl;
     if (!body || this.activeTab !== "lorebook") return;
     body.empty();
 
     const q = this.loreQuery.trim().toLowerCase();
-    const visible = this.lorebooks.filter((l) => {
+    const match = (l: LorebookListItem): boolean => {
       if (!q) return true;
       const n = (l.lorebook.meta.name ?? "").toLowerCase();
       const f = l.folderName.toLowerCase();
@@ -3156,8 +3174,20 @@ export class DashboardView extends ItemView {
         if ((e.name ?? "").toLowerCase().includes(q)) return true;
         return e.keys.some((k) => k.toLowerCase().includes(q));
       });
-    });
-    if (visible.length === 0) {
+    };
+
+    const groups = this.loreGroups;
+    if (!groups) {
+      this.renderEmpty(body, "불러오는 중…");
+      return;
+    }
+    const library = groups.library.filter(match);
+    const auto = groups.auto
+      .map((g) => ({ ...g, entries: g.entries.filter((e) => match(e.item)) }))
+      .filter((g) => g.entries.length > 0);
+    const orphans = groups.orphans.filter((e) => match(e.item));
+
+    if (library.length + auto.length + orphans.length === 0) {
       this.renderEmpty(
         body,
         this.lorebooks.length === 0
@@ -3167,27 +3197,170 @@ export class DashboardView extends ItemView {
       return;
     }
 
-    for (const item of visible) {
-      const card = body.createDiv({ cls: "ggai-dash-lore-card" });
-      const name = item.lorebook.meta.name || item.folderName;
-
-      const thumb = card.createDiv({ cls: "ggai-dash-lore-thumb" });
-      renderThumb(this.app, thumb, this.lorebookThumbPath(item), name, "book-open");
-
-      const text = card.createDiv({ cls: "ggai-dash-lore-text" });
-      text.createDiv({ cls: "ggai-dash-lore-name", text: name });
-      text.createDiv({
-        cls: "ggai-dash-lore-meta",
-        text: `${item.lorebook.entries.length} 항목`,
+    // ─── 내 서재 ───
+    if (library.length > 0) {
+      const section = body.createDiv({ cls: "ggai-dash-lore-section" });
+      section.createDiv({
+        cls: "ggai-dash-lore-section-title",
+        text: `내 서재 (${library.length})`,
       });
-
-      this.makePressable(card, () => void this.openLorebookEditor(item));
-      this.pressMenu.attachContextMenu(
-        card,
-        (e) => this.lorebookMenu(item).showAtMouseEvent(e),
-        (x, y) => this.lorebookMenu(item).showAtPosition({ x, y })
-      );
+      const grid = section.createDiv({ cls: "ggai-dash-lore-grid-inner" });
+      for (const item of library) this.renderLoreCard(grid, item);
     }
+
+    // ─── 자동 생성 (시나리오별 묶음) ───
+    for (const group of auto) {
+      const key = group.scenarioId ?? "";
+      // 검색 중에는 걸린 항목이 보여야 하므로 접힘을 무시하고 펼친다.
+      const collapsed = !q && this.loreGroupCollapsed.has(key);
+      const section = body.createDiv({
+        cls: "ggai-dash-lore-section is-auto",
+      });
+      const header = section.createDiv({
+        cls: "ggai-dash-lore-section-title is-clickable",
+      });
+      const chevron = header.createSpan({ cls: "ggai-dash-lore-chevron" });
+      setIcon(chevron, collapsed ? "chevron-right" : "chevron-down");
+      header.createSpan({
+        text: `${group.scenarioName} · 자동 생성 (${group.entries.length})`,
+      });
+      header.setAttr("role", "button");
+      header.setAttr("tabindex", "0");
+      header.setAttr("aria-expanded", String(!collapsed));
+      const toggle = (): void => {
+        if (this.loreGroupCollapsed.has(key)) this.loreGroupCollapsed.delete(key);
+        else this.loreGroupCollapsed.add(key);
+        this.renderLoreList();
+      };
+      header.addEventListener("click", toggle);
+      header.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        toggle();
+      });
+      if (collapsed) continue;
+      const grid = section.createDiv({ cls: "ggai-dash-lore-grid-inner" });
+      for (const entry of group.entries) {
+        this.renderLoreCard(grid, entry.item, {
+          badge: entry.badge,
+          detail: entry.detail,
+        });
+      }
+    }
+
+    // ─── 고아 (일괄 정리) ───
+    if (orphans.length > 0) {
+      const section = body.createDiv({
+        cls: "ggai-dash-lore-section is-orphan",
+      });
+      const header = section.createDiv({ cls: "ggai-dash-lore-section-title" });
+      header.createSpan({ text: `주인이 사라진 책 (${orphans.length})` });
+      const targets = orphans.filter(
+        (e) => !this.loreOrphanExcluded.has(e.item.lorebook.meta.id)
+      );
+      const cleanBtn = header.createEl("button", {
+        cls: "ggai-btn ggai-btn-danger",
+        text: `${targets.length}권 정리`,
+      });
+      cleanBtn.disabled = targets.length === 0;
+      cleanBtn.addEventListener("click", () =>
+        this.confirmCleanOrphanLorebooks(targets.map((e) => e.item))
+      );
+      section.createDiv({
+        cls: "ggai-dash-lore-section-note",
+        text: "연결된 세션/시나리오가 사라진 자동 생성 로어북입니다. 남기고 싶은 책은 체크를 해제하거나, 우클릭에서 [보관] 또는 [내 서재로 승격]을 쓰세요.",
+      });
+      const grid = section.createDiv({ cls: "ggai-dash-lore-grid-inner" });
+      for (const entry of orphans) {
+        const id = entry.item.lorebook.meta.id;
+        this.renderLoreCard(grid, entry.item, {
+          badge: entry.badge,
+          detail: entry.detail,
+          check: {
+            checked: !this.loreOrphanExcluded.has(id),
+            onChange: (on) => {
+              if (on) this.loreOrphanExcluded.delete(id);
+              else this.loreOrphanExcluded.add(id);
+              this.renderLoreList();
+            },
+          },
+        });
+      }
+    }
+  }
+
+  private renderLoreCard(
+    parent: HTMLElement,
+    item: LorebookListItem,
+    opts?: {
+      badge?: string;
+      detail?: string;
+      check?: { checked: boolean; onChange: (on: boolean) => void };
+    }
+  ): void {
+    const card = parent.createDiv({ cls: "ggai-dash-lore-card" });
+    const name = item.lorebook.meta.name || item.folderName;
+
+    if (opts?.check) {
+      const cb = card.createEl("input", {
+        cls: "ggai-dash-lore-check",
+        type: "checkbox",
+      });
+      cb.checked = opts.check.checked;
+      cb.addEventListener("click", (e) => e.stopPropagation());
+      cb.addEventListener("change", () => opts.check!.onChange(cb.checked));
+    }
+
+    const thumb = card.createDiv({ cls: "ggai-dash-lore-thumb" });
+    renderThumb(this.app, thumb, this.lorebookThumbPath(item), name, "book-open");
+
+    const text = card.createDiv({ cls: "ggai-dash-lore-text" });
+    const nameRow = text.createDiv({ cls: "ggai-dash-lore-name" });
+    nameRow.createSpan({ text: name });
+    if (opts?.badge) {
+      nameRow.createSpan({ cls: "ggai-lorebook-row-badge", text: opts.badge });
+    }
+    if (item.lorebook.meta.keep === true) {
+      nameRow.createSpan({ cls: "ggai-lorebook-row-badge", text: "보관" });
+    }
+    const meta = [`${item.lorebook.entries.length} 항목`, opts?.detail]
+      .filter((s) => s)
+      .join(" · ");
+    text.createDiv({ cls: "ggai-dash-lore-meta", text: meta });
+
+    this.makePressable(card, () => void this.openLorebookEditor(item));
+    this.pressMenu.attachContextMenu(
+      card,
+      (e) => this.lorebookMenu(item).showAtMouseEvent(e),
+      (x, y) => this.lorebookMenu(item).showAtPosition({ x, y })
+    );
+  }
+
+  /** 고아 북 일괄 정리 — 휴지통 경유(store 삭제 규약 그대로). */
+  private confirmCleanOrphanLorebooks(items: LorebookListItem[]): void {
+    if (items.length === 0) return;
+    new ConfirmModal(
+      this.app,
+      "고아 로어북 정리",
+      `주인이 사라진 로어북 ${items.length}권을 휴지통으로 옮깁니다. 계속할까요?`,
+      "정리",
+      (confirmed) => {
+        if (!confirmed) return;
+        void (async () => {
+          let done = 0;
+          for (const item of items) {
+            try {
+              await this.store.deleteLorebook(item.folder.path);
+              done++;
+            } catch (err) {
+              console.warn("[GGAI Stella] 고아 로어북 삭제 실패:", err);
+            }
+          }
+          this.loreOrphanExcluded.clear();
+          new Notice(`로어북 ${done}권 정리됨 · 휴지통에서 복구할 수 있어요`);
+        })();
+      }
+    ).open();
   }
 
   private lorebookThumbPath(item: LorebookListItem): string | null {
@@ -3372,26 +3545,10 @@ export class DashboardView extends ItemView {
     return menu;
   }
 
+  /** 로어북 공용 메뉴 — 항목 구성은 lorebook-menu.ts 한 곳에서만 관리한다. */
   private lorebookMenu(item: LorebookListItem): Menu {
-    return new Menu()
-      .addItem((mi) =>
-        mi
-          .setTitle("편집")
-          .setIcon("pencil")
-          .onClick(() => void this.openLorebookEditor(item))
-      )
-      .addItem((mi) =>
-        mi
-          .setTitle("내보내기")
-          .setIcon("upload")
-          .onClick(() => void exportLorebook(this.plugin, item.lorebookFile))
-      )
-      .addSeparator()
-      .addItem((mi) =>
-        mi
-          .setTitle("삭제")
-          .setIcon("trash-2")
-          .onClick(() => confirmDeleteLorebook(this.plugin, item))
-      );
+    return buildLorebookMenu(this.plugin, item, {
+      onEdit: () => void this.openLorebookEditor(item),
+    });
   }
 }

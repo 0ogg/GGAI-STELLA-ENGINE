@@ -202,8 +202,9 @@ function createPhoneSettingsPanel(): SettingsPanel {
         firstSection = false;
       };
 
-      // 앱 전용 세부 설정(문자·네트워크·방송)은 폰 홈의 "설정" 앱으로 옮겼다 —
-      // 여기는 앱을 가리지 않는 공통 설정만 둔다(같은 렌더러를 공유).
+      // 앱 전용 설정(사진·문자·네트워크·방송)은 폰 홈의 "설정" 앱에만 둔다 —
+      // 여기는 앱을 가리지 않는 공통 설정만 비추는 거울이다(같은 렌더러를 공유).
+      // 앱별 설정을 여기에 겹쳐 놓으면 "탭으로 나눈" 의미가 사라진다.
       renderPhoneCommonSettings({
         plugin,
         parent: body,
@@ -215,7 +216,7 @@ function createPhoneSettingsPanel(): SettingsPanel {
       body.createDiv({
         cls: "ggai-media-hint",
         text:
-          "문자·스텔라 네트워크·방송의 세부 설정(프롬프트, 참고 분량, 활동 상한 등)은 " +
+          "사진·문자·스텔라 네트워크·방송 설정(모델, 프롬프트, 참고 분량, 활동 상한 등)은 " +
           "폰 홈 화면의 [설정] 앱에 있습니다. 여기 있는 공통 설정도 그 앱에서 함께 " +
           "볼 수 있습니다.",
       });

@@ -15,11 +15,59 @@
  * (줄바꿈이 남으면 본문 토큰화 때 문단이 쪼개져 한국어 짝이 어긋난다).
  */
 
-import type { SessionTranslations } from "../types/media";
+import type { PendingReflection, SessionTranslations } from "../types/media";
+import { CHAT_MESSAGE_SEPARATOR, type ChatSessionMessage } from "./chat-messages";
 import { tokenizeParagraphs, type ParagraphToken } from "./translate-paragraphs";
 
 /** 문체 예시로 첨부할 문단 쌍 수 기본값 (0 = 끄기). 설정 UI 로 조절. */
 export const PRO_STYLE_PAIRS_DEFAULT = 3;
+
+/** 양방향 — 수정/초고가 멈춘 뒤 원장 반영(집필 변환)까지의 대기(소설·챗 공용). */
+export const PRO_CONVERT_IDLE_MS = 3000;
+
+/**
+ * 챗 — 반영 대기함에 올라온 말풍선 수정을 접합 연산(구간 교체)으로 환산한다.
+ *
+ * 오프셋은 평탄화 본문(buildSpans) 기준이라 소설과 같은 체계다: 앞 메시지 길이를
+ * 누적하고, 메시지 앞에 붙은 구분자("\n\n")만큼 건너뛴 뒤 문단 토큰을 훑는다
+ * (`commitBubbleEdit` 의 from/to 계산과 같은 규칙). `expect` 는 지금 원문에서
+ * 그대로 떠 오므로 서비스의 원문 일치 검증이 항상 통과한다 — 그 사이 본문이
+ * 바뀌었다면 애초에 그 문단이 안 잡힌다.
+ *
+ * 챗은 끝 append 를 만들지 않는다 (새 메시지는 전송 경로의 몫).
+ */
+export function collectChatReflectionOps(
+  messages: ChatSessionMessage[],
+  pending: Record<string, PendingReflection> | undefined
+): { from: number; to: number; ko: string; expect: string }[] {
+  if (!pending) return [];
+  const ops: { from: number; to: number; ko: string; expect: string }[] = [];
+  let start = 0;
+  for (const msg of messages) {
+    const sepLen = msg.text.startsWith(CHAT_MESSAGE_SEPARATOR)
+      ? CHAT_MESSAGE_SEPARATOR.length
+      : 0;
+    let offset = start + sepLen;
+    for (const token of tokenizeParagraphs(msg.text.slice(sepLen))) {
+      if (token.kind === "separator") {
+        offset += token.text.length;
+        continue;
+      }
+      const queued = pending[token.hash];
+      if (queued && queued.ko.trim() !== "") {
+        ops.push({
+          from: offset,
+          to: offset + token.source.length,
+          ko: queued.ko,
+          expect: token.source,
+        });
+      }
+      offset += token.source.length;
+    }
+    start += msg.text.length;
+  }
+  return ops;
+}
 
 /**
  * 장면 전환 구분선(`***` 류) 문단인가. 저자가 장면 전환용으로 넣은 별표 줄은
@@ -49,9 +97,11 @@ export function endsWithSceneBreak(text: string): boolean {
 export const PRO_CONVERT_IO_INSTRUCTIONS = [
   "Input is a JSON array of segments:",
   '[{ "id": string, "role": "context" | "write", "source": string }]',
-  '"context" segments are the tail of the existing English manuscript — style reference only; never return them.',
-  '"write" segments are the author\'s new or revised passage, written in Korean.',
-  'For every "write" segment, compose the English paragraph that belongs at that point of the manuscript, following the instructions above.',
+  '"context" segments are the tail of the existing manuscript — style reference only; never return them.',
+  'The "context" segments define the manuscript\'s language: every output must be written in that same language, whatever it is.',
+  '"write" segments are the author\'s new or revised passage, drafted in the author\'s own working language.',
+  'For every "write" segment, compose the paragraph that belongs at that point of the manuscript, in the manuscript\'s language, following the instructions above.',
+  'If there is no "context" segment, the manuscript has no established language yet — write in the same language as the author\'s draft.',
   "Never merge, split, or omit segments — exactly one output item per \"write\" segment, same order.",
   "Do not use line breaks inside an output — one flowing paragraph per segment.",
   "Respond with a JSON array only — no markdown fences, no commentary:",
@@ -206,11 +256,12 @@ export function formatStylePairs(
   if (pairs.length === 0) return "";
   const guide =
     direction === "koToEn"
-      ? "Match the English voice shown in \"en\" when composing new English."
-      : "Match the author's Korean voice shown in \"ko\" when writing Korean.";
+      ? 'Match the manuscript voice shown in "en" when composing new manuscript text.'
+      : 'Match the author\'s own voice shown in "ko" when writing in the author\'s language.';
   const payload = JSON.stringify(pairs.map((p) => ({ ko: p.ko, en: p.en })));
   return [
-    "Paired style examples from this manuscript (ko = the author's own Korean, en = the English manuscript):",
+    // en/ko 는 데이터 키 이름일 뿐 언어를 못박지 않는다 — 실제 언어는 짝 내용이 보여준다.
+    'Paired style examples from this manuscript ("ko" = the author\'s own draft, "en" = the manuscript text):',
     guide,
     payload,
   ].join("\n");

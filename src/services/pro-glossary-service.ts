@@ -58,7 +58,11 @@ export class ProGlossaryService {
     const pro = settings.pro ?? {};
     if (pro.glossaryEnabled === false) return skip();
     const session = await this.plugin.store.getSession(sessionFile);
-    if (!session?.meta.proWriting) return skip();
+    // 집필 프로 세션 또는 양방향 번역이 켜진 세션에서만 자동 수집.
+    const bidirectional =
+      session?.meta.proWriting === true ||
+      session?.meta.translation?.bidirectional === true;
+    if (!session || !bidirectional) return skip();
     const translations =
       await this.plugin.store.getSessionTranslations(sessionFile);
     const scan = collectUnscannedAuthoredPairs(
@@ -213,6 +217,10 @@ export class ProGlossaryService {
     const created = await this.plugin.store.createLorebook(name);
     const book = await this.plugin.store.getLorebook(created.lorebookFile);
     if (!book) return null;
+
+    // 소속 기록 — 목록 그룹핑/고아 정리가 이 값을 본다.
+    book.meta.owner = { kind: "glossary", scenarioId };
+    await this.plugin.store.saveLorebook(created.lorebookFile, book);
 
     stella.translationGlossaryLorebookId = book.meta.id;
     const shared = stella.translationLorebookIds ?? [];

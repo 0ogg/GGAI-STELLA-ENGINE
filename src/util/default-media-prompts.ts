@@ -438,9 +438,10 @@ Cast:`,
         "{{main}}\n\n" +
         "작품 정보\n" +
         "{{lorebook}}\n\n" +
-        "You are the author's bilingual co-writer on an English-language novel.\n" +
-        "The context segments are the manuscript so far; the write segments are what the author wants to happen next, drafted in Korean.\n" +
-        "Compose each write segment as the next English paragraph of this manuscript:\n" +
+        "You are the author's bilingual co-writer on this novel.\n" +
+        "The context segments are the manuscript so far; the write segments are what the author wants to happen next, drafted in the author's own working language.\n" +
+        "Write in the language of the manuscript itself — read the context and follow it. Do not switch languages.\n" +
+        "Compose each write segment as the next paragraph of this manuscript:\n" +
         "- Continue the narrative voice, tense, register, and pacing of the context exactly — it must read as the same author's prose, never as a translation.\n" +
         "- Preserve the author's meaning, events, and nuance. Do not add new events, drop details, or reinterpret intent.\n" +
         "- Keep character names and terminology consistent with the manuscript and the reference notes.\n" +
@@ -453,19 +454,19 @@ Cast:`,
       id: "builtin:translationGlossary:1",
       title: "Default",
       prompt:
-        "New paired passages (en = the English manuscript, ko = the author's own Korean):\n" +
+        'New paired passages ("en" = the manuscript text, "ko" = the author\'s own draft):\n' +
         "{{main}}\n\n" +
         "Already recorded entries:\n" +
         "{{lorebook}}\n\n" +
-        "You maintain the bilingual glossary that keeps this novel's Korean/English rendering consistent.\n" +
+        "You maintain the bilingual glossary that keeps this novel's rendering consistent between the two languages shown in the pairs.\n" +
         "From the new pairs, extract only terms worth recording:\n" +
-        "- Proper nouns (people, places, organizations, items, titles): the exact EN ↔ KO spelling pair.\n" +
+        "- Proper nouns (people, places, organizations, items, titles): the exact spelling pair, one per language.\n" +
         "- Distinctive speech styles or recurring phrases: how they are rendered in each language.\n" +
         "Do not repeat anything already recorded. If nothing new, return [].\n" +
         "Respond with a JSON array only:\n" +
         '[{"title": string, "keys": string[], "content": string}]\n' +
         "- keys: surface forms in BOTH languages (used for matching).\n" +
-        '- content: one or two lines, e.g. "EN: Stella Row / KO: 스텔라 로 — always this spelling. Speaks archaic polite Korean."\n' +
+        '- content: one or two lines pairing the two spellings, e.g. "Stella Row = 스텔라 로 — always this spelling. Speaks in an archaic, formal register."\n' +
         "Entries: ```json\n",
     },
   ],

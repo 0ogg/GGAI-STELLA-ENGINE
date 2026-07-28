@@ -619,26 +619,12 @@ export class ScenarioSection {
       });
     } else {
       for (const id of scenarioIds) {
-        const item = this.lorebooks.find((l) => l.lorebook.meta.id === id);
-        const name = item?.lorebook.meta.name ?? "(삭제됨)";
-        const row = scenarioListEl.createDiv({ cls: "ggai-lorebook-checklist-row" });
-        const cb = row.createEl("input", { type: "checkbox" });
-        cb.checked = !disabled.has(id);
-        if (!item) cb.disabled = true;
-        const label = row.createSpan({
-          cls: "ggai-lorebook-checklist-label",
-          text: name,
+        this.renderLoreRow(scenarioListEl, id, {
+          toggle: {
+            checked: !disabled.has(id),
+            onChange: (on) => void this.handleToggleScenarioLorebook(id, on),
+          },
         });
-        if (!item) label.addClass("is-faint");
-        const handler = () =>
-          void this.handleToggleScenarioLorebook(id, cb.checked);
-        cb.addEventListener("change", handler);
-        if (item) {
-          label.addEventListener("click", () => {
-            cb.checked = !cb.checked;
-            handler();
-          });
-        }
       }
     }
 
@@ -653,28 +639,31 @@ export class ScenarioSection {
         cls: "ggai-lorebook-checklist",
       });
       for (const { id, memberName } of this.groupMemberLore) {
-        const item = this.lorebooks.find((l) => l.lorebook.meta.id === id);
-        const name = item?.lorebook.meta.name ?? "(삭제됨)";
-        const row = memberListEl.createDiv({
-          cls: "ggai-lorebook-checklist-row",
+        this.renderLoreRow(memberListEl, id, {
+          suffix: memberName,
+          toggle: {
+            checked: !disabled.has(id),
+            onChange: (on) => void this.handleToggleScenarioLorebook(id, on),
+          },
         });
-        const cb = row.createEl("input", { type: "checkbox" });
-        cb.checked = !disabled.has(id);
-        if (!item) cb.disabled = true;
-        const label = row.createSpan({
-          cls: "ggai-lorebook-checklist-label",
-          text: `${name} · ${memberName}`,
-        });
-        if (!item) label.addClass("is-faint");
-        const handler = () =>
-          void this.handleToggleScenarioLorebook(id, cb.checked);
-        cb.addEventListener("change", handler);
-        if (item) {
-          label.addEventListener("click", () => {
-            cb.checked = !cb.checked;
-            handler();
-          });
-        }
+      }
+    }
+
+    // ─── 자동 생성 — 세션 기억 / 번역 용어집. 잘못 적힌 내용을 그 자리에서 고칠 수
+    //     있게 세션과 가장 밀접한 책을 여기 노출한다 (편집 버튼 = 편집 페이지 직행).
+    const autoId = session.meta.autoLorebookId;
+    const glossaryId = stella?.translationGlossaryLorebookId;
+    const autoRows: Array<{ id: string; badge: string }> = [];
+    if (autoId) autoRows.push({ id: autoId, badge: "세션 기억" });
+    if (glossaryId && glossaryId !== autoId) {
+      autoRows.push({ id: glossaryId, badge: "번역 용어집" });
+    }
+    if (autoRows.length > 0) {
+      const autoWrap = wrap.createDiv({ cls: "ggai-session-lorebook-group" });
+      autoWrap.createDiv({ cls: "ggai-text-field-label", text: "자동 생성" });
+      const autoListEl = autoWrap.createDiv({ cls: "ggai-lorebook-checklist" });
+      for (const row of autoRows) {
+        this.renderLoreRow(autoListEl, row.id, { badge: row.badge });
       }
     }
 
@@ -684,6 +673,11 @@ export class ScenarioSection {
       cls: "ggai-text-field-label",
       text: "이 세션만 추가",
     });
+    const extraIds = [...sessionExtra].filter((id) => id !== autoId);
+    if (extraIds.length > 0) {
+      const extraListEl = addWrap.createDiv({ cls: "ggai-lorebook-checklist" });
+      for (const id of extraIds) this.renderLoreRow(extraListEl, id, {});
+    }
     const count = sessionExtra.size;
     const btn = addWrap.createEl("button", {
       cls: "ggai-preset-btn ggai-media-lorebook-btn",
@@ -700,6 +694,58 @@ export class ScenarioSection {
     });
 
     this.renderMediaLorebookGroups(wrap);
+  }
+
+  /**
+   * 로어북 한 줄 — 이름 + (선택) 배지/토글 + **편집 바로가기**.
+   * 편집 버튼은 그 책의 편집 페이지로 직행한다 (로어북 탭에서 찾는 수고 제거).
+   */
+  private renderLoreRow(
+    parent: HTMLElement,
+    id: string,
+    opts: {
+      badge?: string;
+      suffix?: string;
+      toggle?: { checked: boolean; onChange: (on: boolean) => void };
+    }
+  ): void {
+    const item = this.lorebooks.find((l) => l.lorebook.meta.id === id);
+    const name = item?.lorebook.meta.name ?? "(삭제됨)";
+    const row = parent.createDiv({ cls: "ggai-lorebook-checklist-row" });
+
+    let cb: HTMLInputElement | null = null;
+    if (opts.toggle) {
+      cb = row.createEl("input", { type: "checkbox" });
+      cb.checked = opts.toggle.checked;
+      if (!item) cb.disabled = true;
+      cb.addEventListener("change", () => opts.toggle!.onChange(cb!.checked));
+    }
+
+    const label = row.createSpan({
+      cls: "ggai-lorebook-checklist-label",
+      text: opts.suffix ? `${name} · ${opts.suffix}` : name,
+    });
+    if (!item) label.addClass("is-faint");
+    if (item && cb) {
+      label.addEventListener("click", () => {
+        cb!.checked = !cb!.checked;
+        opts.toggle!.onChange(cb!.checked);
+      });
+    }
+    if (opts.badge) {
+      row.createSpan({ cls: "ggai-lorebook-row-badge", text: opts.badge });
+    }
+    if (!item) return;
+
+    const editBtn = row.createEl("button", {
+      cls: "ggai-icon-btn ggai-lorebook-row-edit",
+      attr: { "aria-label": "이 로어북 편집" },
+    });
+    setIcon(editBtn, "pencil");
+    editBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void this.plugin.openStellaEditor("lorebook", item.lorebookFile);
+    });
   }
 
   /**
@@ -737,6 +783,9 @@ export class ScenarioSection {
       },
     ];
 
+    // 용어집은 위 "자동 생성" 그룹에서 이미 보여준다 — 여기 중복 표시하지 않는다.
+    const glossaryId = stella?.translationGlossaryLorebookId;
+
     for (const g of groups) {
       if (!g.enabled) continue;
       const groupEl = wrap.createDiv({ cls: "ggai-session-lorebook-group" });
@@ -744,6 +793,11 @@ export class ScenarioSection {
         cls: "ggai-text-field-label",
         text: `${g.label} (시나리오 공유)`,
       });
+      const listed = g.ids.filter((id) => id !== glossaryId);
+      if (listed.length > 0) {
+        const listEl = groupEl.createDiv({ cls: "ggai-lorebook-checklist" });
+        for (const id of listed) this.renderLoreRow(listEl, id, {});
+      }
       const btn = groupEl.createEl("button", {
         cls: "ggai-preset-btn ggai-media-lorebook-btn",
         text: g.ids.length > 0 ? `로어북 ${g.ids.length}개 선택됨` : "로어북 선택",

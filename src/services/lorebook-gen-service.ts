@@ -77,6 +77,14 @@ export class LorebookGenService {
     const book = await this.plugin.store.getLorebook(created.lorebookFile);
     if (!book) return null;
 
+    // 소속 기록 — 목록 그룹핑/세션 삭제 연동/고아 정리가 이 값을 본다.
+    book.meta.owner = {
+      kind: "session-auto",
+      scenarioId: session.meta.scenarioId,
+      sessionId: session.meta.id,
+    };
+    await this.plugin.store.saveLorebook(created.lorebookFile, book);
+
     session.meta.autoLorebookId = book.meta.id;
     const extra = session.meta.extraLorebookIds ?? [];
     if (!extra.includes(book.meta.id)) {

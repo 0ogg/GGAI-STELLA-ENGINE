@@ -5,8 +5,9 @@
  *  1. 활성 경로의 최종 본문을 문단으로 나누고 번역 대상 선택
  *     - 기본: active 번역이 없는 문단 전부 (일괄/자동 번역)
  *     - hashes 지정: 해당 문단만 (문단 개별 재생성 / 자동 번역의 새 구간)
- *  2. 대상을 청크(문단 수/글자 수 기준)로 끊어 **순차** AI 호출 — 청크마다 즉시
- *     translations.json 에 저장하므로 중간 실패에도 이미 받은 번역은 보존된다.
+ *  2. 대상을 청크(문단 수/글자 수 기준)로 끊어 **동시에 최대 5개씩** AI 호출 — 청크마다
+ *     받는 즉시 translations.json 에 저장하므로 일부 실패에도 이미 받은 번역은 보존된다.
+ *     저장은 큐로 직렬화(동시 파일 쓰기 방지). 요청 제한 대응은 Core 의 대기 옵션 몫.
  *  3. 응답의 문단별 번역을 variant 로 쌓고 active 선택 (Store 경유)
  *
  * 원문 세션 노드는 절대 수정하지 않는다. 에러는 throw 대신 결과 객체로 반환한다.
@@ -44,9 +45,42 @@ import {
 import type { MediaPromptItem } from "../types/preset";
 import type { SessionTranslations, TranslationUndoItem } from "../types/media";
 
-/** 청크당 최대 문단 수 / 원문 글자 수 — 먼저 차는 기준으로 끊는다. */
+/**
+ * 청크당 최대 문단 수 / 원문 글자 수 — 먼저 차는 기준으로 끊는다.
+ * 청크는 순차 대기 없이 동시에 발사하되 한 번에 MAX_CONCURRENT_CHUNKS 개까지만
+ * 띄운다(요청 제한이 있는 API 는 Core 의 요청 대기 옵션이 받아 준다).
+ */
 const CHUNK_PARAGRAPHS = 8;
 const CHUNK_CHARS = 3000;
+
+/** 동시에 떠 있을 수 있는 번역 요청 수 — 하나가 끝나면 다음 청크가 그 자리로. */
+const MAX_CONCURRENT_CHUNKS = 5;
+
+/**
+ * chunks 를 최대 MAX_CONCURRENT_CHUNKS 개씩 동시에 worker 로 처리한다.
+ * 결과는 **입력 순서**(=문서 순서), shouldStop 이 true 면 아직 시작하지 않은 청크는
+ * 발사하지 않는다(취소 — 이미 떠 있는 요청은 끝까지 기다린다). 미실행 자리는 undefined.
+ */
+async function runChunksPooled<T, R>(
+  chunks: T[],
+  worker: (chunk: T) => Promise<R>,
+  shouldStop?: () => boolean
+): Promise<(R | undefined)[]> {
+  const out: (R | undefined)[] = new Array(chunks.length);
+  let next = 0;
+  const lanes = Array.from(
+    { length: Math.min(MAX_CONCURRENT_CHUNKS, chunks.length) },
+    async () => {
+      while (true) {
+        const i = next++;
+        if (i >= chunks.length || shouldStop?.()) return;
+        out[i] = await worker(chunks[i]);
+      }
+    }
+  );
+  await Promise.all(lanes);
+  return out;
+}
 
 /** 자동 재시도가 켜져 있어도, 같은 실행에서 누적 오류가 이 횟수에 도달하면 멈춘다. */
 const MAX_SESSION_ERRORS = 10;
@@ -91,6 +125,28 @@ export interface TranslatePreviewResult {
 
 export class TranslationService {
   constructor(private plugin: StellaEnginePlugin) {}
+
+  /**
+   * translations.json 저장 직렬화 큐 — 청크를 병렬로 돌리면 여러 청크가 같은 시각에
+   * 저장을 요청한다. 파일이 아직 없을 때 두 저장이 겹치면 create 가 충돌하고,
+   * 겹친 modify 는 마지막 것만 남는다. 한 줄로 세워 순서대로 쓴다.
+   */
+  private saveQueue: Promise<void> = Promise.resolve();
+
+  private queueSaveTranslations(
+    sessionFile: string,
+    translations: SessionTranslations,
+    origin?: string
+  ): Promise<void> {
+    this.saveQueue = this.saveQueue
+      .catch(() => {})
+      .then(() =>
+        this.plugin.store.saveSessionTranslations(sessionFile, translations, {
+          origin,
+        })
+      );
+    return this.saveQueue;
+  }
 
   /** translateParagraphs / previewTranslateRange 공용 — 세션/설정/프롬프트/프로필/로어북 해석. */
   private async resolveTranslationSetup(sessionFile: string): Promise<
@@ -248,51 +304,61 @@ export class TranslationService {
       CHUNK_PARAGRAPHS,
       CHUNK_CHARS
     );
-    // 청크 하나가 실패해도 나머지는 계속 번역한다 — 한 청크 실패로 뒤 청크를
-    // 통째로 버리면 "일부만 번역됨"이 크게 남는다(부분 성공 최대화). 못 된 항목은
-    // 다시 "번역 보기"를 켜거나 개별 재번역으로 채운다.
+    // 청크는 동시에 최대 5개까지 띄운다 — 순차로 기다리면 청크 수 × 왕복 시간이 그대로
+    // 체감된다(폰 항목은 짧아 청크가 많이 나온다). 청크 하나가 실패해도 나머지는
+    // 계속 번역한다 — 한 청크 실패로 뒤 청크를 통째로 버리면 "일부만 번역됨"이 크게
+    // 남는다(부분 성공 최대화). 못 된 항목은 다시 "번역 보기"를 켜거나 개별 재번역으로 채운다.
     let lastError: string | undefined;
-    for (const chunk of chunks) {
-      const segments = chunk.map((c) => ({
-        id: c.hash,
-        role: "translate" as const,
-        source: c.source,
-      }));
-      // 세션 무관 실행 — 로어북 허브는 전역 설정(sessionFile "")으로 판단한다.
-      const lorebookText = await this.plugin.lorebookPlus.buildTaskLorebookText({
-        sessionFile: "",
-        books,
-        scanText: segments.map((s) => s.source).join("\n"),
-        taskPrompt: prompt.prompt,
-        taskLabel: "번역",
-      });
-      try {
-        const responseText = await this.callModel(
-          profile,
-          prompt.prompt,
-          segments,
-          lorebookText,
-          "",
-          label
-        );
-        const parsed = parseTranslationResponse(responseText);
-        if (!parsed || parsed.length === 0) {
-          lastError = "번역 응답이 올바른 형식이 아닙니다.";
-          continue;
-        }
-        const valid = new Set(chunk.map((c) => c.hash));
-        for (const r of parsed) {
-          if (valid.has(r.id) && r.translation.trim()) {
-            results.set(r.id, r.translation);
+    let cancelled = false;
+    await runChunksPooled(
+      chunks,
+      async (chunk) => {
+        const segments = chunk.map((c) => ({
+          id: c.hash,
+          role: "translate" as const,
+          source: c.source,
+        }));
+        // 세션 무관 실행 — 로어북 허브는 전역 설정(sessionFile "")으로 판단한다.
+        const lorebookText = await this.plugin.lorebookPlus.buildTaskLorebookText({
+          sessionFile: "",
+          books,
+          scanText: segments.map((s) => s.source).join("\n"),
+          taskPrompt: prompt.prompt,
+          taskLabel: "번역",
+        });
+        try {
+          const responseText = await this.callModel(
+            profile,
+            prompt.prompt,
+            segments,
+            lorebookText,
+            "",
+            label
+          );
+          const parsed = parseTranslationResponse(responseText);
+          if (!parsed || parsed.length === 0) {
+            lastError = "번역 응답이 올바른 형식이 아닙니다.";
+            return;
           }
+          const valid = new Set(chunk.map((c) => c.hash));
+          for (const r of parsed) {
+            if (valid.has(r.id) && r.translation.trim()) {
+              results.set(r.id, r.translation);
+            }
+          }
+        } catch (err) {
+          // 취소는 오류가 아니다 — 아직 안 띄운 청크는 발사하지 않는다.
+          if (isCancelledError(err)) {
+            cancelled = true;
+            return;
+          }
+          lastError = `번역 호출 실패: ${err instanceof Error ? err.message : String(err)}`;
+          // 이 청크만 건너뛰고 나머지는 계속.
         }
-      } catch (err) {
-        // 취소는 오류가 아니다 — 남은 청크를 발사하지 않고 즉시 멈춘다.
-        if (isCancelledError(err)) return { ok: results.size > 0, results };
-        lastError = `번역 호출 실패: ${err instanceof Error ? err.message : String(err)}`;
-        // 이 청크만 건너뛰고 다음 청크로.
-      }
-    }
+      },
+      () => cancelled
+    );
+    if (cancelled) return { ok: results.size > 0, results };
     // 하나라도 성공했으면 성공(부분 성공 보존). 전부 실패면 에러를 알린다.
     if (results.size === 0 && lastError) {
       return { ok: false, results, error: lastError };
@@ -434,40 +500,56 @@ export class TranslationService {
       "enToKo"
     );
 
-    for (const chunk of chunks) {
-      const { results, sourceById, reason, cancelled } = await this.translateChunk(
-        sessionFile,
-        profile,
-        prompt.prompt,
-        text,
-        chunk,
-        books,
-        retry,
-        errorCount,
-        applyRegex,
-        previewTranslations,
-        setup.contextSets,
-        pairsText
-      );
-      if (cancelled) break; // 취소 — 조용히 멈춤(오류로 처리하지 않음)
-      if (!results || results.length === 0) {
-        errors.push(reason);
-        break;
-      }
-      // 재번역 대상 문단만 미리보기에 담는다 — 연속성용 문맥 문단은 모델이 함께
-      // 돌려줘도 제외해, commitPreview 가 요청하지 않은(저자 원고 등) 문단을
-      // 덮어쓰지 않게 한다.
-      const chunkTargets = new Set(chunk.map((c) => c.hash));
-      for (const item of results) {
-        const source = sourceById.get(item.id);
-        if (source === undefined) {
-          errors.push(`입력에 없는 문단 응답: ${item.id}`);
-          continue;
+    // 청크를 동시에 최대 5개씩 발사하고, 미리보기 목록은 청크 순서(=문서 순서)로 이어
+    // 붙인다. 실패한 청크는 오류만 남기고 나머지 결과는 살린다.
+    let previewCancelled = false;
+    const perChunk = await runChunksPooled(
+      chunks,
+      async (chunk) => {
+        const { results, sourceById, reason, cancelled } = await this.translateChunk(
+          sessionFile,
+          profile,
+          prompt.prompt,
+          text,
+          chunk,
+          books,
+          retry,
+          errorCount,
+          applyRegex,
+          previewTranslations,
+          setup.contextSets,
+          pairsText
+        );
+        if (cancelled) {
+          // 취소 — 조용히 멈춘다(오류 아님). 아직 안 띄운 청크는 발사하지 않는다.
+          previewCancelled = true;
+          return [];
         }
-        if (!chunkTargets.has(item.id)) continue;
-        if (!item.translation.trim()) continue;
-        items.push({ hash: item.id, source, translation: item.translation });
-      }
+        if (!results || results.length === 0) {
+          errors.push(reason);
+          return [];
+        }
+        // 재번역 대상 문단만 미리보기에 담는다 — 연속성용 문맥 문단은 모델이 함께
+        // 돌려줘도 제외해, commitPreview 가 요청하지 않은(저자 원고 등) 문단을
+        // 덮어쓰지 않게 한다.
+        const chunkTargets = new Set(chunk.map((c) => c.hash));
+        const out: TranslationPreviewItem[] = [];
+        for (const item of results) {
+          const source = sourceById.get(item.id);
+          if (source === undefined) {
+            errors.push(`입력에 없는 문단 응답: ${item.id}`);
+            continue;
+          }
+          if (!chunkTargets.has(item.id)) continue;
+          if (!item.translation.trim()) continue;
+          out.push({ hash: item.id, source, translation: item.translation });
+        }
+        return out;
+      },
+      () => previewCancelled
+    );
+    for (const list of perChunk) {
+      if (list) items.push(...list);
     }
 
     if (items.length === 0) {
@@ -503,9 +585,7 @@ export class TranslationService {
     }
     if (undoItems.length > 0) {
       pushTranslationUndoEntry(translations, undoItems);
-      await this.plugin.store.saveSessionTranslations(sessionFile, translations, {
-        origin: meta.origin,
-      });
+      await this.queueSaveTranslations(sessionFile, translations, meta.origin);
     }
     return { updatedHashes };
   }
@@ -556,77 +636,81 @@ export class TranslationService {
       "translation"
     );
 
-    for (const chunk of chunks) {
-      const { results, sourceById, reason, cancelled } = await this.translateChunk(
-        sessionFile,
-        profile,
-        prompt.prompt,
-        text,
-        chunk,
-        books,
-        retry,
-        errorCount,
-        applyRegex,
-        translations,
-        setup.contextSets,
-        pairsText
-      );
+    // 청크를 **동시에 최대 5개씩** 발사한다. 응답이 오는 대로 그 자리에서 translations 에
+    // 쌓고 저장(큐로 직렬화)하므로, 일부 청크가 실패해도 이미 받은 번역은 그대로 남는다.
+    await runChunksPooled(
+      chunks,
+      async (chunk) => {
+        const { results, sourceById, reason, cancelled } = await this.translateChunk(
+          sessionFile,
+          profile,
+          prompt.prompt,
+          text,
+          chunk,
+          books,
+          retry,
+          errorCount,
+          applyRegex,
+          translations,
+          setup.contextSets,
+          pairsText
+        );
 
-      // 취소 — 남은 청크를 발사하지 않고 멈춘다. 여기까지 저장된 청크는 보존.
-      if (cancelled) {
-        cancelledRun = true;
-        break;
-      }
-      if (!results || results.length === 0) {
-        errors.push(partialMessage(done, targets.length, reason));
-        break;
-      }
-
-      // 이 청크가 실제로 번역을 요청한 대상 문단만 기록한다. buildTranslationRequest
-      // 가 연속성용으로 끼워 보낸 "문맥(context)" 문단은 모델이 개선 번역을 함께
-      // 돌려줘도 저장하지 않는다 — 요청하지 않은 문단(특히 집필 프로의 저자 원고
-      // authored)을 왕복 번역으로 덮어쓰는 사고를 막는다.
-      const chunkTargets = new Set(chunk.map((c) => c.hash));
-      let chunkUpdated = 0;
-      for (const item of results) {
-        const source = sourceById.get(item.id);
-        if (source === undefined) {
-          errors.push(`입력에 없는 문단 응답: ${item.id}`);
-          continue;
+        // 취소 — 아직 안 띄운 청크는 발사하지 않는다. 저장된 청크는 보존.
+        if (cancelled) {
+          cancelledRun = true;
+          return;
         }
-        if (!chunkTargets.has(item.id)) continue;
-        if (!item.translation.trim()) continue;
-        // 되돌리기용: 이 문단을 이번 실행에서 처음 건드릴 때의 이전 active 를 기록.
-        const prevActive =
-          translations.paragraphs[item.id]?.activeVariantId ?? "";
-        const variant = recordTranslationVariant(translations, {
-          source,
-          text: item.translation,
-          modelProfileId: profile.id,
-          promptId: prompt.id,
-        });
-        const undo = undoMap.get(item.id);
-        if (undo) {
-          undo.createdVariantIds.push(variant.id);
-        } else {
-          undoMap.set(item.id, {
-            createdVariantIds: [variant.id],
-            prevActiveVariantId: prevActive,
+        if (!results || results.length === 0) {
+          errors.push(partialMessage(done, targets.length, reason));
+          return;
+        }
+
+        // 이 청크가 실제로 번역을 요청한 대상 문단만 기록한다. buildTranslationRequest
+        // 가 연속성용으로 끼워 보낸 "문맥(context)" 문단은 모델이 개선 번역을 함께
+        // 돌려줘도 저장하지 않는다 — 요청하지 않은 문단(특히 집필 프로의 저자 원고
+        // authored)을 왕복 번역으로 덮어쓰는 사고를 막는다.
+        const chunkTargets = new Set(chunk.map((c) => c.hash));
+        let chunkUpdated = 0;
+        for (const item of results) {
+          const source = sourceById.get(item.id);
+          if (source === undefined) {
+            errors.push(`입력에 없는 문단 응답: ${item.id}`);
+            continue;
+          }
+          if (!chunkTargets.has(item.id)) continue;
+          if (!item.translation.trim()) continue;
+          // 되돌리기용: 이 문단을 이번 실행에서 처음 건드릴 때의 이전 active 를 기록.
+          const prevActive =
+            translations.paragraphs[item.id]?.activeVariantId ?? "";
+          const variant = recordTranslationVariant(translations, {
+            source,
+            text: item.translation,
+            modelProfileId: profile.id,
+            promptId: prompt.id,
           });
+          const undo = undoMap.get(item.id);
+          if (undo) {
+            undo.createdVariantIds.push(variant.id);
+          } else {
+            undoMap.set(item.id, {
+              createdVariantIds: [variant.id],
+              prevActiveVariantId: prevActive,
+            });
+          }
+          updatedHashes.push(item.id);
+          chunkUpdated++;
         }
-        updatedHashes.push(item.id);
-        chunkUpdated++;
-      }
 
-      // 청크마다 즉시 저장 — 이후 청크가 실패해도 여기까지는 보존.
-      if (chunkUpdated > 0) {
-        await this.plugin.store.saveSessionTranslations(sessionFile, translations, {
-          origin: opts?.origin,
-        });
-      }
-      done += chunk.length;
-      opts?.onProgress?.(Math.min(done, targets.length), targets.length);
-    }
+        // 청크마다 즉시 저장 — 이후 청크가 실패해도 여기까지는 보존.
+        if (chunkUpdated > 0) {
+          await this.queueSaveTranslations(sessionFile, translations, opts?.origin);
+        }
+        done += chunk.length;
+        opts?.onProgress?.(Math.min(done, targets.length), targets.length);
+      },
+      () => cancelledRun
+    );
 
     if (updatedHashes.length === 0) {
       // 취소로 한 문단도 못 받았으면 오류 메시지 없이 취소로만 반환.
@@ -641,9 +725,7 @@ export class TranslationService {
         ([hash, v]) => ({ hash, ...v })
       );
       pushTranslationUndoEntry(translations, items);
-      await this.plugin.store.saveSessionTranslations(sessionFile, translations, {
-        origin: opts?.origin,
-      });
+      await this.queueSaveTranslations(sessionFile, translations, opts?.origin);
     }
     return {
       ok: errors.length === 0,

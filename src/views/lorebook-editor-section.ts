@@ -15,6 +15,7 @@ import { EditGuard } from "./edit-guard";
 import { FieldDef, renderForm } from "./form-renderer";
 import { ConfirmModal } from "./modals";
 import { exportLorebook } from "./entity-actions";
+import { LorebookLinksModal } from "./lorebook-links-modal";
 
 const SAVE_DEBOUNCE_MS = 400;
 
@@ -140,6 +141,11 @@ export class LorebookEditorSection {
     });
 
     const actions = header.createDiv({ cls: "ggai-editor-actions" });
+    renderIconActionButton(actions, {
+      icon: "link",
+      label: "사용 중인 곳",
+      onClick: () => void this.handleShowLinks(),
+    });
     renderIconActionButton(actions, {
       icon: "upload",
       label: "내보내기",
@@ -548,6 +554,21 @@ export class LorebookEditorSection {
     if (!lorebookFile) return;
     await this.flushNow();
     await exportLorebook(this.plugin, lorebookFile);
+  }
+
+  /** 이 책을 쓰는 시나리오/세션 보기 — 거기서 바로 이동할 수 있다. */
+  private async handleShowLinks(): Promise<void> {
+    const lorebookFile = this.lorebookFile;
+    if (!lorebookFile) return;
+    await this.flushNow();
+    const item = (await this.plugin.store.getLorebooks()).find(
+      (l) => l.lorebookFile === lorebookFile
+    );
+    if (!item) {
+      new Notice("로어북 정보를 찾을 수 없습니다.");
+      return;
+    }
+    LorebookLinksModal.openForBook(this.plugin, item);
   }
 
   private async handleDuplicate(): Promise<void> {

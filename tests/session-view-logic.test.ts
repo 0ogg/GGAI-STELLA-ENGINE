@@ -40,6 +40,7 @@ import {
 import {
   createEmptySessionIllustrations,
   createEmptySessionTranslations,
+  normalizeSessionTranslations,
 } from "../src/types/media";
 import { createEmptySessionSummaries } from "../src/types/summary";
 import {
@@ -102,6 +103,7 @@ import {
 import {
   buildTranslationRequest,
   chunkParagraphs,
+  clearPendingReflections,
   collectParagraphs,
   collectTranslationContext,
   collectUntranslatedParagraphs,
@@ -114,6 +116,7 @@ import {
   recordTranslationVariant,
   setActiveTranslationVariant,
   tokenizeParagraphs,
+  upsertPendingReflection,
 } from "../src/util/translate-paragraphs";
 import {
   buildParagraphRegenBody,
@@ -1657,6 +1660,30 @@ const asyncTests: Promise<void>[] = [];
     collectTranslationContext(text, translations, untranslated, 0),
     []
   );
+
+  // 양방향(집필) 반영 대기함 — 같은 문단 재수정은 갱신(createdAt 유지), 성공 정리 시
+  // 해당 건만 제거, 마지막 건 제거 시 맵 자체가 사라진다. 라운드트립도 보존.
+  {
+    const t = createEmptySessionTranslations();
+    upsertPendingReflection(t, "AA.", "가가 수정.", 10);
+    upsertPendingReflection(t, "\"BB.\"", "나나 수정.", 20);
+    upsertPendingReflection(t, "AA.", "가가 재수정.", 30);
+    const hashAA = hashText("AA.");
+    assert.equal(t.pendingReflections![hashAA].ko, "가가 재수정.");
+    assert.equal(t.pendingReflections![hashAA].en, "AA.");
+    assert.equal(t.pendingReflections![hashAA].createdAt, 10); // 최초 시각 유지
+    assert.equal(t.pendingReflections![hashAA].updatedAt, 30);
+    const roundtrip = normalizeSessionTranslations(
+      JSON.parse(JSON.stringify({ ...t, proDraft: "초고 남은 줄" }))
+    );
+    assert.equal(roundtrip.proDraft, "초고 남은 줄");
+    assert.equal(roundtrip.pendingReflections![hashAA].ko, "가가 재수정.");
+    clearPendingReflections(t, [hashAA]);
+    assert.equal(t.pendingReflections![hashAA], undefined);
+    assert.equal(t.pendingReflections!["없는해시"], undefined);
+    clearPendingReflections(t, [hashText("\"BB.\"")]);
+    assert.equal(t.pendingReflections, undefined); // 비면 맵 제거
+  }
 
   // 문단 재생성 맥락 — 대상 범위 앞/뒤 문단 수집(각 방향 sets 문단). 대상 인덱스는 포함 제외.
   const regenText = "p0\n\np1\n\np2\n\np3\n\np4";
@@ -3585,7 +3612,75 @@ function regexScript(overrides: Partial<RegexScript>): RegexScript {
     "enToKo"
   );
   assert.ok(block.includes('"ko":"감마 한국어."'));
-  assert.ok(block.includes("Korean voice"));
+  // 방향별 안내는 따라야 할 쪽을 가리킨다 (enToKo = 저자 목소리, koToEn = 원고 목소리).
+  assert.ok(block.includes("author's own voice"));
+  const koToEn = formatStylePairs(
+    [{ en: "Gamma en.", ko: "감마 한국어." }],
+    "koToEn"
+  );
+  assert.ok(koToEn.includes("manuscript voice"));
+  assert.notEqual(koToEn, block);
+  // 언어를 못박지 않는다 — 출력 언어는 원고(context)가 정한다. 하드코딩 회귀 방지.
+  const { PRO_CONVERT_IO_INSTRUCTIONS } =
+    require("../src/util/pro-convert") as typeof import("../src/util/pro-convert");
+  for (const text of [block, koToEn, PRO_CONVERT_IO_INSTRUCTIONS]) {
+    assert.ok(!/\bEnglish\b|\bKorean\b/.test(text));
+  }
+}
+
+// ─── 양방향 번역(챗) — 말풍선 수정 → 구간 교체 op 환산 (util/pro-convert) ───
+{
+  const {
+    collectChatReflectionOps,
+  } = require("../src/util/pro-convert") as typeof import("../src/util/pro-convert");
+  const { hashText } = require("../src/util/translate-paragraphs") as typeof import("../src/util/translate-paragraphs");
+  const { CHAT_MESSAGE_SEPARATOR } = require("../src/util/chat-messages") as typeof import("../src/util/chat-messages");
+
+  // 메시지 3개 — 두 번째부터 구분자가 앞에 붙는다(챗 뷰 규칙). 두 번째는 두 문단.
+  const messages = [
+    { nodeId: "n0", role: "assistant" as const, text: "First msg." },
+    {
+      nodeId: "n1",
+      role: "user" as const,
+      text: CHAT_MESSAGE_SEPARATOR + "Para one.\n\nPara two.",
+    },
+    { nodeId: "n2", role: "assistant" as const, text: CHAT_MESSAGE_SEPARATOR + "Third." },
+  ];
+  // 평탄화 본문 = 메시지 텍스트를 그대로 이어붙인 것 (buildSpans 와 같은 체계).
+  const flat = messages.map((m) => m.text).join("");
+  const at = (s: string) => ({ ko: "고친 문장.", en: s, createdAt: 1, updatedAt: 1 });
+
+  // 각 메시지의 문단을 고쳤을 때 — from/to 가 실제 원문 구간을 정확히 가리켜야 한다.
+  for (const target of ["First msg.", "Para one.", "Para two.", "Third."]) {
+    const ops = collectChatReflectionOps(messages, { [hashText(target)]: at(target) });
+    assert.equal(ops.length, 1);
+    assert.equal(ops[0].expect, target);
+    // 핵심 불변식: 계산된 구간이 평탄화 본문에서 그 문단과 정확히 일치.
+    assert.equal(flat.slice(ops[0].from, ops[0].to), target);
+    assert.equal(ops[0].ko, "고친 문장.");
+  }
+
+  // 여러 문단 동시 수정 — 문서 순서, 구간이 겹치지 않는다(서비스 검증 통과 조건).
+  const many = collectChatReflectionOps(messages, {
+    [hashText("Para two.")]: at("Para two."),
+    [hashText("First msg.")]: at("First msg."),
+  });
+  assert.deepEqual(many.map((o) => o.expect), ["First msg.", "Para two."]);
+  assert.ok(many[0].to <= many[1].from);
+
+  // 대기함이 없거나 빈 ko 면 아무것도 반영하지 않는다.
+  assert.deepEqual(collectChatReflectionOps(messages, undefined), []);
+  assert.deepEqual(
+    collectChatReflectionOps(messages, {
+      [hashText("Third.")]: { ...at("Third."), ko: "   " },
+    }),
+    []
+  );
+  // 활성 경로에 없는 문단의 대기 건은 조용히 무시된다(분기 이동 → 휴면).
+  assert.deepEqual(
+    collectChatReflectionOps(messages, { [hashText("Gone.")]: at("Gone.") }),
+    []
+  );
 }
 
 // ─── 집필 프로 — 용어집 스캔 대상 수집 (util/pro-convert) ───

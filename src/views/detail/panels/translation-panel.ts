@@ -2,6 +2,7 @@ import type { SettingsPanel, SettingsPanelContext } from "../../../services/sett
 import type { TranslationActiveSettings, TranslationOutputMode } from "../../../types/preset";
 import { getDefaultPrompts } from "../../../util/default-media-prompts";
 import { TRANSLATION_CONTEXT_SETS_DEFAULT } from "../../../util/translate-paragraphs";
+import { renderBidirectionalConvertSettings } from "../bidirectional-settings";
 import {
   renderMediaLorebookPicker,
   renderMediaModelPicker,
@@ -98,6 +99,27 @@ export function createTranslationSettingsPanel(): SettingsPanel {
         integer: true,
         onChange: (contextSets) => void patchTranslation(ctx, { contextSets }),
       });
+
+      // ── 양방향 번역 — 번역 화면에서 직접 쓰기/수정 → 원장(원문) 자동 반영.
+      renderEnableToggle({
+        parent: body,
+        label: "양방향 번역",
+        checked: settings.translation?.bidirectional === true,
+        onChange: (bidirectional) =>
+          void patchTranslation(ctx, { bidirectional }).then(() =>
+            // 켜고 끌 때 아래 집필 변환/용어집 섹션이 나타나고 사라진다.
+            ctx.rerender()
+          ),
+        help:
+          "번역 화면에서 내 언어로 직접 쓰고 고칠 수 있게 됩니다. " +
+          "쓴 내용은 스토리 원문 언어로 변환되어 원문에 반영되고, 내가 쓴 문장은 " +
+          "번역 화면에 그대로 남습니다. 채팅 세션에서는 입력창의 메시지가 원문 언어로 " +
+          "변환되어 전송됩니다. 원문 언어는 지금까지의 스토리를 보고 따라갑니다. " +
+          "켜면 번역 용어집 자동 수집도 함께 동작합니다.",
+      });
+      if (settings.translation?.bidirectional === true) {
+        renderBidirectionalConvertSettings(body, ctx);
+      }
     },
   };
 }

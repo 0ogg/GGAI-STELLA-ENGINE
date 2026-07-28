@@ -4113,6 +4113,30 @@ body.is-mobile.ggai-stella-panel-active .ggai-session-body-wrap {
   justify-content: space-between;
   cursor: pointer;
 }
+/* 동그란 물음표 도움말 버튼 — 누르면 토스트로 설명 (setting-controls renderHelpButton) */
+.ggai-help-btn {
+  flex: 0 0 auto;
+  width: 17px;
+  height: 17px;
+  padding: 0;
+  margin-left: 4px;
+  margin-right: auto; /* 토글 줄에서 라벨 바로 옆에 붙고 체크박스는 오른쪽 유지 */
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 50%;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.ggai-help-btn:hover {
+  color: var(--text-normal);
+  border-color: var(--interactive-accent);
+}
 /* 요약 설정 — 수동 요약 / 요약 관리 버튼 줄 */
 .ggai-summary-actions {
   display: grid;
@@ -6554,6 +6578,131 @@ body.is-mobile .ggai-dash-user-edit {
   color: var(--text-faint);
 }
 
+/* 로어북 탭 3구역 (내 서재 / 자동 생성 / 고아) */
+.ggai-dash-lore-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.ggai-dash-lore-grid-inner {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px;
+}
+.ggai-dash-lore-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ggai-dash-lore-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold, 600);
+  color: var(--text-muted);
+}
+.ggai-dash-lore-section-title.is-clickable {
+  cursor: pointer;
+  user-select: none;
+}
+.ggai-dash-lore-section-title .ggai-btn {
+  margin-left: auto;
+}
+.ggai-dash-lore-chevron {
+  display: inline-flex;
+  align-items: center;
+}
+.ggai-dash-lore-section-note {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+}
+.ggai-dash-lore-check {
+  flex: 0 0 auto;
+}
+.ggai-dash-lore-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+/* 자동 생성/고아 배지 — 목록·세션 패널 공용. */
+.ggai-lorebook-row-badge {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-weight: normal;
+  white-space: nowrap;
+}
+.ggai-lorebook-row-edit {
+  flex: 0 0 auto;
+  opacity: 0.6;
+}
+.ggai-lorebook-checklist-row:hover .ggai-lorebook-row-edit {
+  opacity: 1;
+}
+
+/* 연결 보기(로어북 ↔ 세션/시나리오) 목록 */
+.ggai-lore-link-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ggai-lore-link-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.ggai-lore-link-row:hover {
+  background: var(--background-modifier-hover);
+}
+.ggai-lore-link-row.is-faint {
+  opacity: 0.55;
+}
+.ggai-lore-link-icon,
+.ggai-lore-link-go {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+}
+.ggai-lore-link-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ggai-lore-link-name {
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ggai-lore-link-meta {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+}
+
+/* 사이드바 자동 생성 묶음 머리 */
+.ggai-sidebar-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 4px 2px;
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-semibold, 600);
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+.ggai-sidebar-group-chevron {
+  display: inline-flex;
+  align-items: center;
+}
+
 /* 시나리오 상세 (세션 관리) 페이지 */
 .ggai-dash-detail {
   display: flex;
@@ -6875,6 +7024,7 @@ body.is-mobile .ggai-dash-page {
     width: 116px;
   }
   .ggai-dash-lore-grid,
+  .ggai-dash-lore-grid-inner,
   .ggai-dash-user-grid {
     grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   }
@@ -8174,8 +8324,36 @@ body.is-mobile .ggai-phone-root.is-kb .ggai-phone-composer {
   z-index: 2;
   background: var(--background-secondary);
 }
+/* 탭이 5개(공통·사진·문자·네트워크·방송)라 폰 폭에서는 좌우 여백을 줄여야
+   글자가 잘리지 않는다 — 기본 .ggai-detail-tab 은 디테일 뷰 폭 기준. */
+.ggai-phone-settings-tabs .ggai-detail-tab {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 10px 2px;
+  font-size: 11px;
+  white-space: nowrap;
+}
 .ggai-phone-settings-pane {
   padding: 12px 12px 24px;
+}
+/* "세부 조정" 접기 — 펼치기 전에는 한 줄짜리 카드로 보이게. 겉 화면에는
+   모델과 켜고 끄기만 남기고 수치·프롬프트는 이 안에 둔다. */
+.ggai-phone-settings-pane .ggai-collapsible {
+  margin: 10px 0 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-primary);
+  overflow: hidden;
+}
+.ggai-phone-settings-pane .ggai-collapsible > .ggai-section-header.is-clickable {
+  margin: 0;
+  padding: 9px 10px;
+}
+.ggai-phone-settings-pane
+  .ggai-collapsible
+  > .ggai-section-header.is-clickable
+  + *:not(.is-collapsed) {
+  padding: 4px 10px 10px;
 }
 /* flex/grid 자식은 기본 min-width:auto 라 긴 내용(키워드 목록·핸들 등)이
    부모보다 넓어질 수 있다 — 설정 화면 안에서는 전부 줄어들 수 있게. */

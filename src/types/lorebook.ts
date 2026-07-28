@@ -84,6 +84,17 @@ export interface StellaLorebookEntry {
   _source: LorebookSource;
 }
 
+/**
+ * 자동 생성 북의 소속 — 생성 시 기록되고, 목록 그룹핑·세션 삭제 연동·고아 정리가
+ * 이 값을 본다. 기존(소속 미기록) 북은 세션/시나리오 역참조를 스캔해 소급 판정한다
+ * (`util/lorebook-owners.ts`). 없으면 사용자 소유(내 서재).
+ */
+export interface LorebookOwner {
+  kind: "session-auto" | "glossary";
+  scenarioId?: string;
+  sessionId?: string;
+}
+
 /** 책(파일) 레벨 메타데이터. `lorebook.json` 의 meta 필드로 저장. */
 export interface StellaLorebookMeta {
   /**
@@ -100,6 +111,10 @@ export interface StellaLorebookMeta {
   tokenBudget: number | null;
   recursiveScanning: boolean;
   _source: LorebookSource;
+  /** 자동 생성 북의 소속. 없으면 사용자 소유(내 서재). */
+  owner?: LorebookOwner | null;
+  /** 보관 — 세션 삭제 연동 확인·고아 정리에서 항상 제외 (자동 그룹에는 계속 표시). */
+  keep?: boolean;
 }
 
 export interface StellaLorebook {

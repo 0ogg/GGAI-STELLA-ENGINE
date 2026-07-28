@@ -71,6 +71,12 @@ export interface TranslationActiveSettings {
   retryOnFormatError?: boolean;
   /** 앞 문맥 첨부 세트 수 (1세트=직전 6문단, 0=끄기). 로어북 위치에 참고 블록으로 삽입. */
   contextSets?: number;
+  /**
+   * 양방향 번역 — 켜면 번역 화면에서 내 언어로 직접 쓰고 고친 것이 스토리 원문
+   * 언어로 변환되어 원장에 반영된다(소설 = 대기 문단 모델, 챗 = 입력란 변환 전송).
+   * 상세는 `양방향 번역 스펙.md`.
+   */
+  bidirectional?: boolean;
 }
 
 /**

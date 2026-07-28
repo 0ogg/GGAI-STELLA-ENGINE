@@ -60,6 +60,20 @@ export interface TranslationUndoEntry {
   items: TranslationUndoItem[];
 }
 
+/**
+ * 양방향(집필) — 아직 영어판에 반영되지 않은 저자의 한국어 수정 한 건.
+ * 화면 상태·variant 종류 추론이 아니라 **파일에 실존하는 대기 상태**다 —
+ * 재렌더/앱 재시작에도 살아남고, 반영이 성공한 항목만 제거된다(실패는 남아 재시도).
+ */
+export interface PendingReflection {
+  /** 저자가 쓴 한국어 전문 — 반영 전까지 이 값이 그 문단의 진실 소스. */
+  ko: string;
+  /** 대상 문단의 영어 원문 전문 (반영 시 expect 검증용). */
+  en: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 /** 세션 폴더 `translations.json`. */
 export interface SessionTranslations {
   schemaVersion: 1;
@@ -71,6 +85,10 @@ export interface SessionTranslations {
   undoStack?: TranslationUndoEntry[];
   /** 되돌린 실행을 다시 적용하는 스택 (오래된 것 → 최근 것). 새 실행이 생기면 비워진다. */
   redoStack?: TranslationUndoEntry[];
+  /** 양방향(집필) — 영어판 반영 대기함. key = 대상 문단 원문(영어) 해시. */
+  pendingReflections?: Record<string, PendingReflection>;
+  /** 양방향(집필) — 본문 끝 이어쓰기 초고(한국어). 반영 성공 시 소비된 프리픽스만큼 잘린다. */
+  proDraft?: string;
 }
 
 export function createEmptySessionTranslations(): SessionTranslations {
@@ -93,6 +111,14 @@ export function normalizeSessionTranslations(raw: unknown): SessionTranslations 
         : {},
     undoStack: Array.isArray(obj.undoStack) ? obj.undoStack : undefined,
     redoStack: Array.isArray(obj.redoStack) ? obj.redoStack : undefined,
+    pendingReflections:
+      obj.pendingReflections && typeof obj.pendingReflections === "object"
+        ? obj.pendingReflections
+        : undefined,
+    proDraft:
+      typeof obj.proDraft === "string" && obj.proDraft !== ""
+        ? obj.proDraft
+        : undefined,
   };
 }
 

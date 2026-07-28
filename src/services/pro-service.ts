@@ -19,6 +19,7 @@ import type StellaEnginePlugin from "../main";
 import { VIEW_TYPE_PRO_FOCUS } from "../constants";
 import { ProGlossaryService } from "./pro-glossary-service";
 import type { Patch, SessionNode, TurnKind } from "../types/session";
+import type { SessionTranslations } from "../types/media";
 import { createProSettingsPanel } from "../views/detail/panels/pro-panel";
 import { isCancelledError } from "./ai-service";
 import { buildReadingMarkdown } from "../util/export-session";
@@ -31,6 +32,7 @@ import {
   mergeLorebookIds,
 } from "../util/media-lorebook";
 import {
+  clearPendingReflections,
   collectParagraphs,
   parseTranslationResponse,
   recordTranslationVariant,
@@ -262,9 +264,6 @@ export class ProService {
     }
     const session = await this.plugin.store.getSession(sessionFile);
     if (!session) return fail("세션을 불러올 수 없습니다.");
-    if (session.meta.mode === "chat") {
-      return fail("집필 프로는 소설 세션 전용입니다.");
-    }
 
     // 구간 검증 — 범위/겹침/원문 일치(expect). 하나라도 어긋나면 전체 취소.
     const baseline = spansToText(buildSpans(session));
@@ -273,6 +272,16 @@ export class ProService {
     for (const op of sorted) {
       if (op.from < 0 || op.to < op.from || op.to > baseline.length) {
         return fail("반영 구간이 본문 범위를 벗어났습니다.");
+      }
+      // 챗은 구간 교체(기존 메시지 수정)만 허용한다 — 끝 append 는 마지막 메시지에
+      // 텍스트를 덧붙일 뿐 새 메시지 노드가 되지 않는다("노드 1개 = 메시지 1개").
+      // 새 메시지는 전송 경로(convertChatMessage + 뷰의 append 노드)가 만든다.
+      if (
+        session.meta.mode === "chat" &&
+        op.from === baseline.length &&
+        op.to === baseline.length
+      ) {
+        return fail("챗 세션에서는 메시지 수정만 반영할 수 있습니다.");
       }
       if (op.from < prevEnd) return fail("반영 구간이 서로 겹칩니다.");
       prevEnd = op.to;
@@ -318,70 +327,21 @@ export class ProService {
 
     // 장면 전환(***) 등 리터럴 문단만 있으면 변환할 write 세그먼트가 없다 —
     // AI 호출 없이 그대로 접합한다 (왕복 변환으로 씨름하지 않는다).
-    let assemblies: ProConvertAssembly[] | null = null;
+    let assemblies: ProConvertAssembly[];
     if (request.segments.some((s) => s.role === "write")) {
-      // 문체 예시 — 최근 authored 문단 쌍 (양방향 자기강화, 스펙 §3.4). 짝도 접합 지점 앞 기준.
-      const pairsText = formatStylePairs(
-        collectStylePairs(
-          styleHead,
-          translations,
-          proSettings.stylePairs ?? PRO_STYLE_PAIRS_DEFAULT
-        ),
-        "koToEn"
-      );
-
-      // 로어북(용어집)은 번역 설정과 공유한다 — 고유명사 표기의 단일 소스 (스펙 §8).
-      const scanText = sorted.map((o) => o.ko).join("\n");
-      const scenarioIds = await getScenarioMediaLorebookIds(
-        this.plugin.store,
+      const converted = await this.convertWriteSegments({
         sessionFile,
-        "translation"
-      );
-      const books = await loadMediaLorebooks(
-        this.plugin.store,
-        mergeLorebookIds(settings.translation?.lorebookIds, scenarioIds)
-      );
-      const lorebookText = await this.plugin.lorebookPlus.buildTaskLorebookText({
-        sessionFile,
-        books,
-        scanText,
-        taskPrompt: prompt.prompt,
-        taskLabel: "집필 변환",
+        translationLorebookIds: settings.translation?.lorebookIds,
+        stylePairs: proSettings.stylePairs,
+        prompt,
+        profile,
+        translations,
+        request,
+        styleHead,
+        scanText: sorted.map((o) => o.ko).join("\n"),
       });
-
-      let lastError = "";
-      for (let attempt = 0; attempt < CONVERT_MAX_ATTEMPTS; attempt++) {
-        try {
-          const responseText = await this.callModel(
-            profile,
-            prompt.prompt,
-            request,
-            lorebookText,
-            pairsText
-          );
-          const parsed = parseTranslationResponse(responseText);
-          if (!parsed || parsed.length === 0) {
-            lastError = "변환 응답이 올바른 JSON 배열이 아닙니다.";
-            continue;
-          }
-          const byId = new Map(parsed.map((r) => [r.id, r.translation]));
-          const candidates = request.perOp.map((p) =>
-            assembleProConversion(p, byId)
-          );
-          const bad = candidates.find((c) => !c.ok);
-          if (!bad) {
-            assemblies = candidates;
-            break;
-          }
-          lastError = bad.errors[0] ?? "변환 응답이 불완전합니다.";
-        } catch (err) {
-          if (isCancelledError(err)) return { ok: false, errors: [], cancelled: true };
-          lastError = `변환 호출 실패: ${
-            err instanceof Error ? err.message : String(err)
-          }`;
-        }
-      }
-      if (!assemblies) return fail(lastError || "변환에 실패했습니다.");
+      if (!converted.ok) return converted;
+      assemblies = converted.assemblies;
     } else {
       assemblies = request.perOp.map((p) => assembleProConversion(p, new Map()));
     }
@@ -411,6 +371,19 @@ export class ProService {
       }
     }
     resolvePendingEditVariants(translations, reflectedHashes);
+    // 반영 대기함 정리 — 성공한 문단의 대기 건 제거 + 끝 초고는 소비한 프리픽스만큼
+    // 잘라낸다 (실패 시엔 여기 도달하지 않아 대기함이 그대로 남는다 = 재시도 보장).
+    clearPendingReflections(translations, reflectedHashes);
+    const appendOp = sorted.find(
+      (op) => op.from === baseline.length && op.to === baseline.length
+    );
+    if (appendOp && translations.proDraft !== undefined) {
+      const rest = translations.proDraft.startsWith(appendOp.ko)
+        ? translations.proDraft.slice(appendOp.ko.length).replace(/^\n+/, "")
+        : translations.proDraft;
+      if (rest === "") delete translations.proDraft;
+      else translations.proDraft = rest;
+    }
     await this.plugin.store.saveSessionTranslations(sessionFile, translations, {
       origin: opts?.origin,
     });
@@ -460,6 +433,172 @@ export class ProService {
     return { ok: true, errors: [] };
   }
 
+  /**
+   * 챗 메시지 양방향 변환 — 입력창의 저자 언어 메시지를 원장(스토리 원문) 언어로
+   * 변환하고, 문단 짝을 `authored` variant 로 저장한다(번역 보기에서 내가 쓴 그대로
+   * 보임). **세션 노드는 만들지 않는다** — 메시지 append 는 챗 뷰의 몫(노드 1개 =
+   * 메시지 1개 대전제). 실패/취소 시 아무것도 저장하지 않는다 — 호출자가 입력을
+   * 보존한다. 상세는 `양방향 번역 스펙.md` §2.5.
+   */
+  async convertChatMessage(
+    sessionFile: string,
+    ko: string,
+    opts?: { origin?: string }
+  ): Promise<
+    { ok: true; text: string } | { ok: false; errors: string[]; cancelled?: boolean }
+  > {
+    if (!this.plugin.ai.isAvailable()) {
+      return fail("GGAI Core 가 설치/활성화되어 있지 않습니다.");
+    }
+    if (ko.trim() === "") return fail("빈 메시지는 변환할 수 없습니다.");
+    const session = await this.plugin.store.getSession(sessionFile);
+    if (!session) return fail("세션을 불러올 수 없습니다.");
+
+    const settings = await this.plugin.resolveActiveSettings(sessionFile);
+    const proSettings = settings.pro ?? {};
+    const prompt = resolveMediaPrompt(
+      "proConvert",
+      proSettings.promptId,
+      this.plugin.data.mediaPrompts
+    );
+    if (!prompt) return fail("집필 변환 프롬프트가 선택되어 있지 않습니다.");
+    const profile =
+      this.plugin.ai.getProfileById(proSettings.modelProfileId) ??
+      this.plugin.ai.getDefaultGenerationProfile();
+    if (!profile) return fail("집필 변환에 사용할 모델 프로필이 없습니다.");
+
+    // 문체/언어 참조 = 지금까지의 챗 로그 꼬리 — 출력 언어는 원장이 정한다 (§1.5).
+    const baseline = spansToText(buildSpans(session));
+    const styleTail = sliceStyleTail(
+      baseline,
+      proSettings.styleTailChars ?? PRO_STYLE_TAIL_CHARS_DEFAULT
+    );
+    const request = buildProSpliceRequest([ko], styleTail);
+    if (!request.perOp[0]?.koTokens.some((t) => t.kind === "paragraph")) {
+      return fail("변환할 내용이 없습니다.");
+    }
+    const translations =
+      await this.plugin.store.getSessionTranslations(sessionFile);
+
+    let assemblies: ProConvertAssembly[];
+    if (request.segments.some((s) => s.role === "write")) {
+      const converted = await this.convertWriteSegments({
+        sessionFile,
+        translationLorebookIds: settings.translation?.lorebookIds,
+        stylePairs: proSettings.stylePairs,
+        prompt,
+        profile,
+        translations,
+        request,
+        styleHead: baseline,
+        scanText: ko,
+      });
+      if (!converted.ok) return converted;
+      assemblies = converted.assemblies;
+    } else {
+      assemblies = request.perOp.map((p) => assembleProConversion(p, new Map()));
+    }
+
+    // 짝 저장 — 챗 번역 보기에서 이 메시지가 내가 쓴 문장 그대로 보이게.
+    const seen = new Set<string>();
+    for (const assembly of assemblies) {
+      for (const pair of assembly.pairs) {
+        if (seen.has(pair.en)) continue;
+        seen.add(pair.en);
+        recordTranslationVariant(translations, {
+          source: pair.en,
+          text: pair.ko,
+          kind: "authored",
+        });
+      }
+    }
+    await this.plugin.store.saveSessionTranslations(sessionFile, translations, {
+      origin: opts?.origin,
+    });
+    void this.glossary.scanIfNeeded(sessionFile);
+    return { ok: true, text: assemblies[0].englishText };
+  }
+
+  /**
+   * write 세그먼트 변환 코어 — 문체 예시 쌍 + 용어집 로어북 첨부, 형식 오류 재시도,
+   * 세그먼트 1:1 검증까지. 소설 접합(convertAndSplice)과 챗 메시지 변환이 공유한다.
+   */
+  private async convertWriteSegments(args: {
+    sessionFile: string;
+    translationLorebookIds: string[] | undefined;
+    stylePairs: number | undefined;
+    prompt: { prompt: string };
+    profile: { id: string; kind: "chat" | "text" };
+    translations: SessionTranslations;
+    request: ProSpliceRequest;
+    /** 문체 예시 수집 기준 원장 텍스트 (접합 지점 앞 / 챗은 로그 전체). */
+    styleHead: string;
+    /** 로어북 키워드 매칭 스캔 대상 (저자 입력 전체). */
+    scanText: string;
+  }): Promise<
+    | { ok: true; assemblies: ProConvertAssembly[] }
+    | { ok: false; errors: string[]; cancelled?: boolean }
+  > {
+    // 문체 예시 — 최근 authored 문단 쌍 (양방향 자기강화, 스펙 §3.4).
+    const pairsText = formatStylePairs(
+      collectStylePairs(
+        args.styleHead,
+        args.translations,
+        args.stylePairs ?? PRO_STYLE_PAIRS_DEFAULT
+      ),
+      "koToEn"
+    );
+
+    // 로어북(용어집)은 번역 설정과 공유한다 — 고유명사 표기의 단일 소스 (스펙 §8).
+    const scenarioIds = await getScenarioMediaLorebookIds(
+      this.plugin.store,
+      args.sessionFile,
+      "translation"
+    );
+    const books = await loadMediaLorebooks(
+      this.plugin.store,
+      mergeLorebookIds(args.translationLorebookIds, scenarioIds)
+    );
+    const lorebookText = await this.plugin.lorebookPlus.buildTaskLorebookText({
+      sessionFile: args.sessionFile,
+      books,
+      scanText: args.scanText,
+      taskPrompt: args.prompt.prompt,
+      taskLabel: "집필 변환",
+    });
+
+    let lastError = "";
+    for (let attempt = 0; attempt < CONVERT_MAX_ATTEMPTS; attempt++) {
+      try {
+        const responseText = await this.callModel(
+          args.profile,
+          args.prompt.prompt,
+          args.request,
+          lorebookText,
+          pairsText
+        );
+        const parsed = parseTranslationResponse(responseText);
+        if (!parsed || parsed.length === 0) {
+          lastError = "변환 응답이 올바른 JSON 배열이 아닙니다.";
+          continue;
+        }
+        const byId = new Map(parsed.map((r) => [r.id, r.translation]));
+        const candidates = args.request.perOp.map((p) =>
+          assembleProConversion(p, byId)
+        );
+        const bad = candidates.find((c) => !c.ok);
+        if (!bad) return { ok: true, assemblies: candidates };
+        lastError = bad.errors[0] ?? "변환 응답이 불완전합니다.";
+      } catch (err) {
+        if (isCancelledError(err)) return { ok: false, errors: [], cancelled: true };
+        lastError = `변환 호출 실패: ${
+          err instanceof Error ? err.message : String(err)
+        }`;
+      }
+    }
+    return fail(lastError || "변환에 실패했습니다.");
+  }
+
   private async callModel(
     profile: { id: string; kind: "chat" | "text" },
     instruction: string,
@@ -491,6 +630,7 @@ export class ProService {
   }
 }
 
-function fail(message: string): ProConvertResult {
+// 리터럴 ok:false 타입 — ProConvertResult 와 판별 유니언 반환 타입 양쪽에 대입 가능.
+function fail(message: string): { ok: false; errors: string[]; cancelled?: boolean } {
   return { ok: false, errors: [message] };
 }
