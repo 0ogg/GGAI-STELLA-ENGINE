@@ -32,6 +32,7 @@ import {
   type SessionStreamFile,
   type SnsAccount,
   type SnsAuthor,
+  type SnsBoom,
   type SnsFeedFile,
   type SnsList,
   type SnsPost,
@@ -77,6 +78,11 @@ export type PhoneSendTarget =
 export interface PhoneAppSharedContext {
   /** 시나리오 id — 주어지면 그 캐릭터의 "봤는지" 판정(§8.2)으로 거른다(1:1 문자). */
   knownBy?: string;
+  /**
+   * 이 다이제스트를 받아갈 앱 id (v3.1). 네트워크(SNS)로 갈 때는 접속 중인
+   * 서버 밖의 소식을 실어 보내면 안 된다 — 공급자가 스스로 걸러야 한다.
+   */
+  forApp?: string;
 }
 
 /** 외부 폰 앱 화면 렌더 컨텍스트. */
@@ -249,7 +255,7 @@ export class PhoneService {
       name: "스텔라튜브",
       icon: "tv",
       liveBadge: () => this.hasLiveStream(),
-      contributeSharedContext: () => this.sharedDigestTube(),
+      contributeSharedContext: (ctx) => this.sharedDigestTube(ctx.forApp),
     });
     this.apps.set(PHONE_APP_CAMERA, {
       id: PHONE_APP_CAMERA,
@@ -602,7 +608,12 @@ export class PhoneService {
         this.randomNextAt = now + pickRange(RANDOM_RANGE_MS);
       } else if (now >= this.randomNextAt) {
         this.randomNextAt = now + pickRange(RANDOM_RANGE_MS);
-        await this.refresh("random");
+        // 열린 세션이 접속 중인 서버에 없으면 네트워크는 건드리지 않는다 (v3.1).
+        const open = this.firstOpenSessionFile();
+        const sns = open
+          ? await this.isSessionFileInActiveServer(open)
+          : false;
+        await this.refresh("random", { sns });
       }
     } else {
       this.randomNextAt = null;
@@ -614,7 +625,16 @@ export class PhoneService {
    * 트리거 게이트/전역 스로틀/미응답 상한을 전부 통과해야 실제로 생성한다.
    * 실패는 조용히 (자동 경로 — 사용자를 방해하지 않는다).
    */
-  async refresh(reason: "open" | "periodic" | "random" | "keyword"): Promise<void> {
+  async refresh(
+    reason: "open" | "periodic" | "random" | "keyword",
+    opts?: {
+      /**
+       * SNS 활동 포함 여부 (v3.1, 기본 true). 활성 서버에 담기지 않은 세션에서
+       * 걸린 트리거는 문자·방송만 돌리고 네트워크에는 참여하지 않는다.
+       */
+      sns?: boolean;
+    }
+  ): Promise<void> {
     const t = this.plugin.data.phone?.triggers;
     const enabled =
       reason === "open"
@@ -640,7 +660,7 @@ export class PhoneService {
       // 방송 화면 동기화 (PH4) — 라이브 방송의 본문을 그 세션 최근 장면으로 갱신.
       await this.syncLiveStreams();
       // SNS 활동 (PH3) — 상한 0 이면 자동 갱신 끔.
-      if ((this.plugin.data.phone?.snsPerRefresh ?? 10) > 0) {
+      if (opts?.sns !== false && (this.plugin.data.phone?.snsPerRefresh ?? 10) > 0) {
         await this.generateSnsActivity(persona, userFile, profile, {
           notify: true,
         });
@@ -993,18 +1013,27 @@ export class PhoneService {
     let st = streamer;
     if (!st) {
       // 수동 시작 — 스트리머 = 로그인 페르소나 계정 (없으면 만들어 귀속).
+      // 계정은 서버 소속이라 활성 서버 기준으로 찾는다. 서버가 없어도 방송은
+      // 돌아간다(계정 없이 기본 시청자 수로 시작).
       const { profile: persona } = await this.getLoginPersona();
+      const listId = this.activeSnsListId();
       const accounts = await store.getPhoneAccounts();
-      let acc = accounts.accounts.find(
-        (a) => a.kind === "persona" && a.scenarioId === persona.id
-      );
-      if (!acc) {
+      let acc = listId
+        ? accounts.accounts.find(
+            (a) =>
+              a.kind === "persona" &&
+              a.scenarioId === persona.id &&
+              a.listId === listId
+          )
+        : undefined;
+      if (!acc && listId) {
         acc = {
           id: `acc_${uuidv4()}`,
           kind: "persona",
           scenarioId: persona.id,
           name: persona.name?.trim() || "User",
           followers: 50 + Math.floor(Math.random() * 150),
+          listId,
           firstSeen: Date.now(),
           lastActive: Date.now(),
           postCount: 0,
@@ -1014,7 +1043,7 @@ export class PhoneService {
       }
       st = {
         kind: "persona",
-        accountId: acc.id,
+        ...(acc ? { accountId: acc.id } : {}),
         name: persona.name?.trim() || "User",
       };
     }
@@ -1510,8 +1539,13 @@ export class PhoneService {
     const streamerAcc = stream.streamer.accountId
       ? accountsFile.accounts.find((a) => a.id === stream.streamer.accountId)
       : undefined;
-    const topAccounts = [...accountsFile.accounts]
-      .filter((a) => a.kind !== "persona")
+    // 시청자는 이 서버 주민 중에서만 나온다 (v3.1) — 서버가 다르면 서로 모른다.
+    // 접속 중인 서버에 없는 세션의 방송은 무소속 시청자(생판 남)들이 본다.
+    const tubeListId = (await this.isSessionInActiveServer(session))
+      ? this.activeSnsListId() ?? undefined
+      : undefined;
+    const topAccounts = accountsFile.accounts
+      .filter((a) => a.listId === tubeListId && a.kind !== "persona")
       .sort((x, y) => y.postCount - x.postCount || y.lastActive - x.lastActive)
       .slice(0, 30);
     const accountsBlock = topAccounts
@@ -1594,6 +1628,7 @@ export class PhoneService {
       charByName,
       personaName,
       newAccountCap,
+      listId: tubeListId,
     });
     const now = Date.now();
     const chat: StreamChatItem[] = [];
@@ -1753,6 +1788,12 @@ export class PhoneService {
   ): Promise<void> {
     const body = text.trim();
     if (!body && !image) return;
+    // 글은 지금 접속 중인 서버에 올라간다 — 서버가 없으면 올릴 곳도 없다.
+    const listId = this.activeSnsListId();
+    if (!listId) {
+      new Notice("먼저 리스트를 만들어 주세요.");
+      return;
+    }
     const caption = image?.caption?.trim() || firstLine(body) || "사진";
     if (image?.registerGallery) {
       await this.addGalleryItem({ file: image.asset, caption, source: "upload" });
@@ -1768,6 +1809,7 @@ export class PhoneService {
       replies: [],
       // 유저 게시글 = max(판정, 2) — 초기 2, 이후 배치가 상향 가능 (v2 §6.2).
       issueScale: 2,
+      listId,
       ...(image ? { image: { caption, asset: image.asset } } : {}),
     });
     await store.saveSnsFeed(feed);
@@ -1787,14 +1829,23 @@ export class PhoneService {
     }
   }
 
-  /** 페르소나 계정 등록/갱신 (v2 §6.1) — 게시 시 accounts.json 에 합류. */
+  /**
+   * 페르소나 계정 등록/갱신 (v2 §6.1) — 게시 시 accounts.json 에 합류.
+   * 서버마다 계정이 따로다(v3.1) — 같은 사람이라도 서버가 다르면 다른 계정이고
+   * 팔로워도 따로 논다.
+   */
   private async ensurePersonaAccount(persona: StellaUserProfile): Promise<void> {
     try {
       const store = this.plugin.store;
+      const listId = this.activeSnsListId();
+      if (!listId) return;
       const accounts = await store.getPhoneAccounts();
       const now = Date.now();
       const acc = accounts.accounts.find(
-        (a) => a.kind === "persona" && a.scenarioId === persona.id
+        (a) =>
+          a.kind === "persona" &&
+          a.scenarioId === persona.id &&
+          a.listId === listId
       );
       if (acc) {
         acc.lastActive = now;
@@ -1806,6 +1857,7 @@ export class PhoneService {
           scenarioId: persona.id,
           name: persona.name?.trim() || "User",
           followers: 50 + Math.floor(Math.random() * 150),
+          listId,
           firstSeen: now,
           lastActive: now,
           postCount: 1,
@@ -1892,7 +1944,9 @@ export class PhoneService {
       }
 
       const accountsFile = await store.getPhoneAccounts();
-      const topAccounts = [...accountsFile.accounts]
+      // 댓글도 이 서버 주민만 (v3.1).
+      const listId = this.activeSnsListId() ?? undefined;
+      const topAccounts = this.snsAccountsOfActiveList(accountsFile)
         .filter((a) => a.kind !== "persona")
         .sort((x, y) => y.postCount - x.postCount || y.lastActive - x.lastActive)
         .slice(0, 30);
@@ -1982,6 +2036,7 @@ export class PhoneService {
         charByName,
         personaName,
         newAccountCap,
+        listId,
       });
       const now = Date.now();
       let seq = 0;
@@ -2177,10 +2232,17 @@ export class PhoneService {
    */
   async clearSnsFeed(opts: { keepLiked: boolean }): Promise<void> {
     const store = this.plugin.store;
+    const listId = this.activeSnsListId();
+    if (!listId) return;
     const feed = await store.getSnsFeed();
-    feed.posts = opts.keepLiked
-      ? feed.posts.filter((p) => (p.likedBy?.length ?? 0) > 0)
-      : [];
+    // 지우는 범위는 **지금 접속 중인 서버**뿐이다 (v3.1) — 다른 서버 피드는
+    // 이 화면에서 보이지도 않는데 같이 날아가면 안 된다.
+    feed.posts = feed.posts.filter(
+      (p) =>
+        p.listId !== listId ||
+        (opts.keepLiked && (p.likedBy?.length ?? 0) > 0)
+    );
+    if (feed.booms?.[listId]) delete feed.booms[listId];
     await store.saveSnsFeed(feed);
     await this.pruneOrphanExtraAccounts(feed);
   }
@@ -2192,14 +2254,19 @@ export class PhoneService {
   private async pruneOrphanExtraAccounts(feed: SnsFeedFile): Promise<void> {
     const store = this.plugin.store;
     const accountsFile = await store.getPhoneAccounts();
+    // 살아 있는 작성자는 **서버별로** 센다 (v3.1) — 다른 서버의 동명이인이
+    // 이 서버의 고아 계정을 살려두면 안 된다.
     const alive = new Set<string>();
     for (const p of feed.posts) {
-      alive.add(snsAuthorKey(p.author));
-      for (const r of p.replies) alive.add(snsAuthorKey(r.author));
+      const scope = p.listId ?? "";
+      alive.add(`${scope} ${snsAuthorKey(p.author)}`);
+      for (const r of p.replies) {
+        alive.add(`${scope} ${snsAuthorKey(r.author)}`);
+      }
     }
     const kept = accountsFile.accounts.filter((acc) => {
       if (acc.kind !== "extra" || acc.verified) return true;
-      return alive.has(snsAccountKey(acc));
+      return alive.has(`${acc.listId ?? ""} ${snsAccountKey(acc)}`);
     });
     if (kept.length !== accountsFile.accounts.length) {
       accountsFile.accounts = kept;
@@ -2545,6 +2612,166 @@ export class PhoneService {
     return this.plugin.data.phone?.snsLists ?? [];
   }
 
+  /**
+   * 현재 접속 중인 서버 id (v3.1) — null 이면 SNS 는 전면 정지다(표시·생성·
+   * 세션 주입 모두). 리스트는 서로 단절된 별개 서버라 한 번에 하나만 켜진다.
+   */
+  activeSnsListId(): string | null {
+    return this.activeSnsList()?.id ?? null;
+  }
+
+  /** 활성 서버의 글만 (v3.1) — 서버가 없으면 빈 배열. */
+  snsPostsOfActiveList(feed: SnsFeedFile): SnsPost[] {
+    const id = this.activeSnsListId();
+    return id ? feed.posts.filter((p) => p.listId === id) : [];
+  }
+
+  /** 활성 서버의 주민만 (v3.1). */
+  snsAccountsOfActiveList(accounts: PhoneAccountsFile): SnsAccount[] {
+    const id = this.activeSnsListId();
+    return id ? accounts.accounts.filter((a) => a.listId === id) : [];
+  }
+
+  /**
+   * 이 세계(시나리오)가 활성 서버에 담겨 있는가 (v3.1) — 세션이 SNS 소식을
+   * 받을 자격의 유일한 기준. 담겨 있지 않으면 그 세션에는 SNS 가 존재하지
+   * 않는다(문자·방송은 서버와 무관하게 계속 동작).
+   */
+  isScenarioInActiveList(scenarioId: string | undefined): boolean {
+    if (!scenarioId) return false;
+    return this.activeSnsList()?.scenarioIds.includes(scenarioId) === true;
+  }
+
+  /**
+   * 이 세션이 지금 접속 중인 서버에 담겨 있는가 (v3.1) — 기준은 참가자다.
+   * 호스트 시나리오, 그룹 세션이면 멤버 전원 중 한 명이라도 담겨 있으면 참여.
+   */
+  async isSessionInActiveServer(session: {
+    meta: { scenarioId: string; groupId?: string };
+  }): Promise<boolean> {
+    if (this.isScenarioInActiveList(session.meta.scenarioId)) return true;
+    const groupId = session.meta.groupId;
+    if (!groupId) return false;
+    try {
+      const group = (await this.plugin.store.getGroupById(groupId))?.group;
+      return (
+        group?.members.some((m) => this.isScenarioInActiveList(m.scenarioId)) ===
+        true
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /** 파일 경로로 보는 같은 판정 (세션 객체가 없는 트리거 경로용). */
+  async isSessionFileInActiveServer(sessionFile: string): Promise<boolean> {
+    const session = await this.plugin.store
+      .getSession(sessionFile)
+      .catch(() => null);
+    return session ? this.isSessionInActiveServer(session) : false;
+  }
+
+  /**
+   * 사건 반영 북마크 키 (v3.1) — 서버마다 따로 센다. 한 세계가 여러 리스트에
+   * 담길 수 있으므로, 서버 A 가 소비한 장면을 서버 B 도 "새 사건"으로 봐야 한다.
+   */
+  snsProgressKey(sessionFile: string): string {
+    const id = this.activeSnsListId();
+    return id ? `${id}|${sessionFile}` : sessionFile;
+  }
+
+  /** 활성 서버의 최상단 이슈 상태. */
+  private activeBoom(feed: SnsFeedFile): SnsBoom | undefined {
+    const id = this.activeSnsListId();
+    return id ? feed.booms?.[id] : undefined;
+  }
+
+  /** 활성 서버의 최상단 이슈 갱신 (undefined = 해제). */
+  private setActiveBoom(feed: SnsFeedFile, boom: SnsBoom | undefined): void {
+    const id = this.activeSnsListId();
+    if (!id) return;
+    if (boom) feed.booms = { ...(feed.booms ?? {}), [id]: boom };
+    else if (feed.booms) delete feed.booms[id];
+  }
+
+  /**
+   * 서버 분리 이관 (v3.1) — 소속 도장이 없던 옛 글·계정을 현재 서버 소유로
+   * 옮긴다. 리스트가 하나도 없으면 글에 등장한 세계들로 서버를 하나 만들어
+   * 거기에 담는다(안 그러면 쌓아둔 피드가 통째로 안 보이게 된다).
+   * 볼트당 1회, 플러그인 로드 직후 실행.
+   */
+  async migrateSnsServers(): Promise<void> {
+    const plugin = this.plugin;
+    if (plugin.data.phone?.snsServersMigrated === true) return;
+    // 폰을 쓴 적이 없는 볼트에는 파일을 만들지 않는다 — 플래그만 세운다.
+    if (!this.isPhoneInUse()) {
+      await plugin.savePluginData({
+        phone: { ...(plugin.data.phone ?? {}), snsServersMigrated: true },
+      });
+      return;
+    }
+    const store = plugin.store;
+    const feed = await store.getSnsFeed().catch(() => null);
+    const accounts = await store.getPhoneAccounts().catch(() => null);
+    const orphanPosts = (feed?.posts ?? []).filter((p) => !p.listId);
+    const orphanAccounts = (accounts?.accounts ?? []).filter((a) => !a.listId);
+    if (orphanPosts.length === 0 && orphanAccounts.length === 0) {
+      await plugin.savePluginData({
+        phone: { ...(plugin.data.phone ?? {}), snsServersMigrated: true },
+      });
+      return;
+    }
+    let target = this.activeSnsList();
+    if (!target) {
+      // 리스트 없이 쌓인 데이터 — 글에 등장한 세계들을 담아 첫 서버를 만든다.
+      const worldIds = new Set<string>();
+      for (const p of orphanPosts) {
+        const authors = [p.author, ...p.replies.map((r) => r.author)];
+        for (const a of authors) {
+          if ((a.kind === "character" || a.kind === "scenario") && a.id) {
+            worldIds.add(a.id);
+          }
+        }
+      }
+      for (const a of orphanAccounts) {
+        if (a.kind === "character" && a.scenarioId) worldIds.add(a.scenarioId);
+      }
+      target = await this.createSnsList("내 피드", [...worldIds]);
+    }
+    for (const p of orphanPosts) p.listId = target.id;
+    for (const a of orphanAccounts) a.listId = target.id;
+    // 로어북 인물 스캔 기록도 서버별 키로 (안 옮기면 그 세계를 한 번 더 훑는다).
+    if (accounts?.castScans) {
+      const moved: Record<string, number> = {};
+      for (const [key, at] of Object.entries(accounts.castScans)) {
+        moved[key.includes(":") ? key : `${target.id}:${key}`] = at;
+      }
+      accounts.castScans = moved;
+    }
+    if (feed) {
+      // 단일 최상단 이슈 → 그 서버의 최상단 이슈로.
+      if (feed.boom) {
+        feed.booms = { ...(feed.booms ?? {}), [target.id]: feed.boom };
+        delete feed.boom;
+      }
+      await store.saveSnsFeed(feed);
+    }
+    if (accounts) await store.savePhoneAccounts(accounts);
+    // 사건 반영 북마크도 서버별 키로 (안 옮기면 옛 장면이 새 사건으로 재소비된다).
+    const progress = plugin.data.snsProgress;
+    let movedProgress: Record<string, string> | undefined;
+    if (progress && Object.keys(progress).length > 0) {
+      movedProgress = {};
+      for (const [key, nodeId] of Object.entries(progress)) {
+        movedProgress[key.includes("|") ? key : `${target.id}|${key}`] = nodeId;
+      }
+    }
+    await plugin.savePluginData({
+      phone: { ...(plugin.data.phone ?? {}), snsServersMigrated: true },
+      ...(movedProgress ? { snsProgress: movedProgress } : {}),
+    });
+  }
+
   /** 이 작성자가 그 계정인가 — accountId 우선, 다음 핸들, 다음 (엑스트라) 이름. */
   private authorIsAccount(author: SnsAuthor, acc: SnsAccount): boolean {
     if (author.accountId) return author.accountId === acc.id;
@@ -2606,7 +2833,10 @@ export class PhoneService {
       author.accountId = acc.id;
       changed = true;
     };
+    // 표기 동기화는 그 계정이 사는 서버 안에서만 (v3.1) — 이름/핸들이 같아도
+    // 다른 서버의 동명이인은 남이다.
     for (const p of feed.posts) {
+      if (p.listId !== acc.listId) continue;
       sync(p.author);
       for (const r of p.replies) sync(r.author);
     }
@@ -2646,6 +2876,7 @@ export class PhoneService {
       changed = true;
     };
     for (const p of feed.posts) {
+      if (p.listId !== acc.listId) continue;
       sync(p.author);
       for (const r of p.replies) sync(r.author);
     }
@@ -2719,16 +2950,26 @@ export class PhoneService {
     await store.savePhoneAccounts(accounts);
     if (!opts.deletePosts) return;
 
+    // 글 삭제도 그 계정이 사는 서버 안에서만 (v3.1).
     const feed = await store.getSnsFeed();
+    const mineHere = (p: SnsPost) => p.listId === acc.listId;
     const before = feed.posts.length;
-    feed.posts = feed.posts.filter((p) => !this.authorIsAccount(p.author, acc));
+    feed.posts = feed.posts.filter(
+      (p) => !(mineHere(p) && this.authorIsAccount(p.author, acc))
+    );
     let changed = feed.posts.length !== before;
-    // 최상단 이슈가 지워졌으면 boom 도 함께 정리.
-    if (feed.boom && !feed.posts.some((p) => p.id === feed.boom!.postId)) {
-      delete feed.boom;
-      changed = true;
+    // 최상단 이슈가 지워졌으면 그 서버의 boom 도 함께 정리.
+    if (feed.booms) {
+      const alive = new Set(feed.posts.map((p) => p.id));
+      for (const [listId, b] of Object.entries(feed.booms)) {
+        if (!alive.has(b.postId)) {
+          delete feed.booms[listId];
+          changed = true;
+        }
+      }
     }
     for (const p of feed.posts) {
+      if (!mineHere(p)) continue;
       const kept = p.replies.filter((r) => !this.authorIsAccount(r.author, acc));
       if (kept.length !== p.replies.length) {
         // 지워진 댓글에 달려 있던 대댓글은 최상위로 승격 (고아 parentId 방지).
@@ -2785,8 +3026,31 @@ export class PhoneService {
     await this.saveSnsLists(lists);
   }
 
-  /** 리스트 삭제 (피드 글은 그대로 남는다 — 생성 범위만 바뀐다). */
+  /**
+   * 리스트 삭제 (v3.1) — 리스트는 곧 서버이므로 그 서버의 글·주민도 함께
+   * 사라진다. 남겨두면 어느 화면에서도 볼 수 없는 유령 데이터가 된다.
+   */
   async deleteSnsList(id: string): Promise<void> {
+    const store = this.plugin.store;
+    const feed = await store.getSnsFeed().catch(() => null);
+    if (feed) {
+      const before = feed.posts.length;
+      feed.posts = feed.posts.filter((p) => p.listId !== id);
+      let changed = feed.posts.length !== before;
+      if (feed.booms?.[id]) {
+        delete feed.booms[id];
+        changed = true;
+      }
+      if (changed) await store.saveSnsFeed(feed);
+    }
+    const accounts = await store.getPhoneAccounts().catch(() => null);
+    if (accounts) {
+      const before = accounts.accounts.length;
+      accounts.accounts = accounts.accounts.filter((a) => a.listId !== id);
+      if (accounts.accounts.length !== before) {
+        await store.savePhoneAccounts(accounts);
+      }
+    }
     await this.saveSnsLists(this.listSnsLists().filter((l) => l.id !== id));
   }
 
@@ -2885,6 +3149,12 @@ export class PhoneService {
     charByName: Map<string, SnsAuthor>;
     personaName: string;
     newAccountCap: number;
+    /**
+     * 소속 서버 (v3.1) — 이 배치가 다루는 리스트 id. 매칭도 등록도 이 서버
+     * 주민 안에서만 일어난다(서버가 다르면 같은 인물도 다른 계정). undefined =
+     * 무소속 풀(활성 서버 없이 도는 방송 시청자 등).
+     */
+    listId?: string;
     /** 밴된 계정 id (§V3-4 계정 화면 밴) — 그 리스트 피드에 등장 금지. */
     bannedAccountIds?: Set<string>;
     /** 밴된 시나리오 id — 핸들 참조로 우회 등장하는 것도 막는다. */
@@ -2901,7 +3171,9 @@ export class PhoneService {
     const bannedWorlds = opts.bannedScenarioIds ?? new Set<string>();
     const extraQuota = opts.extraQuota ?? Number.POSITIVE_INFINITY;
     let extraUsed = 0;
-    const byId = new Map(accounts.accounts.map((a) => [a.id, a]));
+    // 서버 분리 (v3.1) — 이 배치가 보는 주민은 같은 서버 소속뿐이다.
+    const mine = accounts.accounts.filter((a) => a.listId === opts.listId);
+    const byId = new Map(mine.map((a) => [a.id, a]));
     const byKey = new Map<string, SnsAccount>();
     const keyOf = (acc: SnsAccount): string => {
       if (acc.handle) return `h:${acc.handle.toLowerCase()}`;
@@ -2909,7 +3181,7 @@ export class PhoneService {
         return `character:${acc.scenarioId}`;
       return `extra:${acc.name.trim().toLowerCase()}`;
     };
-    for (const acc of accounts.accounts) {
+    for (const acc of mine) {
       const k = keyOf(acc);
       if (!byKey.has(k)) byKey.set(k, acc);
       // 핸들 계정도 종류 키로 한 번 더 — 캐릭터가 핸들을 가져도 id 로 찾게.
@@ -2928,7 +3200,9 @@ export class PhoneService {
     let changed = false;
     const now = Date.now();
     const register = (acc: SnsAccount) => {
+      if (opts.listId) acc.listId = opts.listId;
       accounts.accounts.push(acc);
+      mine.push(acc);
       byId.set(acc.id, acc);
       byKey.set(keyOf(acc), acc);
       changed = true;
@@ -3077,7 +3351,7 @@ export class PhoneService {
     };
 
     const decayInactive = () => {
-      for (const acc of accounts.accounts) {
+      for (const acc of mine) {
         if (acc.followers > 20 && now - acc.lastActive > 30 * 86_400_000) {
           acc.followers = Math.floor(acc.followers * 0.98);
           changed = true;
@@ -3107,8 +3381,12 @@ export class PhoneService {
   ): Promise<{ ok: boolean; added: number; reason?: string }> {
     const plugin = this.plugin;
     const phone = plugin.data.phone;
+    // 인물도 서버 소속이다 (v3.1) — 같은 세계라도 서버가 다르면 따로 훑는다.
+    const listId = this.activeSnsListId();
+    if (!listId) return { ok: false, added: 0, reason: "리스트가 없습니다." };
+    const scanKey = `${listId}:${scenarioId}`;
     const accounts = await plugin.store.getPhoneAccounts();
-    if (!opts?.force && accounts.castScans?.[scenarioId]) {
+    if (!opts?.force && accounts.castScans?.[scanKey]) {
       return { ok: true, added: 0, reason: "이미 훑은 세계" };
     }
     if (!plugin.ai.isAvailable()) {
@@ -3154,11 +3432,11 @@ export class PhoneService {
       : "";
     if (!lore && !desc) {
       // 훑을 자료가 없는 세계 — 다시 시도하지 않게 기록만 남긴다.
-      await this.markCastScanned(scenarioId);
+      await this.markCastScanned(scanKey);
       return { ok: true, added: 0 };
     }
     // 이미 등록된 사람은 다시 만들지 않게 명시 — 중복 계정이 등급을 흐린다.
-    const knownOfWorld = accounts.accounts
+    const knownOfWorld = this.snsAccountsOfActiveList(accounts)
       .filter((a) => a.kind !== "persona" && (!a.world || a.world === world))
       .map((a) => `- ${a.handle ?? ""} ${a.name}`.trim())
       .join("\n");
@@ -3192,11 +3470,12 @@ export class PhoneService {
 
     // 저장 — 생성 중 다른 저장이 있었을 수 있으니 다시 읽는다.
     const fresh = await plugin.store.getPhoneAccounts();
+    const freshMine = this.snsAccountsOfActiveList(fresh);
     const takenNames = new Set(
-      fresh.accounts.map((a) => a.name.trim().toLowerCase())
+      freshMine.map((a) => a.name.trim().toLowerCase())
     );
     const takenHandles = new Set(
-      fresh.accounts
+      freshMine
         .map((a) => a.handle?.toLowerCase())
         .filter((h): h is string => !!h)
     );
@@ -3217,6 +3496,7 @@ export class PhoneService {
         world,
         followers: 80 + Math.floor(Math.random() * 300),
         ...(p.persona ? { persona: p.persona } : {}),
+        listId,
         firstSeen: now,
         lastActive: 0,
         postCount: 0,
@@ -3225,15 +3505,15 @@ export class PhoneService {
       if (useHandle) takenHandles.add(useHandle.toLowerCase());
       added++;
     }
-    fresh.castScans = { ...(fresh.castScans ?? {}), [scenarioId]: now };
+    fresh.castScans = { ...(fresh.castScans ?? {}), [scanKey]: now };
     await plugin.store.savePhoneAccounts(fresh);
     return { ok: true, added };
   }
 
   /** 스캔 기록만 남긴다 (훑을 자료가 없던 세계 — 매 배치 재시도 방지). */
-  private async markCastScanned(scenarioId: string): Promise<void> {
+  private async markCastScanned(scanKey: string): Promise<void> {
     const fresh = await this.plugin.store.getPhoneAccounts();
-    fresh.castScans = { ...(fresh.castScans ?? {}), [scenarioId]: Date.now() };
+    fresh.castScans = { ...(fresh.castScans ?? {}), [scanKey]: Date.now() };
     await this.plugin.store.savePhoneAccounts(fresh);
   }
 
@@ -3262,7 +3542,9 @@ export class PhoneService {
       if (plugin.data.phone?.snsCastScan !== false) {
         const scanned = (await store.getPhoneAccounts().catch(() => null))
           ?.castScans;
-        const pending = activeList.scenarioIds.find((id) => !scanned?.[id]);
+        const pending = activeList.scenarioIds.find(
+          (id) => !scanned?.[`${activeList.id}:${id}`]
+        );
         if (pending) {
           await this.scanLorebookCast(pending).catch((err) =>
             console.warn("[GGAI Stella] 로어북 인물 스캔 실패:", err)
@@ -3296,8 +3578,13 @@ export class PhoneService {
         !opts.reactToPostId
           ? this.firstOpenSessionFile()
           : null;
+      // 접속 중인 서버 밖 세션의 방송을 이 네트워크가 켜 줄 수는 없다 (v3.1).
       const tubeStartFile =
-        openForTube && !this.isSessionLive(openForTube) ? openForTube : null;
+        openForTube &&
+        !this.isSessionLive(openForTube) &&
+        (await this.isSessionFileInActiveServer(openForTube))
+          ? openForTube
+          : null;
       // 방송 스트리머는 그 세션의 "장면 속 인물"만 될 수 있다 — 화면에 없는
       // 딴 세계 인물도, 뷰어(페르소나)도 자동 경로의 스트리머가 될 수 없다
       // (사용자 지적). 명부에서 못 찾으면 방송을 시작하지 않는다.
@@ -3328,13 +3615,16 @@ export class PhoneService {
       // (붐업 반영) 상위 N개. 단, 댓글이 열린 글은 딱 둘 — 현 최상단 이슈
       // (feed.boom)와 뷰어의 가장 최근 글. 나머지는 이미 완성된 상태로 동결
       // (컨텍스트 전용, 모델이 댓글을 달 수 없고 파서도 폐기 — 이중 방어).
+      // 발췌는 **이 서버 글만** (v3.1) — 다른 서버 피드는 존재하지 않는다.
       const feed = await store.getSnsFeed();
-      const boomPost = feed.boom
-        ? feed.posts.find((p) => p.id === feed.boom!.postId)
+      const myPosts = this.snsPostsOfActiveList(feed);
+      const boom = this.activeBoom(feed);
+      const boomPost = boom
+        ? myPosts.find((p) => p.id === boom.postId)
         : undefined;
-      const boomTurns = boomPost ? feed.boom!.turns : 0;
+      const boomTurns = boomPost ? boom!.turns : 0;
       // 뷰어의 가장 최근 글 — 최상단 이슈와 겹치면 열린 글은 사실상 1개.
-      const viewerLatest = [...feed.posts]
+      const viewerLatest = [...myPosts]
         .reverse()
         .find((p) => p.author.kind === "persona" && p.author.id === persona.id);
       const viewerPost =
@@ -3344,14 +3634,14 @@ export class PhoneService {
       // 사용자가 방금 반응(게시/답글)한 글 — 이 글은 최상단/뷰어 글이 아니어도
       // 댓글을 받을 수 있게 연다(그래야 내 답글에 되받아 답글이 달린다).
       const reactedPost = opts.reactToPostId
-        ? feed.posts.find((p) => p.id === opts.reactToPostId)
+        ? myPosts.find((p) => p.id === opts.reactToPostId)
         : undefined;
       const commentableIds = new Set(
         [boomPost?.id, viewerPost?.id, reactedPost?.id].filter(
           (v): v is string => !!v
         )
       );
-      const recent = [...feed.posts]
+      const recent = [...myPosts]
         .sort((a, b) => snsEffectiveAt(b) - snsEffectiveAt(a))
         .slice(0, SNS_FEED_EXCERPT);
       // 사용자가 방금 반응한 글은 오래됐어도 발췌에 반드시 넣는다 — 그래야
@@ -3413,7 +3703,8 @@ export class PhoneService {
       const accountsFile = await store.getPhoneAccounts();
       const banned = new Set(activeList.bannedAccountIds ?? []);
       const bannedWorlds = new Set(activeList.bannedScenarioIds ?? []);
-      const visible = accountsFile.accounts.filter(
+      // 명부도 이 서버 주민만 (v3.1).
+      const visible = this.snsAccountsOfActiveList(accountsFile).filter(
         (a) =>
           a.kind !== "persona" &&
           !banned.has(a.id) &&
@@ -3607,6 +3898,7 @@ export class PhoneService {
       // 상한(cap)은 활동 총합(게시글+댓글) 기준. 작성자 해석은 계정 엔진(v2 §6.1)
       // — 핸들 매칭 재등장 우선, 신규 발명은 배치당 상한, 페르소나 사칭 폐기.
       const fresh = await store.getSnsFeed();
+      const freshPosts = this.snsPostsOfActiveList(fresh);
       const now = Date.now();
       let budget = cap;
       let seq = 0;
@@ -3616,6 +3908,7 @@ export class PhoneService {
         charByName,
         personaName,
         newAccountCap,
+        listId: activeList.id,
         bannedAccountIds: banned,
         bannedScenarioIds: bannedWorlds,
         // 배분 강제 (§V3-4) — 이번 배치에 허용되는 엑스트라 활동 수.
@@ -3688,7 +3981,7 @@ export class PhoneService {
         }
         if (budget <= 0) break;
         if (act.kind === "comment" && act.on) {
-          const target = fresh.posts.find((p) => p.id.startsWith(act.on!));
+          const target = freshPosts.find((p) => p.id.startsWith(act.on!));
           if (target) {
             // 댓글은 열린 두 글(최상단 이슈 + 뷰어 최근 글)에만 — 나머지는
             // 이미 완성된 상태로 동결 (이중 방어).
@@ -3727,6 +4020,7 @@ export class PhoneService {
           replies: [],
           issueScale: scale,
           likes: clampLikesToScale(act.likes, scale),
+          listId: activeList.id,
         };
         // 캐릭터 사진 (PH5) — 캡션은 항상 저장(캡션 = 정보), 이미지 모델이 있으면
         // 실제 생성 (배치당 1장 — 비용 상한). 사진 게시 허용이 꺼져 있으면 무시.
@@ -3780,12 +4074,15 @@ export class PhoneService {
       // 엔진은 성장·수명만 책임진다. 성장은 **반응을 받은 배치에만** +1등급
       // (한도 5) — 아무도 반응 안 한 글이 상단에서 저절로 커지지 않는다.
       // 반응 없는 배치가 2번 이어지거나 10턴이 차면 은퇴/교체.
-      const cur = fresh.boom
-        ? fresh.posts.find((p) => p.id === fresh.boom!.postId)
+      // 최상단 이슈는 **서버마다 하나**다 (v3.1) — 다른 서버의 이슈와 자리를
+      // 다투지 않는다.
+      const freshBoom = this.activeBoom(fresh);
+      const cur = freshBoom
+        ? fresh.posts.find((p) => p.id === freshBoom.postId)
         : undefined;
-      const curTurns = cur ? fresh.boom!.turns : 0;
+      const curTurns = cur ? freshBoom!.turns : 0;
       const engaged = boomEngagement > 0;
-      const quietStreak = !cur || engaged ? 0 : (fresh.boom!.quiet ?? 0) + 1;
+      const quietStreak = !cur || engaged ? 0 : (freshBoom!.quiet ?? 0) + 1;
       const expired =
         !!cur &&
         (curTurns >= SNS_BOOM_MAX_TURNS || quietStreak >= SNS_BOOM_QUIET_RETIRE);
@@ -3799,15 +4096,15 @@ export class PhoneService {
           )[0] ?? null;
       }
       if (next) {
-        fresh.boom = { postId: next.id, turns: 1 };
+        this.setActiveBoom(fresh, { postId: next.id, turns: 1 });
         next.bumpedAt = now + seq;
       } else if (cur) {
         if (expired) {
           // 이슈가 저물었는데 교체 후보도 없음 — 최상단이 빈다.
-          delete fresh.boom;
+          this.setActiveBoom(fresh, undefined);
         } else if (engaged) {
           // 반응을 받으며 상단 유지 — 이슈가 커진다 (한도 5).
-          fresh.boom = { postId: cur.id, turns: curTurns + 1 };
+          this.setActiveBoom(fresh, { postId: cur.id, turns: curTurns + 1 });
           const grown = Math.min(5, (cur.issueScale ?? 2) + 1);
           if (grown > (cur.issueScale ?? 2)) {
             cur.issueScale = grown;
@@ -3817,7 +4114,11 @@ export class PhoneService {
         } else {
           // 조용한 배치 — 성장/재부상 없이 자리만 지킨다 (새 글에 밀려
           // 내려가기 시작하고, 한 번 더 조용하면 은퇴).
-          fresh.boom = { postId: cur.id, turns: curTurns + 1, quiet: quietStreak };
+          this.setActiveBoom(fresh, {
+            postId: cur.id,
+            turns: curTurns + 1,
+            quiet: quietStreak,
+          });
         }
       }
       await store.saveSnsFeed(fresh);
@@ -3829,8 +4130,9 @@ export class PhoneService {
         const map = { ...(plugin.data.snsProgress ?? {}) };
         let moved = false;
         for (const [file, nodeId] of consumed) {
-          if (map[file] !== nodeId) {
-            map[file] = nodeId;
+          const key = this.snsProgressKey(file);
+          if (map[key] !== nodeId) {
+            map[key] = nodeId;
             moved = true;
           }
         }
@@ -4280,7 +4582,7 @@ export class PhoneService {
     // 새 진행분 = 북마크 이후. 배경은 그 앞부분만 — 겹쳐 붙이지 않는다.
     const news = newTextSinceMark(
       session,
-      this.plugin.data.snsProgress?.[sessionFile]
+      this.plugin.data.snsProgress?.[this.snsProgressKey(sessionFile)]
     ).trim();
     const background = (
       news ? full.slice(0, Math.max(0, full.length - news.length)) : full
@@ -4449,7 +4751,11 @@ export class PhoneService {
       if (app.id === excludeApp || !app.contributeSharedContext) continue;
       try {
         const text = (
-          await app.contributeSharedContext({ knownBy: opts?.knownBy })
+          // excludeApp = 자기 앱을 뺀다 = 곧 이 다이제스트를 받아갈 앱이다.
+          await app.contributeSharedContext({
+            knownBy: opts?.knownBy,
+            forApp: excludeApp,
+          })
         ).trim();
         if (text) sections.push(text);
       } catch {
@@ -4498,12 +4804,18 @@ export class PhoneService {
     return `[Recent private texts]\n${lines.join("\n")}`;
   }
 
-  /** 공유 허브 — SNS 소스(등급 내림차순 최근 이슈 상위 10, knownBy 면 saw() 필터). */
+  /**
+   * 공유 허브 — SNS 소스(등급 내림차순 최근 이슈 상위 10, knownBy 면 saw() 필터).
+   * 서버 분리 (v3.1): 활성 서버 글만, 그리고 knownBy 인물이 그 서버에 담겨
+   * 있을 때만 — 다른 서버 사람은 이 네트워크의 존재 자체를 모른다.
+   */
   private async sharedDigestSns(knownBy?: string): Promise<string> {
+    if (knownBy && !this.isScenarioInActiveList(knownBy)) return "";
     const feed = await this.plugin.store.getSnsFeed();
+    const mine = this.snsPostsOfActiveList(feed);
     const posts = knownBy
-      ? feed.posts.filter((p) => sawSnsPost(p, knownBy))
-      : feed.posts;
+      ? mine.filter((p) => sawSnsPost(p, knownBy))
+      : mine;
     const top = [...posts]
       .sort(
         (a, b) =>
@@ -4521,11 +4833,22 @@ export class PhoneService {
     return `[Trending on Stella Network]\n${lines.join("\n")}`;
   }
 
-  /** 공유 허브 — 방송 소스(진행 중 방송 + 최근 종료분). */
-  private async sharedDigestTube(): Promise<string> {
+  /**
+   * 공유 허브 — 방송 소스(진행 중 방송 + 최근 종료분).
+   * 네트워크(SNS)로 갈 때는 **접속 중인 서버에 담긴 세션의 방송만** 넘긴다
+   * (v3.1) — 다른 서버 세계의 방송은 이 네트워크 사람들이 볼 수 없다.
+   * 문자로 갈 때는 서버와 무관하다(개인 대화는 네트워크 밖).
+   */
+  private async sharedDigestTube(forApp?: string): Promise<string> {
     const store = this.plugin.store;
     const lines: string[] = [];
-    const liveFile = [...this.tubeLiveSessions][0];
+    const serverOnly = forApp === PHONE_APP_SNS;
+    let liveFile: string | undefined;
+    for (const f of this.tubeLiveSessions) {
+      if (serverOnly && !(await this.isSessionFileInActiveServer(f))) continue;
+      liveFile = f;
+      break;
+    }
     if (liveFile) {
       try {
         const stream = await store.getSessionStream(liveFile);
@@ -4545,10 +4868,13 @@ export class PhoneService {
         /* 방송 소스 실패 — 스킵 */
       }
     }
-    if (this.lastEndedStream && this.lastEndedStream.sessionFile !== liveFile) {
-      lines.push(
-        `- ${this.lastEndedStream.streamer} finished a broadcast recently.`
-      );
+    const ended = this.lastEndedStream;
+    if (
+      ended &&
+      ended.sessionFile !== liveFile &&
+      (!serverOnly || (await this.isSessionFileInActiveServer(ended.sessionFile)))
+    ) {
+      lines.push(`- ${ended.streamer} finished a broadcast recently.`);
     }
     return lines.length > 0 ? `[On Stella Tube]\n${lines.join("\n")}` : "";
   }

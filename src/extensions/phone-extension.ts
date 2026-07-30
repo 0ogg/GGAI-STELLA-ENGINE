@@ -90,12 +90,17 @@ export function registerPhoneExtension(plugin: StellaEnginePlugin): () => void {
       // 등급별 확률로 "봤는지" 판정(결정적 해시 — Math.random 이면 미리보기·생성
       // byte 동일 대전제가 깨진다). 캐릭터(scenarioId) 기준이라 재생성해도 같은
       // 글은 봤거나 못 봤거나 일관된다. ──
-      const feed = snsOn
+      // 서버 분리 (v3.1) — 이 세션의 인물이 **지금 접속 중인 서버**에 담겨 있을
+      // 때만 SNS 가 존재한다. 담겨 있지 않으면 피드는 이 세션에 없는 것이다
+      // (문자·방송은 서버와 무관하게 그대로 동작한다).
+      const inActiveServer =
+        snsOn && (await plugin.phone.isSessionInActiveServer(session));
+      const feed = inActiveServer
         ? await plugin.store.getSnsFeed().catch(() => null)
         : null;
-      if (feed && feed.posts.length > 0) {
+      if (feed) {
         const scenarioId = session.meta.scenarioId;
-        const recentPosts = feed.posts.slice(-20);
+        const recentPosts = plugin.phone.snsPostsOfActiveList(feed).slice(-20);
         const chosen = recentPosts.filter((p) => sawSnsPost(p, scenarioId));
         const picked = chosen.slice(-SNS_INJECT_LIMIT);
         if (picked.length > 0) {
@@ -177,7 +182,10 @@ async function runPhoneTextTriggers(
   const t = phone?.triggers;
   if (t?.keyword !== true) return;
   if (!matchesPhoneKeywords(text, t.customKeywords)) return;
-  await plugin.phone.refresh("keyword");
+  // 서버 분리 (v3.1) — 이 세션이 접속 중인 서버에 없으면 네트워크는 건드리지
+  // 않는다(문자·방송은 그대로 돈다).
+  const sns = await plugin.phone.isSessionFileInActiveServer(sessionFile);
+  await plugin.phone.refresh("keyword", { sns });
 }
 
 function createPhoneSettingsPanel(): SettingsPanel {

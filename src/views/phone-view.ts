@@ -591,6 +591,14 @@ class PhoneController extends Component {
     if (this.screen === "messages") this.renderBody();
   }
 
+  /**
+   * 지금 접속 중인 서버의 글만 (v3.1) — 화면에 보이는 피드는 언제나 이것이다.
+   * 리스트는 서로 단절된 별개 서버라 다른 서버 글은 존재하지 않는 것처럼 다룬다.
+   */
+  private activePosts(): SnsPost[] {
+    return this.feed ? this.plugin.phone.snsPostsOfActiveList(this.feed) : [];
+  }
+
   private async reloadFeed(): Promise<void> {
     const feed = await this.plugin.store.getSnsFeed().catch(() => null);
     this.feed = feed;
@@ -858,7 +866,8 @@ class PhoneController extends Component {
       new ChoiceModal(
         this.app,
         "피드 초기화",
-        "지울 범위를 고르세요. 되돌릴 수 없습니다.",
+        `"${this.plugin.phone.activeSnsList()?.name ?? "이 서버"}" 피드를 지웁니다. ` +
+          `다른 리스트의 피드는 그대로입니다. 범위를 고르세요 — 되돌릴 수 없습니다.`,
         [
           { text: "맘찍 빼고 지우기", value: "keep" },
           { text: "전체 삭제", value: "all", warning: true },
@@ -1900,7 +1909,8 @@ class PhoneController extends Component {
         .onClick(() =>
           this.confirmThen(
             "리스트 삭제",
-            `"${list.name}" 리스트를 삭제합니다. 이미 올라온 게시글은 그대로 남습니다.`,
+            `"${list.name}" 리스트를 삭제합니다. 이 리스트는 하나의 서버라서, ` +
+              `여기 올라온 게시글과 여기 살던 계정도 함께 사라집니다.`,
             "삭제",
             () => this.plugin.phone.deleteSnsList(list.id)
           )
@@ -2008,12 +2018,15 @@ class PhoneController extends Component {
     // 비동기 로드 중 화면이 바뀌었으면 그리지 않는다.
     if (this.snsManageOpen !== "accounts" || !listEl.isConnected) return;
     listEl.empty();
-    const rows = (accounts?.accounts ?? [])
+    // 주민도 서버 소속이다 (v3.1) — 지금 접속 중인 서버 사람만 보여준다.
+    const rows = (
+      accounts ? this.plugin.phone.snsAccountsOfActiveList(accounts) : []
+    )
       .filter((a) => a.kind !== "persona")
       .sort((x, y) => y.lastActive - x.lastActive);
     if (rows.length === 0) {
       const empty = listEl.createDiv({ cls: "ggai-phone-empty" });
-      empty.createDiv({ text: "아직 만들어진 계정이 없습니다." });
+      empty.createDiv({ text: "이 서버에는 아직 계정이 없습니다." });
       empty.createDiv({
         cls: "ggai-phone-empty-sub",
         text: "피드가 갱신되면 글을 쓴 인물들이 여기 계정으로 쌓입니다.",
@@ -2349,7 +2362,7 @@ class PhoneController extends Component {
       closeBtn.addEventListener("click", () => this.setSnsAccountFilter(null));
 
       const key = this.snsAccountFilter.key;
-      const posts = [...(this.feed?.posts ?? [])]
+      const posts = this.activePosts()
         .filter((p) => snsAuthorKey(p.author) === key)
         .sort((a, b) => b.createdAt - a.createdAt);
       if (posts.length === 0) {
@@ -2363,16 +2376,15 @@ class PhoneController extends Component {
       return;
     }
 
-    // ── 리스트(v3) — 팔로우한 세계가 없으면 피드는 조용하다. 첫 화면은
+    // ── 리스트(v3) — 리스트가 하나도 없으면 접속할 서버가 없다. 첫 화면은
     //    "아직 팔로우한 계정이 없습니다" + 팔로우 관리뿐. ──
     const lists = this.plugin.phone.listSnsLists();
-    if (lists.length === 0 && (this.feed?.posts.length ?? 0) === 0) {
+    if (lists.length === 0) {
       // 아직 아무것도 없는 첫 화면 — 만드는 두 경로만 크게 보여준다.
       this.renderSnsFollowEmpty();
       return;
     }
-    // 리스트가 없어도 칩 바(= 팔로우 진입점)는 항상 피드 위에 둔다. 이미 쌓인
-    // 글이 있는 볼트에서 팔로우 버튼이 안내 박스 안에만 있으면 사실상 숨는다.
+    // 칩 바 = 서버 전환 + 팔로우 진입점. 항상 피드 위에 둔다.
     this.renderSnsListBar(lists);
 
     // ── 게시 컴포저 — 아바타 + 글 + 사진 첨부 (인스타처럼). ──
@@ -2463,13 +2475,13 @@ class PhoneController extends Component {
 
     // 표시 순서 = max(작성, 붐업) — 다시 화제가 된 글이 상위로 재부상 (v2).
     const effectiveAt = (p: SnsPost) => Math.max(p.createdAt, p.bumpedAt ?? 0);
-    const posts = [...(this.feed?.posts ?? [])].sort(
+    const posts = this.activePosts().sort(
       (a, b) => effectiveAt(b) - effectiveAt(a)
     );
     if (posts.length === 0) {
       this.bodyEl.createDiv({
         cls: "ggai-phone-empty",
-        text: "아직 피드가 조용합니다. 첫 글을 올리거나 갱신을 기다려 보세요.",
+        text: "이 서버는 아직 조용합니다. 첫 글을 올리거나 갱신을 기다려 보세요.",
       });
       return;
     }
@@ -2893,7 +2905,8 @@ class PhoneController extends Component {
     const isViewer = (a: SnsAuthor) =>
       a.kind === "persona" && a.id === viewerId;
     const out = new Map<string, SnsNotification>();
-    for (const post of this.feed.posts) {
+    // 알림도 접속 중인 서버 것만 (v3.1).
+    for (const post of this.activePosts()) {
       const myReplyIds = new Set(
         post.replies.filter((r) => isViewer(r.author)).map((r) => r.id)
       );
@@ -3022,7 +3035,7 @@ class PhoneController extends Component {
 
     const viewerId = this.loginProfile?.id;
     const posts = viewerId
-      ? [...(this.feed?.posts ?? [])]
+      ? this.activePosts()
           .filter((p) => (p.likedBy ?? []).includes(viewerId))
           .sort((a, b) => b.createdAt - a.createdAt)
       : [];
@@ -3346,7 +3359,7 @@ class PhoneController extends Component {
   /** 피드에서 아직 번역이 없는 글·댓글 id (빈 글 제외). */
   private pendingFeedTranslationIds(): string[] {
     const out: string[] = [];
-    for (const p of this.feed?.posts ?? []) {
+    for (const p of this.activePosts()) {
       if (!p.translation && p.text.trim() !== "") out.push(p.id);
       for (const r of p.replies) {
         if (!r.translation && r.text.trim() !== "") out.push(r.id);

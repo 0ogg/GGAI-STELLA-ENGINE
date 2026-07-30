@@ -523,6 +523,13 @@ export default class StellaEnginePlugin extends Plugin {
       );
       void this.ensureDefaultPromptPreset();
       void this.ensureDefaultIllustrationRegex();
+      // 스텔라 네트워크 서버 분리 (v3.1) — 소속 도장이 없던 옛 글·계정을 현재
+      // 서버로 1회 이관한다(안 하면 쌓아둔 피드가 어느 서버에도 안 보인다).
+      void this.phone
+        .migrateSnsServers()
+        .catch((err) =>
+          console.warn("[GGAI Stella] 네트워크 서버 이관 실패:", err)
+        );
       this.updateStellaPanelActiveClass(this.app.workspace.activeLeaf);
       if (isFreshInstall) {
         void this.savePluginData({ installOnboardingShown: true });
@@ -591,10 +598,17 @@ export default class StellaEnginePlugin extends Plugin {
           delete map[file];
           patch.proactiveSchedule = map;
         }
-        if (this.data.snsProgress?.[file] !== undefined) {
+        // SNS 북마크 키는 `<리스트id>|<세션파일>` (서버별) — 옛 키(파일만)도 함께 정리.
+        if (this.data.snsProgress) {
           const map = { ...this.data.snsProgress };
-          delete map[file];
-          patch.snsProgress = map;
+          let removed = false;
+          for (const key of Object.keys(map)) {
+            if (key === file || key.endsWith(`|${file}`)) {
+              delete map[key];
+              removed = true;
+            }
+          }
+          if (removed) patch.snsProgress = map;
         }
         if (Object.keys(patch).length > 0) void this.savePluginData(patch);
       })
@@ -623,12 +637,22 @@ export default class StellaEnginePlugin extends Plugin {
           map[newFile] = prevSchedule;
           patch.proactiveSchedule = map;
         }
-        const prevSnsProgress = this.data.snsProgress?.[oldFile];
-        if (prevSnsProgress !== undefined) {
+        // SNS 북마크는 서버마다 하나씩 있으므로 해당 세션의 키를 전부 옮긴다.
+        if (this.data.snsProgress) {
           const map = { ...this.data.snsProgress };
-          delete map[oldFile];
-          map[newFile] = prevSnsProgress;
-          patch.snsProgress = map;
+          let moved = false;
+          for (const [key, nodeId] of Object.entries(map)) {
+            if (key === oldFile) {
+              delete map[key];
+              map[newFile] = nodeId;
+              moved = true;
+            } else if (key.endsWith(`|${oldFile}`)) {
+              delete map[key];
+              map[`${key.slice(0, -oldFile.length)}${newFile}`] = nodeId;
+              moved = true;
+            }
+          }
+          if (moved) patch.snsProgress = map;
         }
         if (Object.keys(patch).length > 0) void this.savePluginData(patch);
       })

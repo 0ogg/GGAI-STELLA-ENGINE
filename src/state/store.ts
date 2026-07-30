@@ -94,6 +94,7 @@ import {
   type PhoneGalleryFile,
   type PhoneMessagesFile,
   type SnsFeedFile,
+  type SnsPost,
 } from "../types/phone";
 import type { StellaPreset } from "../types/preset";
 import type { StellaPromptPreset } from "../types/prompt";
@@ -1051,10 +1052,24 @@ export class StellaStore extends Events {
   }
 
   async saveSnsFeed(feed: SnsFeedFile): Promise<void> {
-    // 피드 비대 방지 — 최신 게시글만 유지.
+    // 피드 비대 방지 — **서버(리스트)마다** 최신 게시글만 유지한다. 볼트 전체
+    // 200개로 자르면 활발한 서버가 조용한 서버의 글을 밀어내 버린다.
     if (feed.posts.length > 200) {
-      feed.posts.sort((a, b) => a.createdAt - b.createdAt);
-      feed.posts = feed.posts.slice(-200);
+      const byList = new Map<string, SnsPost[]>();
+      for (const p of feed.posts) {
+        const key = p.listId ?? "";
+        const arr = byList.get(key);
+        if (arr) arr.push(p);
+        else byList.set(key, [p]);
+      }
+      const kept = new Set<string>();
+      for (const posts of byList.values()) {
+        posts.sort((a, b) => a.createdAt - b.createdAt);
+        for (const p of posts.slice(-200)) kept.add(p.id);
+      }
+      if (kept.size !== feed.posts.length) {
+        feed.posts = feed.posts.filter((p) => kept.has(p.id));
+      }
     }
     this.snsFeedCache = feed;
     await this.ensureFolderPath(`${BASE_FOLDER}/PHONE`);

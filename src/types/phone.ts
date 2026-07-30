@@ -191,23 +191,42 @@ export interface SnsPost {
   issueScale?: number;
   /**
    * 붐업 (v2) — 최상단 이슈로 재부상한(또는 유지 갱신된) 시각.
-   * 현재 최상단 이슈는 `SnsFeedFile.boom` 이 가리키는 1개뿐이고, 이 시각은
+   * 현재 최상단 이슈는 서버마다 1개(`SnsFeedFile.booms[listId]`)이고, 이 시각은
    * 표시 순서(max(createdAt, bumpedAt))와 "↻ 다시 화제" 배지에 쓰인다.
    */
   bumpedAt?: number;
+  /**
+   * 소속 서버 (v3.1) — 이 글이 태어난 스텔라 네트워크 리스트 id.
+   * 리스트는 서로 단절된 별개 서버라, 피드 표시·세션 주입·생성 재료가 전부
+   * 이 도장으로 갈린다. undefined = 아직 이관되지 않은 옛 글(어디에도 안 보임).
+   */
+  listId?: string;
 }
 
-/** 볼트 공용 SNS 피드 — `GGAI/PHONE/sns.json`. 모든 세계관이 네트워크를 공유한다. */
+/** 최상단 이슈 상태 (v2 §6.4) — 서버(리스트)마다 하나씩. */
+export interface SnsBoom {
+  postId: string;
+  turns: number;
+  quiet?: number;
+}
+
+/**
+ * SNS 피드 파일 — `GGAI/PHONE/sns.json`. 한 파일에 모든 서버의 글이 들어 있고,
+ * 각 글의 `listId` 로 서버가 갈린다(파일을 서버마다 쪼개지 않는 이유 = 전환·
+ * 이름변경 비용 회피).
+ */
 export interface SnsFeedFile {
   version: 1;
   posts: SnsPost[];
   /**
-   * 현재 최상단 이슈 (v2 §6.4) — 피드에서 유일하게 "살아 있는" 붐업 글.
-   * turns = 최상단 유지 배치 수 (10턴 도달 시 강제 교체). issueScale 성장은
-   * 반응(댓글)을 받은 배치에만 (한도 5). quiet = 반응 없이 지나간 연속 배치 수
-   * — 2 이상이면 이슈가 식어 은퇴. undefined = 아직 최상단 이슈 없음.
+   * 서버별 현재 최상단 이슈 (v2 §6.4) — key = 리스트 id. 서버마다 살아 있는
+   * 붐업 글은 1개다. turns = 최상단 유지 배치 수 (10턴 도달 시 강제 교체).
+   * issueScale 성장은 반응(댓글)을 받은 배치에만 (한도 5). quiet = 반응 없이
+   * 지나간 연속 배치 수 — 2 이상이면 이슈가 식어 은퇴.
    */
-  boom?: { postId: string; turns: number; quiet?: number };
+  booms?: Record<string, SnsBoom>;
+  /** @deprecated 서버 분리 전의 단일 최상단 이슈 — 이관에서만 읽는다. */
+  boom?: SnsBoom;
 }
 
 export function createEmptySnsFeed(): SnsFeedFile {
@@ -239,19 +258,29 @@ function normalizeSnsAuthor(raw: unknown): SnsAuthor | null {
 export function normalizeSnsFeed(raw: unknown): SnsFeedFile {
   const out = createEmptySnsFeed();
   if (!raw || typeof raw !== "object") return out;
-  const rawBoom = (raw as { boom?: unknown }).boom;
-  if (rawBoom && typeof rawBoom === "object") {
+  const readBoom = (rawBoom: unknown): SnsBoom | null => {
+    if (!rawBoom || typeof rawBoom !== "object") return null;
     const b = rawBoom as { postId?: unknown; turns?: unknown; quiet?: unknown };
-    if (typeof b.postId === "string" && b.postId) {
-      out.boom = {
-        postId: b.postId,
-        turns:
-          typeof b.turns === "number" && b.turns >= 1 ? Math.round(b.turns) : 1,
-        ...(typeof b.quiet === "number" && b.quiet >= 1
-          ? { quiet: Math.round(b.quiet) }
-          : {}),
-      };
+    if (typeof b.postId !== "string" || !b.postId) return null;
+    return {
+      postId: b.postId,
+      turns:
+        typeof b.turns === "number" && b.turns >= 1 ? Math.round(b.turns) : 1,
+      ...(typeof b.quiet === "number" && b.quiet >= 1
+        ? { quiet: Math.round(b.quiet) }
+        : {}),
+    };
+  };
+  const legacyBoom = readBoom((raw as { boom?: unknown }).boom);
+  if (legacyBoom) out.boom = legacyBoom;
+  const rawBooms = (raw as { booms?: unknown }).booms;
+  if (rawBooms && typeof rawBooms === "object") {
+    const booms: Record<string, SnsBoom> = {};
+    for (const [listId, v] of Object.entries(rawBooms as Record<string, unknown>)) {
+      const b = readBoom(v);
+      if (listId && b) booms[listId] = b;
     }
+    if (Object.keys(booms).length > 0) out.booms = booms;
   }
   const posts = (raw as { posts?: unknown }).posts;
   if (!Array.isArray(posts)) return out;
@@ -318,6 +347,9 @@ export function normalizeSnsFeed(raw: unknown): SnsFeedFile {
         ? { issueScale: clampIssueScale(post.issueScale) }
         : {}),
       ...(typeof post.bumpedAt === "number" ? { bumpedAt: post.bumpedAt } : {}),
+      ...(typeof post.listId === "string" && post.listId
+        ? { listId: post.listId }
+        : {}),
       ...(typeof post.likes === "number" ? { likes: post.likes } : {}),
       ...(Array.isArray(post.likedBy)
         ? { likedBy: post.likedBy.filter((v): v is string => typeof v === "string") }
@@ -325,8 +357,13 @@ export function normalizeSnsFeed(raw: unknown): SnsFeedFile {
     });
   }
   // 최상단 이슈 글이 삭제/정리로 사라졌으면 해제 (댕글링 방지).
-  if (out.boom && !out.posts.some((p) => p.id === out.boom!.postId)) {
-    delete out.boom;
+  const alive = new Set(out.posts.map((p) => p.id));
+  if (out.boom && !alive.has(out.boom.postId)) delete out.boom;
+  if (out.booms) {
+    for (const [listId, b] of Object.entries(out.booms)) {
+      if (!alive.has(b.postId)) delete out.booms[listId];
+    }
+    if (Object.keys(out.booms).length === 0) delete out.booms;
   }
   return out;
 }
@@ -374,6 +411,11 @@ export interface SnsAccount {
    * 미지정이면 `accountTier` 가 kind 로 파생한다(구버전 파일 호환).
    */
   tier?: 1 | 2 | 3;
+  /**
+   * 소속 서버 (v3.1) — 이 주민이 사는 스텔라 네트워크 리스트 id. 서버가 다르면
+   * 같은 인물이라도 다른 계정이다(팔로워도 따로 논다). undefined = 미이관.
+   */
+  listId?: string;
   firstSeen: number;
   lastActive: number;
   postCount: number;
@@ -467,6 +509,9 @@ export function normalizePhoneAccounts(raw: unknown): PhoneAccountsFile {
         : {}),
       ...(acc.tier === 1 || acc.tier === 2 || acc.tier === 3
         ? { tier: acc.tier }
+        : {}),
+      ...(typeof acc.listId === "string" && acc.listId
+        ? { listId: acc.listId }
         : {}),
       firstSeen: typeof acc.firstSeen === "number" ? acc.firstSeen : 0,
       lastActive: typeof acc.lastActive === "number" ? acc.lastActive : 0,
@@ -629,8 +674,17 @@ export interface PhonePluginData {
    * 자동 생성이 돌지 않는다**(팔로우한 계정이 없는 상태 = 조용한 피드).
    */
   snsLists?: SnsList[];
-  /** 현재 보고 있는 = 생성 대상 리스트 id. 못 찾으면 첫 리스트. */
+  /**
+   * 현재 접속 중인 서버 = 보기·생성·세션 주입이 모두 기준으로 삼는 리스트 id
+   * (v3.1 — 한 번에 하나만 켜진다). 못 찾으면 첫 리스트.
+   */
   activeSnsListId?: string;
+  /**
+   * 서버 분리 이관 완료 표시 (v3.1) — 옛 글·계정에 소속 도장을 찍는 1회 작업.
+   * 이관 전 데이터는 어느 서버에도 안 보이므로 이 플래그가 켜지기 전엔 폰이
+   * 비어 보일 수 있다(이관은 폰을 열기 전 로드 시점에 끝난다).
+   */
+  snsServersMigrated?: boolean;
   /** 갱신 1회당 최소 새 게시글 수 (v2, 기본 2 — 미달 시 1회 재시도). */
   snsMinNewPosts?: number;
   /** 배치당 신규 계정 발명 상한 (v2, 기본 3 — 넘치는 활동은 폐기된다). */
