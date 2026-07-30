@@ -7623,6 +7623,36 @@ body.is-mobile .ggai-chat-inputbar {
   font-variant-numeric: tabular-nums;
 }
 
+/* ── 카드 화면 표시 (게임형 카드) — 말풍선 안에 그려지는 카드 HTML ──── */
+
+/* 카드 HTML 사이에 낀 평범한 글 — 기존 말풍선 문단과 같은 규칙을 따른다. */
+.ggai-card-text {
+  display: contents;
+}
+/* 카드가 넣은 그림 — 말풍선 폭을 넘지 않게. */
+.ggai-card-img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  margin: 6px 0;
+}
+/* 카드가 짠 표/구획이 말풍선을 밀어내지 않게 하는 최소 안전장치. */
+.ggai-chat-bubble table {
+  max-width: 100%;
+  border-collapse: collapse;
+}
+.ggai-chat-bubble th,
+.ggai-chat-bubble td {
+  border: 1px solid var(--background-modifier-border);
+  padding: 2px 6px;
+}
+.ggai-chat-bubble pre {
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+
 /* ── 변수 (게임형 카드) — 확장 탭 패널 ──────────────────────────────── */
 
 .ggai-var-row {

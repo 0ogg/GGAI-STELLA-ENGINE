@@ -53,6 +53,12 @@ import {
   toggleIllustrationFavorite,
 } from "../util/illustrations";
 import { formatChatText } from "../util/chat-format";
+import {
+  hasCardImageTag,
+  hasHtmlMarkup,
+  renderSafeHtml,
+  replaceCardImageTags,
+} from "../util/safe-html";
 import { applyMacros, type MacroContext } from "../util/macros";
 import { REGEX_PLACEMENT, type RegexScript } from "../types/regex";
 import { getRegexedString } from "../util/regex-engine";
@@ -1883,9 +1889,45 @@ export class ChatSessionView extends ItemView {
   /**
    * 말풍선 표시본 채우기 — 표기(기울임/대사/문단)를 반영한 HTML.
    * 편집(focus) 시에는 raw 로 스왑되므로 diff/커밋에는 영향이 없다.
+   *
+   * 카드 표시 확장이 켜져 있고 실제 태그가 섞여 있으면 화이트리스트로 걸러 그린다
+   * (게임형 카드 지원 스펙.md U4) — 상태창·표·게이지가 글자가 아니라 화면이 된다.
+   * 태그가 없으면 예전 경로 그대로다(`3 < 5` 같은 글을 마크업으로 오인하지 않게).
    */
   private setBubbleDisplay(bubble: HTMLElement, text: string): void {
+    if (
+      this.plugin.isExtensionEnabled("stella:card-display") &&
+      (hasHtmlMarkup(text) || hasCardImageTag(text))
+    ) {
+      renderSafeHtml(
+        bubble,
+        replaceCardImageTags(text, (name) => this.resolveCardImageSrc(name)),
+        formatChatText
+      );
+      return;
+    }
     bubble.innerHTML = formatChatText(text);
+  }
+
+  /**
+   * 카드 이미지 태그(`{{img::파일명}}`)의 실제 경로 — 시나리오 폴더의 assets/ 를
+   * 먼저 보고, 없으면 세션 폴더 assets/. 카드가 들고 온 그림(CCv3 assets)이
+   * 시나리오 폴더에 풀리므로 그쪽이 우선이다. 못 찾으면 null (태그는 지워진다).
+   */
+  private resolveCardImageSrc(name: string): string | null {
+    const clean = name.replace(/^[/\\]+/, "").trim();
+    if (!clean || clean.includes("..")) return null; // 폴더 밖으로 나가는 경로 금지
+    const folders: string[] = [];
+    const scenarioFile = scenarioFileOfSessionFile(this.sessionFile ?? "");
+    if (scenarioFile) folders.push(scenarioFile.slice(0, -"/scenario.json".length));
+    if (this.sessionFile) folders.push(this.sessionFile.slice(0, -"/session.json".length));
+    for (const folder of folders) {
+      for (const path of [`${folder}/assets/${clean}`, `${folder}/${clean}`]) {
+        const file = this.app.vault.getAbstractFileByPath(path);
+        if (file instanceof TFile) return this.app.vault.getResourcePath(file);
+      }
+    }
+    return null;
   }
 
   /** 표시 텍스트 — 메시지 앞 구분자만 벗긴다 (원문 그대로, trim 은 안 함). */

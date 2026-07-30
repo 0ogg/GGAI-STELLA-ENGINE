@@ -12,6 +12,7 @@ const testNames = [
   "translate-key-scope",
   "variables",
   "lorebook-template",
+  "safe-html",
 ];
 const testEntries = testNames.map((n) => path.join(root, "tests", `${n}.test.ts`));
 
