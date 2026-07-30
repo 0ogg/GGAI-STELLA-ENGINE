@@ -15,6 +15,7 @@ import {
 } from "../../util/session-tree";
 import {
   getActiveTranslation,
+  lastParagraphSource,
   tokenizeParagraphs,
 } from "../../util/translate-paragraphs";
 import type { SessionTranslations } from "../../types/media";
@@ -48,6 +49,8 @@ export class BranchSection {
   private mapSortMode: MapSortMode = "active";
   private showTranslation = false;
   private translations: SessionTranslations | null = null;
+  /** 노드별 "앞 문단" 캐시 — 세션을 다시 읽을 때만 비운다. */
+  private prevTailCache = new Map<string, string>();
   /** 맵 모드 최초 렌더에서 현재(마지막 플레이) 노드를 화면 중앙으로 스크롤. */
   private autoCenterCurrent = false;
   private pendingAutoCenter = false;
@@ -105,6 +108,7 @@ export class BranchSection {
   }
 
   private async loadSession(): Promise<void> {
+    this.prevTailCache.clear();
     this.session = this.activeSessionFile
       ? await this.plugin.store.getSession(this.activeSessionFile)
       : null;
@@ -229,7 +233,25 @@ export class BranchSection {
   private nodeDisplaySource(node: SessionNode): string {
     const raw = nodeOwnText(node);
     if (!this.showTranslation || !this.translations) return raw;
-    return translateText(raw, this.translations);
+    return translateText(raw, this.translations, this.prevTailOf(node));
+  }
+
+  /**
+   * 노드 본문 바로 앞 문단 — 문단 키(내용 + 앞 문단) 계산의 씨앗.
+   * 부모까지의 본문 꼬리를 쓴다: 이어쓰기/생성(append) 노드는 정확하고, 중간 구간
+   * 교체(replace) 노드는 어긋날 수 있다 — 그 경우 번역을 못 찾아 원문이 보일 뿐이다
+   * (미리보기 표시 전용이라 데이터에는 영향 없음). 노드마다 한 번만 계산해 캐시한다.
+   */
+  private prevTailOf(node: SessionNode): string {
+    const cached = this.prevTailCache.get(node.id);
+    if (cached !== undefined) return cached;
+    const session = this.session;
+    const tail =
+      session && node.parent
+        ? lastParagraphSource(spansToText(buildSpans(session, node.parent)))
+        : "";
+    this.prevTailCache.set(node.id, tail);
+    return tail;
   }
 
   private renderBody(): void {
@@ -1112,9 +1134,13 @@ function previewFromText(text: string, max: number): string {
 }
 
 /** \uBB38\uB2E8\uBCC4 active \uBC88\uC5ED\uC73C\uB85C \uBCF8\uBB38\uC744 \uC7AC\uAD6C\uC131 (\uAD6C\uBD84\uC790/\uBBF8\uBC88\uC5ED \uBB38\uB2E8\uC740 \uC6D0\uBB38 \uC720\uC9C0). */
-function translateText(text: string, translations: SessionTranslations): string {
+function translateText(
+  text: string,
+  translations: SessionTranslations,
+  prevSource: string
+): string {
   if (!text) return text;
-  return tokenizeParagraphs(text)
+  return tokenizeParagraphs(text, prevSource)
     .map((t) =>
       t.kind === "separator"
         ? t.text

@@ -89,7 +89,9 @@ import { composeSummaryContextForPath } from "../util/summarize-session";
 import {
   collectUntranslatedParagraphs,
   getActiveTranslation,
+  getPendingReflection,
   hasTranslation,
+  lastParagraphSource,
   clearPendingReflections,
   recordTranslationVariant,
   redoLastTranslation,
@@ -326,6 +328,12 @@ export class SessionView extends ItemView {
   private proPendingEl: HTMLElement | null = null;
   /** 이어쓰기 영역 텍스트 (재렌더 생존). */
   private proPendingDraft = "";
+  /**
+   * 지금 화면에 그려져 있는 양방향 상태 — 설정 패널에서 '양방향 번역'을 켜고 끄면
+   * kinds=["settings"] 이벤트만 오므로, 이 값과 달라진 순간에 번역 보기를 다시 그려
+   * 초고 입력란을 즉시 띄우거나 없앤다 (설정 저장 → 화면 반영 사이의 공백 제거).
+   */
+  private proRenderedBidirectional = false;
   private proConvertTimer: number | null = null;
   /** 진행 중 변환 — flush 가 완료를 기다렸다가 잔여분을 이어 변환한다. */
   private proConvertPromise: Promise<boolean> | null = null;
@@ -813,6 +821,7 @@ export class SessionView extends ItemView {
       this.translations = null;
       this.translationViewActive = false;
       this.proPendingDraft = "";
+      this.proRenderedBidirectional = false;
       return;
     }
     // 재실행/세션 전환 시 마지막 읽던 노드 위치 복원 준비 (render 끝에서 적용).
@@ -843,6 +852,7 @@ export class SessionView extends ItemView {
     this.proPendingDraft = this.bidirectionalWriting()
       ? this.translations.proDraft ?? ""
       : "";
+    this.proRenderedBidirectional = this.bidirectionalWriting();
     this.translationViewActive = this.translations.displayMode === "translation";
     this.outputMode = this.session?.meta.translation?.output ?? "replace";
     this.splitRatio = this.plugin.data.translationSplitRatio ?? 0.5;
@@ -1025,16 +1035,45 @@ export class SessionView extends ItemView {
   private applySettingsOnlyChange(): void {
     if (!this.session) return;
     const nextMode = this.session.meta.translation?.output ?? "replace";
+    // '양방향 번역' 토글 — 번역 보기 끝의 초고 입력란이 생기거나 사라진다.
+    const bidiChanged = this.syncBidirectionalDraft();
     if (nextMode !== this.outputMode) {
       // 출력 방식 전환 시 보던 노드를 새 레이아웃에 이어준다.
       const anchor = this.currentAnchor();
       this.outputMode = nextMode;
-      this.applyDisplayMode();
+      this.applyDisplayMode(); // 번역 보기 중이면 블록 재구성까지 포함
       if (anchor) this.restoreToAnchor(anchor);
+    } else if (
+      bidiChanged &&
+      (this.translationViewActive || this.outputMode === "split-h")
+    ) {
+      this.renderTranslationBlocks();
     }
     this.updateToolbar();
     // 삽화 사용/출력 위치 등 설정 변경 반영.
     this.renderInlineIllustrations();
+  }
+
+  /**
+   * 양방향 상태가 화면과 달라졌으면 초고(draft)를 맞추고 true 를 돌려준다.
+   * 켤 때는 대기함에 남아 있던 초고를 되살리고, 끌 때는 화면에서 사라지기 전에
+   * 대기함에 남긴다 — 껐다 켜도 쓰던 글이 그대로 이어진다.
+   */
+  private syncBidirectionalDraft(): boolean {
+    const next = this.bidirectionalWriting();
+    if (next === this.proRenderedBidirectional) return false;
+    this.proRenderedBidirectional = next;
+    if (next) {
+      this.proPendingDraft = this.translations?.proDraft ?? "";
+      return true;
+    }
+    const draft = this.proPendingEl?.textContent ?? this.proPendingDraft;
+    if (this.translations && draft !== "" && this.translations.proDraft !== draft) {
+      this.translations.proDraft = draft;
+      void this.saveTranslationsSuppressed();
+    }
+    this.proPendingDraft = "";
+    return true;
   }
 
   /** 외부(다른 view/편집기)에서 media.json 이 바뀌면 번역 보기 상태/블록을 갱신. */
@@ -1076,6 +1115,7 @@ export class SessionView extends ItemView {
     this.translations = null;
     this.translationViewActive = false;
     this.proPendingDraft = "";
+    this.proRenderedBidirectional = false;
     this.translating = false;
     this.illustrations = null;
     this.illustrating = false;
@@ -3807,6 +3847,7 @@ export class SessionView extends ItemView {
     // 내용이 있던 문단이 빈 값으로 바뀌는 건 정규화 아티팩트로 보고 저장하지 않는다.
     if (text.trim() === "" && block.baseline.trim() !== "") return false;
     recordTranslationVariant(this.translations, {
+      hash: block.hash,
       source: block.source,
       text,
       kind: "user-edit",
@@ -3814,7 +3855,7 @@ export class SessionView extends ItemView {
     // 집필 — 수정을 반영 대기함에도 실체로 기록한다. 재렌더/재시작/변환 실패
     // 어디에서도 "영어판 반영 대상"이라는 사실이 사라지지 않는다.
     if (this.bidirectionalWriting()) {
-      upsertPendingReflection(this.translations, block.source, text);
+      upsertPendingReflection(this.translations, block.hash, block.source, text);
     }
     block.baseline = text;
     return true;
@@ -3897,10 +3938,14 @@ export class SessionView extends ItemView {
    * 새 영어 해시의 active 는 authored 가 되므로 자동으로 대기에서 벗어난다.
    */
   private isProPendingBlock(block: { hash: string }): boolean {
-    const queued = this.translations?.pendingReflections?.[block.hash];
+    const queued = getPendingReflection(
+      this.translations?.pendingReflections,
+      block.hash
+    );
     if (queued && queued.ko.trim() !== "") return true;
-    const entry = this.translations?.paragraphs[block.hash];
-    const active = entry ? entry.variants[entry.activeVariantId] : undefined;
+    const active = this.translations
+      ? getActiveTranslation(this.translations, block.hash)
+      : null;
     return active?.kind === "user-edit" && active.text.trim() !== "";
   }
 
@@ -3937,9 +3982,11 @@ export class SessionView extends ItemView {
       if (!this.isProPendingBlock(block)) continue;
       if (!force && this.selectionStartWithin(block.el)) continue;
       // 한국어 원문은 대기함이 1순위 (파일 실체), 폴백은 active user-edit variant.
-      const queued = this.translations!.pendingReflections?.[block.hash];
-      const entry = this.translations!.paragraphs[block.hash];
-      const active = entry ? entry.variants[entry.activeVariantId] : undefined;
+      const queued = getPendingReflection(
+        this.translations!.pendingReflections,
+        block.hash
+      );
+      const active = getActiveTranslation(this.translations!, block.hash);
       const ko = queued?.ko ?? active?.text ?? "";
       if (ko.trim() === "") continue;
       ops.push({
@@ -4249,12 +4296,13 @@ export class SessionView extends ItemView {
         fullyCovered.push(b); // 남는 게 없으면 통째 삭제로 승격
       } else {
         recordTranslationVariant(this.translations, {
+          hash: b.hash,
           source: b.source,
           text: remain,
           kind: "user-edit",
         });
         // 부분 삭제로 생긴 수정본도 대기함에 실체로 — 반영 전 유실 방지.
-        upsertPendingReflection(this.translations, b.source, remain);
+        upsertPendingReflection(this.translations, b.hash, b.source, remain);
         b.baseline = remain;
         translationsChanged = true;
       }
@@ -5409,7 +5457,11 @@ export class SessionView extends ItemView {
 
     const bySource = new Map(preview.items.map((it) => [it.hash, it.translation]));
     const slice = this.baselineText.slice(from, to);
-    const previewText = tokenizeParagraphs(slice)
+    // 구간만 떼어 토큰화하면 첫 문단의 키가 어긋난다 — 앞 문단을 씨앗으로 넘긴다.
+    const previewText = tokenizeParagraphs(
+      slice,
+      lastParagraphSource(this.baselineText.slice(0, from))
+    )
       .map((t) => (t.kind === "separator" ? t.text : bySource.get(t.hash) ?? t.source))
       .join("");
 

@@ -22,7 +22,7 @@ export type TranslationVariantKind =
 export interface TranslationVariant {
   id: string;
   kind: TranslationVariantKind;
-  /** 소속 문단 키 (원문 내용 해시) — 엔트리 키와 동일. */
+  /** 소속 문단 키 (`paragraphKey` = 내용 + 앞 문단) — 엔트리 키와 동일. */
   sourceHash: string;
   /** 번역문 — 내부 문단 구조(대사/서술 줄바꿈 등)는 자유. */
   text: string;
@@ -79,7 +79,11 @@ export interface SessionTranslations {
   schemaVersion: 1;
   /** 세션창 표시 상태 — 원문 보기 / 번역 보기. 세션별 유지. */
   displayMode?: "source" | "translation";
-  /** key = hashText(문단 원문). 같은 내용 문단은 번역을 공유한다. */
+  /**
+   * key = `paragraphKey(문단 원문, 앞 문단)`. 내용이 같아도 앞 문단이 다르면 다른 항목이다
+   * (반복되는 짧은 대사가 번역을 공유하던 문제 — 회귀금지.md). 규칙 변경 전 저장분은
+   * 내용 해시만으로 키가 잡혀 있고, 읽기 폴백(`legacyParagraphKey`)으로 계속 보인다.
+   */
   paragraphs: Record<string, TranslationEntry>;
   /** 번역 실행 되돌리기 스택 (오래된 것 → 최근 것). 없으면 되돌릴 것 없음. */
   undoStack?: TranslationUndoEntry[];

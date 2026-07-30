@@ -5,12 +5,13 @@
  * 실제 AI 호출과 translations.json 저장은 services/translation-service.ts 가 담당한다.
  *
  * 모델:
- *  - 최종 본문을 줄바꿈 기준 문단으로 나누고, 문단 원문 내용의 해시가 번역 키.
- *  - 원문 문단이 바뀌면 키가 바뀌어 "번역 안 됨"이 된다. 같은 내용 문단은 번역 공유.
+ *  - 최종 본문을 줄바꿈 기준 문단으로 나누고, `내용 + 앞 문단` 의 해시가 번역 키.
+ *  - 원문 문단이 바뀌면 키가 바뀌어 "번역 안 됨"이 된다.
  *  - 번역문은 슬롯 안에서 내부 구조(대사/서술 줄바꿈 등)가 자유로운 통짜 텍스트.
  */
 
 import type {
+  PendingReflection,
   SessionTranslations,
   TranslationUndoItem,
   TranslationVariant,
@@ -21,10 +22,32 @@ import { uuidv4 } from "./uuid";
 // ─────────────────────────── 문단 분해 ───────────────────────────
 
 export interface SourceParagraph {
-  /** hashText(source) — translations.json paragraphs 의 키. */
+  /** paragraphKey(source, 앞 문단) — translations.json paragraphs 의 키. */
   hash: string;
   /** 문단 원문 (양 끝 줄바꿈 제외, 내용 그대로). */
   source: string;
+}
+
+/**
+ * 문단 키 — `<내용 해시>:<앞 문단 해시>`.
+ *
+ * 내용만으로 키를 잡으면 챗에서 반복되는 짧은 대사(`"No."` `"응."`)가 전부 한 항목으로
+ * 합쳐져 **맨 처음 번역 하나가 모든 위치에 재사용된다** — "남은 거 있어?"의 답으로
+ * 번역된 "없습니다"가 그 뒤 "안 와?"의 답 자리에도 그대로 나오고, AI 를 다시 부르지도
+ * 않아 문맥을 아무리 붙여도 안 고쳐졌다(2026-07-29 사용자 제보). 앞 문단까지 키에
+ * 넣어 "무엇에 대한 말인지"를 구분한다.
+ *
+ * 옛 키(내용 해시만)와 형식이 겹치지 않고, `:` 앞을 자르면 옛 키가 그대로 나온다
+ * — 그래서 이미 저장된 번역을 폴백으로 계속 읽을 수 있다(`legacyParagraphKey`).
+ */
+export function paragraphKey(source: string, prevSource: string): string {
+  return `${hashText(source)}:${hashText(prevSource)}`;
+}
+
+/** 키 규칙이 바뀌기 전에 저장된 항목을 읽기 위한 옛 키(내용 해시만). */
+export function legacyParagraphKey(key: string): string {
+  const i = key.indexOf(":");
+  return i < 0 ? key : key.slice(0, i);
 }
 
 /** 본문 → 문단/구분자 토큰. 토큰을 순서대로 이으면 원문과 동일. */
@@ -35,26 +58,53 @@ export type ParagraphToken =
 /**
  * 최종 본문을 줄바꿈 구분자 기준으로 문단 토큰화한다.
  * 구분자(연속 줄바꿈)는 별도 토큰으로 보존 — 표시 계층이 원문 구조를 그대로 재현.
+ *
+ * `prevSource` = 이 텍스트 **바로 앞** 문단의 원문. 챗처럼 본문을 말풍선 단위로
+ * 쪼개 토큰화하는 호출자는 반드시 앞 메시지의 마지막 문단(`lastParagraphSource`)을
+ * 넘겨야 한다 — 안 넘기면 전체 본문 기준으로 계산한 키와 어긋나 번역이 다 되고도
+ * 화면에 안 나온다(조용한 실패). 검사: `tests/translate-key-scope.test.ts`.
  */
-export function tokenizeParagraphs(text: string): ParagraphToken[] {
+export function tokenizeParagraphs(
+  text: string,
+  prevSource = ""
+): ParagraphToken[] {
   if (!text) return [];
   const out: ParagraphToken[] = [];
+  let prev = prevSource;
   for (const piece of text.split(/(\n+)/)) {
     if (!piece) continue;
     if (/^\n+$/.test(piece)) {
       out.push({ kind: "separator", text: piece });
     } else {
-      out.push({ kind: "paragraph", hash: hashText(piece), source: piece });
+      out.push({
+        kind: "paragraph",
+        hash: paragraphKey(piece, prev),
+        source: piece,
+      });
+      prev = piece;
     }
   }
   return out;
 }
 
-/** 본문의 문단 목록 (중복 내용 문단은 1회 — 번역 공유). */
-export function collectParagraphs(text: string): SourceParagraph[] {
+/** 텍스트의 마지막 문단 원문 (없으면 ""). 이어지는 조각의 `prevSource` 씨앗. */
+export function lastParagraphSource(text: string): string {
+  const tokens = tokenizeParagraphs(text);
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    const token = tokens[i];
+    if (token.kind === "paragraph") return token.source;
+  }
+  return "";
+}
+
+/** 본문의 문단 목록 (같은 키가 두 번 나오면 1회 — 내용도 앞 문단도 같은 자리). */
+export function collectParagraphs(
+  text: string,
+  prevSource = ""
+): SourceParagraph[] {
   const seen = new Set<string>();
   const out: SourceParagraph[] = [];
-  for (const token of tokenizeParagraphs(text)) {
+  for (const token of tokenizeParagraphs(text, prevSource)) {
     if (token.kind !== "paragraph") continue;
     if (seen.has(token.hash)) continue;
     seen.add(token.hash);
@@ -197,16 +247,18 @@ export const TRANSLATION_CONTEXT_SETS_DEFAULT = 1;
 
 export interface TranslationContextPair {
   source: string;
-  /** 이 문단의 active 번역 (없으면 ""). */
+  /** 이 문단의 active 번역 — 비어 있는 문단은 애초에 수집되지 않는다. */
   translation: string;
 }
 
 /**
  * 번역 대상 앞의 맥락 문단 수집 — 문서 순서에서 "가장 앞선 대상" 바로 앞부터 거슬러
- * setSize*sets 문단. 각 문단의 원문 + (있으면) active 번역을 짝으로 반환(문서 순서).
- * sets<=0 이거나 앞에 문단이 없으면 빈 배열. 대상 자신/중복 해시는 제외한다.
- * 배치 번역은 청크마다 translations 가 갱신되므로, 뒤 청크의 맥락에 방금 번역된
- * 앞 청크가 자동으로 들어간다(연속성).
+ * setSize*sets 문단. sets<=0 이거나 앞에 문단이 없으면 빈 배열.
+ *
+ * **번역이 이미 있는 문단만 담는다.** 청크는 동시 발사되므로 바로 앞 문단이 아직
+ * 번역 중(= 번역 없음)인 경우가 흔한데, 그걸 그대로 담으면 "이미 번역된 직전 문단"
+ * 이라는 머리말을 달고 **원문만** 나가 지시와 자료가 모순되고 번역 대상과 뒤섞인다
+ * (2026-07-29). 참고할 게 없으면 블록 자체를 안 붙이는 쪽이 맞다.
  */
 export function collectTranslationContext(
   text: string,
@@ -222,13 +274,14 @@ export function collectTranslationContext(
   if (firstIdx <= 0) return [];
   const want = sets * setSize;
   const out: TranslationContextPair[] = [];
-  for (let i = firstIdx - 1; i >= 0 && out.length < want; i--) {
+  // 거슬러 훑는 범위는 want 문단으로 고정한다("직전 N문단"의 의미 유지) — 번역이
+  // 없는 문단을 건너뛰며 더 멀리 가지 않는다.
+  for (let i = firstIdx - 1; i >= 0 && firstIdx - i <= want; i--) {
     const p = ordered[i];
     if (targetHashes.has(p.hash)) continue;
-    out.push({
-      source: p.source,
-      translation: getActiveTranslation(translations, p.hash)?.text ?? "",
-    });
+    const translation = getActiveTranslation(translations, p.hash)?.text ?? "";
+    if (translation.trim() === "") continue;
+    out.push({ source: p.source, translation });
   }
   return out.reverse();
 }
@@ -243,10 +296,8 @@ export function formatTranslationContext(
   pairs: TranslationContextPair[]
 ): string {
   if (pairs.length === 0) return "";
-  const blocks = pairs.map((p) =>
-    p.translation
-      ? `[원문] ${p.source}\n[번역] ${p.translation}`
-      : `[원문] ${p.source}`
+  const blocks = pairs.map(
+    (p) => `[원문] ${p.source}\n[번역] ${p.translation}`
   );
   return [
     "── 앞 문맥 (이미 번역된 직전 문단 — 참고용, 번역 대상 아님) ──",
@@ -355,7 +406,9 @@ export function hashText(text: string): string {
 }
 
 export interface RecordTranslationInput {
-  /** 문단 원문 — 키(해시)와 entry.source 에 기록. */
+  /** 문단 키 — `tokenizeParagraphs`/`collectParagraphs` 토큰의 `hash`. */
+  hash: string;
+  /** 문단 원문 — entry.source 에 기록. */
   source: string;
   text: string;
   modelProfileId?: string;
@@ -369,12 +422,15 @@ export interface RecordTranslationInput {
 /**
  * 문단의 새 translation variant 를 쌓고 active 로 선택한다 (translations 직접 변경).
  * 기존 variant 는 삭제하지 않는다 — 정리는 명시적 다이어트 기능의 몫.
+ *
+ * **쓰기는 언제나 새 키로만** 한다(옛 키 폴백 없음) — 옛 항목에 덧쓰면 같은 내용
+ * 문단끼리 번역을 계속 공유하게 된다. 재번역하는 순간 그 문단만 새 키로 갈아탄다.
  */
 export function recordTranslationVariant(
   translations: SessionTranslations,
   input: RecordTranslationInput
 ): TranslationVariant {
-  const hash = hashText(input.source);
+  const hash = input.hash;
   const entry = translations.paragraphs[hash] ?? {
     source: input.source,
     activeVariantId: "",
@@ -403,12 +459,29 @@ export function recordTranslationVariant(
   return variant;
 }
 
+/**
+ * 문단 항목 조회 — 새 키로 먼저, 없으면 옛 키(내용 해시만)로 폴백한다.
+ *
+ * 키 규칙이 `내용` → `내용+앞 문단` 으로 바뀌기 전에 저장된 번역이 그대로 보이게
+ * 하는 **읽기 전용** 경로다. 옛 세션은 같은 내용 문단이 여전히 한 항목을 공유하지만
+ * (그 자리에서 재번역하면 새 키로 갈라진다), 화면에서 사라지는 번역은 없다.
+ */
+function findEntry(
+  translations: SessionTranslations,
+  hash: string
+): SessionTranslations["paragraphs"][string] | undefined {
+  const direct = translations.paragraphs[hash];
+  if (direct) return direct;
+  const legacy = legacyParagraphKey(hash);
+  return legacy === hash ? undefined : translations.paragraphs[legacy];
+}
+
 /** 문단의 현재 active 번역 variant. 없으면 null. */
 export function getActiveTranslation(
   translations: SessionTranslations,
   hash: string
 ): TranslationVariant | null {
-  const entry = translations.paragraphs[hash];
+  const entry = findEntry(translations, hash);
   if (!entry) return null;
   return entry.variants[entry.activeVariantId] ?? null;
 }
@@ -418,7 +491,7 @@ export function listTranslationVariants(
   translations: SessionTranslations,
   hash: string
 ): TranslationVariant[] {
-  const entry = translations.paragraphs[hash];
+  const entry = findEntry(translations, hash);
   if (!entry) return [];
   return Object.values(entry.variants).sort(
     (a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)
@@ -440,7 +513,7 @@ export function resolvePendingEditVariants(
   hashes: string[]
 ): void {
   for (const hash of hashes) {
-    const entry = translations.paragraphs[hash];
+    const entry = findEntry(translations, hash);
     if (!entry) continue;
     const active = entry.variants[entry.activeVariantId];
     if (active?.kind !== "user-edit") continue;
@@ -460,13 +533,13 @@ export function resolvePendingEditVariants(
  */
 export function upsertPendingReflection(
   translations: SessionTranslations,
+  hash: string,
   source: string,
   ko: string,
   now = Date.now()
 ): void {
-  const hash = hashText(source);
   const map = (translations.pendingReflections ??= {});
-  const prev = map[hash];
+  const prev = map[hash] ?? map[legacyParagraphKey(hash)];
   map[hash] = {
     ko,
     en: source,
@@ -475,14 +548,30 @@ export function upsertPendingReflection(
   };
 }
 
-/** 반영이 **성공한** 문단들의 대기 건을 제거한다. 실패한 건은 남아서 재시도된다. */
+/** 대기 건 조회 — 번역 항목과 같은 규칙으로 옛 키까지 본다. */
+export function getPendingReflection(
+  pending: Record<string, PendingReflection> | undefined,
+  hash: string
+): PendingReflection | undefined {
+  if (!pending) return undefined;
+  return pending[hash] ?? pending[legacyParagraphKey(hash)];
+}
+
+/**
+ * 반영이 **성공한** 문단들의 대기 건을 제거한다. 실패한 건은 남아서 재시도된다.
+ * 옛 키로 올라와 있던 대기 건도 함께 지운다 — 안 지우면 반영이 끝난 문단이
+ * 영영 "반영 대기"로 남아 재변환이 반복된다.
+ */
 export function clearPendingReflections(
   translations: SessionTranslations,
   hashes: string[]
 ): void {
   const map = translations.pendingReflections;
   if (!map) return;
-  for (const h of hashes) delete map[h];
+  for (const h of hashes) {
+    delete map[h];
+    delete map[legacyParagraphKey(h)];
+  }
   if (Object.keys(map).length === 0) delete translations.pendingReflections;
 }
 
@@ -492,7 +581,7 @@ export function setActiveTranslationVariant(
   hash: string,
   variantId: string
 ): boolean {
-  const entry = translations.paragraphs[hash];
+  const entry = findEntry(translations, hash);
   if (!entry || !entry.variants[variantId]) return false;
   entry.activeVariantId = variantId;
   return true;
@@ -616,7 +705,7 @@ export function pruneTranslationVariants(
   translations: SessionTranslations,
   hash: string
 ): number {
-  const entry = translations.paragraphs[hash];
+  const entry = findEntry(translations, hash);
   if (!entry) return 0;
   const active = entry.variants[entry.activeVariantId];
   const removed = Object.keys(entry.variants).length - (active ? 1 : 0);

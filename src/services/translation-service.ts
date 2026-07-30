@@ -571,6 +571,7 @@ export class TranslationService {
     for (const item of items) {
       const prevActive = translations.paragraphs[item.hash]?.activeVariantId ?? "";
       const variant = recordTranslationVariant(translations, {
+        hash: item.hash,
         source: item.source,
         text: item.translation,
         modelProfileId: meta.modelProfileId,
@@ -684,6 +685,7 @@ export class TranslationService {
           const prevActive =
             translations.paragraphs[item.id]?.activeVariantId ?? "";
           const variant = recordTranslationVariant(translations, {
+            hash: item.id,
             source,
             text: item.translation,
             modelProfileId: profile.id,

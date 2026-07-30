@@ -34,9 +34,11 @@ import {
 import {
   clearPendingReflections,
   collectParagraphs,
+  lastParagraphSource,
   parseTranslationResponse,
   recordTranslationVariant,
   resolvePendingEditVariants,
+  tokenizeParagraphs,
 } from "../util/translate-paragraphs";
 import {
   assembleProConversion,
@@ -348,17 +350,35 @@ export class ProService {
 
     // 짝 먼저 저장 — 세션 저장 직후 뷰가 번역 보기를 재구성할 때 authored 짝이
     // 이미 있어야 저자의 한국어가 곧바로 보인다 (영어가 스치듯 보이는 것 방지).
+    //
+    // 문단 키는 앞 문단까지 보므로, 접합 결과 본문을 ops 순서대로 만들어 가며 각
+    // 영어 문단의 **실제 앞 문단**으로 키를 계산한다 (patch 적용 결과와 같은 순서).
     const seen = new Set<string>();
-    for (const assembly of assemblies) {
-      for (const pair of assembly.pairs) {
-        if (seen.has(pair.en)) continue;
-        seen.add(pair.en);
+    let spliced = "";
+    let cursor = 0;
+    for (let i = 0; i < sorted.length; i++) {
+      const op = sorted[i];
+      spliced += baseline.slice(cursor, op.from);
+      const en = assemblies[i].englishText;
+      const tokens = tokenizeParagraphs(en, lastParagraphSource(spliced)).filter(
+        (t) => t.kind === "paragraph"
+      );
+      assemblies[i].pairs.forEach((pair, k) => {
+        const token = tokens[k];
+        // 토큰과 짝은 assembleProConversion 에서 1:1 로 만들어진다 — 어긋나면
+        // 잘못된 자리에 기록하느니 건너뛴다.
+        if (!token || token.kind !== "paragraph" || token.source !== pair.en) return;
+        if (seen.has(token.hash)) return;
+        seen.add(token.hash);
         recordTranslationVariant(translations, {
+          hash: token.hash,
           source: pair.en,
           text: pair.ko,
           kind: "authored",
         });
-      }
+      });
+      spliced += en;
+      cursor = Math.max(cursor, op.to);
     }
     // 반영된 옛 영어 문단(교체 대상)의 "반영 대기"(active=user-edit) 표시 해제 —
     // 나중에 그 문단이 있는 옛 노드로 되돌아가도 다시 재변환(재생성)되지 않게 한다
@@ -366,7 +386,9 @@ export class ProService {
     const reflectedHashes: string[] = [];
     for (const op of sorted) {
       if (op.from === baseline.length && op.to === baseline.length) continue;
-      for (const p of collectParagraphs(baseline.slice(op.from, op.to))) {
+      // 앞 문단을 함께 넘겨야 본문 전체 기준 키와 같아진다(구간만 떼어 계산하면 어긋남).
+      const prev = lastParagraphSource(baseline.slice(0, op.from));
+      for (const p of collectParagraphs(baseline.slice(op.from, op.to), prev)) {
         reflectedHashes.push(p.hash);
       }
     }
@@ -500,17 +522,26 @@ export class ProService {
     }
 
     // 짝 저장 — 챗 번역 보기에서 이 메시지가 내가 쓴 문장 그대로 보이게.
+    // 이 메시지는 로그 끝에 붙으므로 앞 문단 = 지금 로그의 마지막 문단.
     const seen = new Set<string>();
+    let prevSource = lastParagraphSource(baseline);
     for (const assembly of assemblies) {
-      for (const pair of assembly.pairs) {
-        if (seen.has(pair.en)) continue;
-        seen.add(pair.en);
+      const tokens = tokenizeParagraphs(assembly.englishText, prevSource).filter(
+        (t) => t.kind === "paragraph"
+      );
+      assembly.pairs.forEach((pair, k) => {
+        const token = tokens[k];
+        if (!token || token.kind !== "paragraph" || token.source !== pair.en) return;
+        if (seen.has(token.hash)) return;
+        seen.add(token.hash);
         recordTranslationVariant(translations, {
+          hash: token.hash,
           source: pair.en,
           text: pair.ko,
           kind: "authored",
         });
-      }
+      });
+      prevSource = lastParagraphSource(assembly.englishText) || prevSource;
     }
     await this.plugin.store.saveSessionTranslations(sessionFile, translations, {
       origin: opts?.origin,

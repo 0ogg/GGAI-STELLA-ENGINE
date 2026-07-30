@@ -15,6 +15,7 @@ import { buildChatMessages, CHAT_MESSAGE_SEPARATOR } from "./chat-messages";
 import { buildSpans, spansToText } from "./session-text";
 import {
   getActiveTranslation,
+  lastParagraphSource,
   tokenizeParagraphs,
 } from "./translate-paragraphs";
 import { computeIllustrationAnchors } from "./illustration-anchors";
@@ -97,14 +98,17 @@ function buildChatReadingMarkdown(input: ReadingExportInput): string {
   const messages = buildChatMessages(session, session.meta.activeLeafId);
 
   let out = title.trim() ? `# ${title.trim()}\n\n` : "";
+  // 문단 키는 앞 문단까지 보므로 메시지 단위로 훑어도 앞 메시지의 마지막 문단을 잇는다
+  // (안 이으면 각 메시지 첫 문단의 번역을 못 찾는다).
+  let prevSource = "";
   for (const msg of messages) {
     const raw = msg.text.startsWith(CHAT_MESSAGE_SEPARATOR)
       ? msg.text.slice(CHAT_MESSAGE_SEPARATOR.length)
       : msg.text;
     let text = raw;
     if (useTranslation) {
-      // 메시지 안 문단 토큰은 평탄화 본문과 같은 해시 — 번역 메모리 그대로 적용.
-      text = tokenizeParagraphs(raw)
+      // 메시지 안 문단 토큰은 평탄화 본문과 같은 키 — 번역 메모리 그대로 적용.
+      text = tokenizeParagraphs(raw, prevSource)
         .map((tok) =>
           tok.kind === "separator"
             ? tok.text
@@ -112,6 +116,7 @@ function buildChatReadingMarkdown(input: ReadingExportInput): string {
         )
         .join("");
     }
+    prevSource = lastParagraphSource(raw) || prevSource;
     const name = msg.role === "user" ? names.user : names.char;
     out += `**${name}:**\n${text.trim()}\n\n`;
     const active = illustrations

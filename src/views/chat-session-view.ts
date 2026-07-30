@@ -76,6 +76,7 @@ import {
 import {
   collectUntranslatedParagraphs,
   getActiveTranslation,
+  lastParagraphSource,
   recordTranslationVariant,
   tokenizeParagraphs,
   upsertPendingReflection,
@@ -1090,7 +1091,12 @@ export class ChatSessionView extends ItemView {
         this.setBubbleDisplay(
           bubble,
           this.displayRegexText(
-            this.macroText(this.translatedTextOf(this.displayTextOf(msg))),
+            this.macroText(
+              this.translatedTextOf(
+                this.displayTextOf(msg),
+                this.prevTailOf(index)
+              )
+            ),
             index
           )
         );
@@ -1146,11 +1152,28 @@ export class ChatSessionView extends ItemView {
     else host.scrollTop = savedScrollTop;
   }
 
+  /**
+   * 이 메시지 바로 앞 문단의 원문 — 문단 키(내용 + 앞 문단)의 씨앗.
+   *
+   * 챗은 본문을 말풍선 단위로 토큰화하는데, 번역 대상은 평탄화 본문 전체 기준으로
+   * 잡힌다. 앞 메시지의 마지막 문단을 이어 넘겨야 두 경로의 키가 같아진다 —
+   * 어긋나면 번역이 다 되고도 화면에 안 나온다(조용한 실패).
+   */
+  private prevTailOf(index: number): string {
+    for (let i = index - 1; i >= 0; i--) {
+      const msg = this.messages[i];
+      if (!msg) continue;
+      const tail = lastParagraphSource(this.displayTextOf(msg));
+      if (tail) return tail;
+    }
+    return "";
+  }
+
   /** 번역 보기 텍스트 — 문단 토큰의 번역 슬롯 치환 (미번역 문단은 원문 유지). */
-  private translatedTextOf(text: string): string {
+  private translatedTextOf(text: string, prevSource: string): string {
     const tr = this.translations;
     if (!tr) return text;
-    return tokenizeParagraphs(text)
+    return tokenizeParagraphs(text, prevSource)
       .map((tok) => {
         if (tok.kind === "separator") return tok.text;
         const t = getActiveTranslation(tr, tok.hash);
@@ -2148,7 +2171,11 @@ export class ChatSessionView extends ItemView {
       const idx = Number(bubble.dataset.index);
       const msg = this.messages[idx];
       if (!msg) return;
-      this.beginTranslationBubbleEdit(bubble, this.displayTextOf(msg));
+      this.beginTranslationBubbleEdit(
+        bubble,
+        this.displayTextOf(msg),
+        this.prevTailOf(idx)
+      );
       const pt = lastPointer;
       lastPointer = null;
       if (pt && !isImeComposing()) {
@@ -2184,7 +2211,11 @@ export class ChatSessionView extends ItemView {
   }
 
   /** 편집 진입 — 표시본을 "문단 스팬 + 원자 구분자" raw 구조로 스왑. */
-  private beginTranslationBubbleEdit(bubble: HTMLElement, sourceText: string): void {
+  private beginTranslationBubbleEdit(
+    bubble: HTMLElement,
+    sourceText: string,
+    prevSource: string
+  ): void {
     bubble.empty();
     const blocks: {
       hash: string;
@@ -2192,7 +2223,7 @@ export class ChatSessionView extends ItemView {
       baseline: string;
       el: HTMLElement;
     }[] = [];
-    for (const token of tokenizeParagraphs(sourceText)) {
+    for (const token of tokenizeParagraphs(sourceText, prevSource)) {
       if (token.kind === "separator") {
         const sep = bubble.createSpan({ cls: "ggai-chat-tr-sep" });
         sep.setAttr("contenteditable", "false");
@@ -2238,13 +2269,14 @@ export class ChatSessionView extends ItemView {
       // 내용 있던 문단 → 빈 값은 정규화 아티팩트로 보고 저장하지 않는다.
       if (text.trim() === "" && b.baseline.trim() !== "") continue;
       recordTranslationVariant(this.translations, {
+        hash: b.hash,
         source: b.source,
         text,
         kind: "user-edit",
       });
       // 양방향 번역 — 수정을 반영 대기함에 실체로 기록한다(재시작/실패에도 생존).
       if (this.bidirectional()) {
-        upsertPendingReflection(this.translations, b.source, text);
+        upsertPendingReflection(this.translations, b.hash, b.source, text);
       }
       b.baseline = text;
       changed = true;
@@ -2348,7 +2380,9 @@ export class ChatSessionView extends ItemView {
     this.setBubbleDisplay(
       bubble,
       this.displayRegexText(
-        this.macroText(this.translatedTextOf(this.displayTextOf(msg))),
+        this.macroText(
+          this.translatedTextOf(this.displayTextOf(msg), this.prevTailOf(idx))
+        ),
         idx
       )
     );

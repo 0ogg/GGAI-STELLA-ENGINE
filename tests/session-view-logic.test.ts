@@ -111,6 +111,7 @@ import {
   getActiveTranslation,
   hashText,
   listTranslationVariants,
+  paragraphKey,
   parseTranslationResponse,
   pruneTranslationVariants,
   recordTranslationVariant,
@@ -1614,7 +1615,7 @@ const asyncTests: Promise<void>[] = [];
 }
 
 {
-  // 문단 토큰화 — 구분자 보존, 같은 내용 문단은 해시 공유.
+  // 문단 토큰화 — 구분자 보존, 내용이 같아도 앞 문단이 다르면 다른 키.
   const text = 'AA.\n\n"BB."\nCC.\n\n"BB."';
   const tokens = tokenizeParagraphs(text);
   assert.equal(
@@ -1626,20 +1627,26 @@ const asyncTests: Promise<void>[] = [];
       t.kind === "paragraph"
   );
   assert.equal(paras.length, 4);
-  assert.equal(paras[1].hash, paras[3].hash); // 중복 문단 = 같은 해시
+  // 내용은 같지만 앞 문단이 다르다("AA." 뒤 / "CC." 뒤) → 각자 번역된다.
+  assert.notEqual(paras[1].hash, paras[3].hash);
   assert.deepEqual(
     collectParagraphs(text).map((para) => para.source),
-    ["AA.", "\"BB.\"", "CC."]
+    ["AA.", "\"BB.\"", "CC.", "\"BB.\""]
   );
   assert.deepEqual(tokenizeParagraphs(""), []);
 
   // 미번역 수집 + 요청 조립 (직전 문맥 포함).
   const translations = createEmptySessionTranslations();
-  recordTranslationVariant(translations, { source: "AA.", text: "가가.", now: 1 });
+  recordTranslationVariant(translations, {
+    hash: paras[0].hash,
+    source: "AA.",
+    text: "가가.",
+    now: 1,
+  });
   const untranslated = collectUntranslatedParagraphs(text, translations);
   assert.deepEqual(
     untranslated.map((para) => para.source),
-    ["\"BB.\"", "CC."]
+    ["\"BB.\"", "CC.", "\"BB.\""]
   );
   const req = buildTranslationRequest(text, untranslated);
   // {{main}} 에는 번역 대상만 담긴다 — 앞 문맥은 별도 참고 블록(collectTranslationContext).
@@ -1648,6 +1655,7 @@ const asyncTests: Promise<void>[] = [];
     [
       ["translate", "\"BB.\""],
       ["translate", "CC."],
+      ["translate", "\"BB.\""],
     ]
   );
 
@@ -1665,10 +1673,10 @@ const asyncTests: Promise<void>[] = [];
   // 해당 건만 제거, 마지막 건 제거 시 맵 자체가 사라진다. 라운드트립도 보존.
   {
     const t = createEmptySessionTranslations();
-    upsertPendingReflection(t, "AA.", "가가 수정.", 10);
-    upsertPendingReflection(t, "\"BB.\"", "나나 수정.", 20);
-    upsertPendingReflection(t, "AA.", "가가 재수정.", 30);
-    const hashAA = hashText("AA.");
+    const hashAA = paras[0].hash;
+    upsertPendingReflection(t, hashAA, "AA.", "가가 수정.", 10);
+    upsertPendingReflection(t, paras[1].hash, "\"BB.\"", "나나 수정.", 20);
+    upsertPendingReflection(t, hashAA, "AA.", "가가 재수정.", 30);
     assert.equal(t.pendingReflections![hashAA].ko, "가가 재수정.");
     assert.equal(t.pendingReflections![hashAA].en, "AA.");
     assert.equal(t.pendingReflections![hashAA].createdAt, 10); // 최초 시각 유지
@@ -1681,7 +1689,7 @@ const asyncTests: Promise<void>[] = [];
     clearPendingReflections(t, [hashAA]);
     assert.equal(t.pendingReflections![hashAA], undefined);
     assert.equal(t.pendingReflections!["없는해시"], undefined);
-    clearPendingReflections(t, [hashText("\"BB.\"")]);
+    clearPendingReflections(t, [paras[1].hash]);
     assert.equal(t.pendingReflections, undefined); // 비면 맵 제거
   }
 
@@ -1788,26 +1796,29 @@ const asyncTests: Promise<void>[] = [];
 }
 
 {
-  // variant 기록 — 키는 문단 원문 해시. 첫 번역은 ai-translation, 재번역은 regen.
+  // variant 기록 — 키는 호출자가 넘긴다. 첫 번역은 ai-translation, 재번역은 regen.
   const translations = createEmptySessionTranslations();
+  const hash = paragraphKey("원문 문단.", "");
   const v1 = recordTranslationVariant(translations, {
+    hash,
     source: "원문 문단.",
     text: "v1",
     now: 10,
   });
-  const hash = hashText("원문 문단.");
   assert.equal(v1.kind, "ai-translation");
   assert.equal(v1.sourceHash, hash);
   assert.equal(translations.paragraphs[hash].source, "원문 문단.");
   assert.equal(getActiveTranslation(translations, hash)?.text, "v1");
 
   const v2 = recordTranslationVariant(translations, {
+    hash,
     source: "원문 문단.",
     text: "v2",
     now: 20,
   });
   assert.equal(v2.kind, "translation-regen");
   const v3 = recordTranslationVariant(translations, {
+    hash,
     source: "원문 문단.",
     text: "v3",
     kind: "user-edit",
@@ -1816,7 +1827,10 @@ const asyncTests: Promise<void>[] = [];
   assert.equal(v3.kind, "user-edit");
   assert.equal(getActiveTranslation(translations, hash)?.text, "v3");
   // 원문이 바뀌면 다른 키 — 기존 번역과 분리.
-  assert.equal(getActiveTranslation(translations, hashText("원문 문단!")), null);
+  assert.equal(
+    getActiveTranslation(translations, paragraphKey("원문 문단!", "")),
+    null
+  );
 }
 
 {
@@ -1904,10 +1918,15 @@ const asyncTests: Promise<void>[] = [];
 {
   // 되돌리기 / 정렬 / 다이어트.
   const translations = createEmptySessionTranslations();
-  const v1 = recordTranslationVariant(translations, { source: "P", text: "v1", now: 10 });
-  recordTranslationVariant(translations, { source: "P", text: "v2", now: 20 });
-  recordTranslationVariant(translations, { source: "P", text: "v3", now: 30 });
-  const hash = hashText("P");
+  const hash = paragraphKey("P", "");
+  const v1 = recordTranslationVariant(translations, {
+    hash,
+    source: "P",
+    text: "v1",
+    now: 10,
+  });
+  recordTranslationVariant(translations, { hash, source: "P", text: "v2", now: 20 });
+  recordTranslationVariant(translations, { hash, source: "P", text: "v3", now: 30 });
 
   assert.deepEqual(
     listTranslationVariants(translations, hash).map((v) => v.text),

@@ -17,7 +17,13 @@
 
 import type { PendingReflection, SessionTranslations } from "../types/media";
 import { CHAT_MESSAGE_SEPARATOR, type ChatSessionMessage } from "./chat-messages";
-import { tokenizeParagraphs, type ParagraphToken } from "./translate-paragraphs";
+import {
+  getActiveTranslation,
+  getPendingReflection,
+  lastParagraphSource,
+  tokenizeParagraphs,
+  type ParagraphToken,
+} from "./translate-paragraphs";
 
 /** 문체 예시로 첨부할 문단 쌍 수 기본값 (0 = 끄기). 설정 UI 로 조절. */
 export const PRO_STYLE_PAIRS_DEFAULT = 3;
@@ -43,17 +49,21 @@ export function collectChatReflectionOps(
   if (!pending) return [];
   const ops: { from: number; to: number; ko: string; expect: string }[] = [];
   let start = 0;
+  // 문단 키는 앞 문단까지 보므로, 메시지 단위로 훑어도 앞 메시지의 마지막 문단을
+  // 이어 넘겨야 전체 본문 기준 키와 같아진다 (안 넘기면 대기 건을 못 찾는다).
+  let prevSource = "";
   for (const msg of messages) {
     const sepLen = msg.text.startsWith(CHAT_MESSAGE_SEPARATOR)
       ? CHAT_MESSAGE_SEPARATOR.length
       : 0;
     let offset = start + sepLen;
-    for (const token of tokenizeParagraphs(msg.text.slice(sepLen))) {
+    const body = msg.text.slice(sepLen);
+    for (const token of tokenizeParagraphs(body, prevSource)) {
       if (token.kind === "separator") {
         offset += token.text.length;
         continue;
       }
-      const queued = pending[token.hash];
+      const queued = getPendingReflection(pending, token.hash);
       if (queued && queued.ko.trim() !== "") {
         ops.push({
           from: offset,
@@ -64,6 +74,7 @@ export function collectChatReflectionOps(
       }
       offset += token.source.length;
     }
+    prevSource = lastParagraphSource(body) || prevSource;
     start += msg.text.length;
   }
   return ops;
@@ -237,8 +248,7 @@ export function collectStylePairs(
     if (token.kind !== "paragraph" || seen.has(token.hash)) continue;
     seen.add(token.hash);
     if (isSceneBreakParagraph(token.source)) continue; // 장면 전환은 문체 예시 대상 아님
-    const entry = translations.paragraphs[token.hash];
-    const active = entry ? entry.variants[entry.activeVariantId] : undefined;
+    const active = getActiveTranslation(translations, token.hash);
     if (active?.kind !== "authored" || active.text.trim() === "") continue;
     collected.push({ en: token.source, ko: active.text });
   }

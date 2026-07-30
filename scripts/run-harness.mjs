@@ -7,8 +7,8 @@ const root = process.cwd();
 const outDir = await mkdtemp(path.join(tmpdir(), "stella-harness-"));
 const tscBin = path.join(root, "node_modules", "typescript", "bin", "tsc");
 const architectureEntry = path.join(root, "tests", "architecture-rules.mjs");
-const testEntry = path.join(root, "tests", "session-view-logic.test.ts");
-const compiledEntry = path.join(outDir, "tests", "session-view-logic.test.js");
+const testNames = ["session-view-logic", "translate-key-scope"];
+const testEntries = testNames.map((n) => path.join(root, "tests", `${n}.test.ts`));
 
 try {
   execFileSync(process.execPath, [architectureEntry], { cwd: root, stdio: "inherit" });
@@ -30,12 +30,16 @@ try {
       root,
       "--outDir",
       outDir,
-      testEntry,
+      ...testEntries,
     ],
     { cwd: root, stdio: "inherit" }
   );
 
-  execFileSync(process.execPath, [compiledEntry], { stdio: "inherit" });
+  for (const name of testNames) {
+    execFileSync(process.execPath, [path.join(outDir, "tests", `${name}.test.js`)], {
+      stdio: "inherit",
+    });
+  }
 } finally {
   await rm(outDir, { recursive: true, force: true });
 }
