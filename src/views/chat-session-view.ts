@@ -15,6 +15,7 @@ import {
   Notice,
   Platform,
   TFile,
+  TFolder,
   WorkspaceLeaf,
   setIcon,
 } from "obsidian";
@@ -122,6 +123,18 @@ interface ChatGenerationState {
 }
 
 const EDIT_COMMIT_DEBOUNCE_MS = 800;
+
+/** 카드 이미지 태그가 확장자만 다르게 저장돼 있어도 찾아줄 형식들. */
+const CARD_IMAGE_EXTS: ReadonlySet<string> = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "webp",
+  "gif",
+  "apng",
+  "avif",
+  "bmp",
+]);
 
 export class ChatSessionView extends ItemView {
   private readonly plugin: StellaEnginePlugin;
@@ -1910,21 +1923,44 @@ export class ChatSessionView extends ItemView {
   }
 
   /**
-   * 카드 이미지 태그(`{{img::파일명}}`)의 실제 경로 — 시나리오 폴더의 assets/ 를
-   * 먼저 보고, 없으면 세션 폴더 assets/. 카드가 들고 온 그림(CCv3 assets)이
-   * 시나리오 폴더에 풀리므로 그쪽이 우선이다. 못 찾으면 null (태그는 지워진다).
+   * 카드 이미지 태그(`{{img::파일명}}`)의 실제 경로.
+   *
+   * 원본 확장(tincansimagine/character-assets)의 동작을 따른다: 실리태번의
+   * **캐릭터 폴더**에서 파일명을 그대로 찾는다(`/characters/<charkey>/<파일명>`).
+   * 우리 대응은 시나리오 폴더 루트다 — 사용자가 그림을 넣는 자리가 거기다.
+   *
+   * 두 가지 규칙도 원본과 맞춘다:
+   *  - **확장자는 느슨하게 본다.** 원본은 WebP 자동 변환 때문에 확장자를 뗀 이름으로도
+   *    매칭한다 — `{{img::joy.png}}` 가 저장된 `joy.webp` 를 찾아낸다.
+   *  - 못 찾으면 null → 태그를 지운다(원본도 깨진 그림을 감춘다).
+   *
+   * `assets/` 하위도 함께 보는 건 **우리 쪽 추가**다(CHARX 임포트가 카드 에셋을
+   * 풀어놓을 자리). 원본에는 없다.
    */
   private resolveCardImageSrc(name: string): string | null {
-    const clean = name.replace(/^[/\\]+/, "").trim();
+    const clean = name.trim().replace(/^[/\\]+/, "");
     if (!clean || clean.includes("..")) return null; // 폴더 밖으로 나가는 경로 금지
-    const folders: string[] = [];
     const scenarioFile = scenarioFileOfSessionFile(this.sessionFile ?? "");
-    if (scenarioFile) folders.push(scenarioFile.slice(0, -"/scenario.json".length));
-    if (this.sessionFile) folders.push(this.sessionFile.slice(0, -"/session.json".length));
-    for (const folder of folders) {
-      for (const path of [`${folder}/assets/${clean}`, `${folder}/${clean}`]) {
-        const file = this.app.vault.getAbstractFileByPath(path);
-        if (file instanceof TFile) return this.app.vault.getResourcePath(file);
+    if (!scenarioFile) return null;
+    const root = scenarioFile.slice(0, -"/scenario.json".length);
+
+    for (const folder of [root, `${root}/assets`]) {
+      const exact = this.app.vault.getAbstractFileByPath(`${folder}/${clean}`);
+      if (exact instanceof TFile) return this.app.vault.getResourcePath(exact);
+
+      // 확장자만 다른 같은 이름 (하위 폴더를 가리키는 이름은 대상 아님).
+      if (clean.includes("/")) continue;
+      const base = clean.replace(/\.[^.]+$/, "").toLowerCase();
+      const dir = this.app.vault.getAbstractFileByPath(folder);
+      if (!base || !(dir instanceof TFolder)) continue;
+      for (const child of dir.children) {
+        if (
+          child instanceof TFile &&
+          child.basename.toLowerCase() === base &&
+          CARD_IMAGE_EXTS.has(child.extension.toLowerCase())
+        ) {
+          return this.app.vault.getResourcePath(child);
+        }
       }
     }
     return null;
