@@ -974,6 +974,11 @@ export default class StellaEnginePlugin extends Plugin {
       name: "변수",
       desc: "게임형 카드가 기억하는 값(애정도·소지금·시스템 토글)을 관리합니다. 끄면 변수 설정이 사라지고 가지별 되돌리기도 멈춥니다.",
     },
+    {
+      id: "stella:lorebook-template",
+      name: "로어북 조건",
+      desc: "값에 따라 로어북 항목의 일부만 프롬프트에 넣습니다(성장 단계별 설명, 시스템 on/off 등). 끄면 항목 내용이 조건 없이 통째로 들어갑니다.",
+    },
   ];
 
   /** 확장이 켜져 있는지 (항목 없으면 기본 켜짐). */

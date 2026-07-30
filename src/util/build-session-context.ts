@@ -106,6 +106,7 @@ import { DEFAULT_LOREBOOK_SELECT_CONTEXT_CHARS } from "./lorebook-ai-select";
 import { resolveActiveLorebooks } from "./resolve-active-lorebooks";
 import { scanPrompts } from "./scan-prompts";
 import { buildSessionLog } from "./session-view-logic";
+import { renderLorebookTemplates } from "./lorebook-template";
 import { stripGlobalScope, withGlobalScope } from "./variables";
 import { buildSpans, spansToText } from "./session-text";
 import {
@@ -499,6 +500,17 @@ export async function planSessionRequest(
     );
   }
 
+  // 로어북 조건부 내용 — 값에 따라 항목의 일부만 남긴다(게임형 카드 지원 스펙.md U3).
+  // 매크로보다 **먼저** 돌아야 한다: 조건이 살린 자리에만 {{user}} 등이 풀리도록.
+  // **사본을 만든다** — store 가 캐시로 들고 있는 로어북 객체를 그대로 고치면
+  // 파일에도 조건 처리된 결과가 되돌아 저장될 수 있다.
+  const contextLorebooks = plugin.isExtensionEnabled("stella:lorebook-template")
+    ? renderLorebookTemplates(lorebooks, {
+        vars: stripGlobalScope(variables),
+        globals: plugin.variables.getGlobals(),
+      })
+    : lorebooks;
+
   // ── 정규식 스크립트 (전송본 시점) — 전역 + (허용된) 시나리오별을 히스토리
   // 메시지에 적용한다. ST 와 같은 의미: USER_INPUT = 유저 메시지, AI_OUTPUT = AI
   // 메시지, depth = 끝에서 몇 번째(0 = 마지막). 전송본 단일 경로라 미리보기에도
@@ -548,7 +560,7 @@ export async function planSessionRequest(
       character_version: (speakerData as any).character_version,
     },
     persona: { name: user.name, description: user.description },
-    lorebooks,
+    lorebooks: contextLorebooks,
     mode: session.meta.mode,
     // 챗 세션 로그는 span author 추측이 아니라 노드에서 직접 만든다 —
     // 연속 같은 역할 메시지가 구분 없이 붙는 문제 방지 (챗 모드 스펙.md).
