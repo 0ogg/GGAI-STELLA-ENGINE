@@ -7623,6 +7623,45 @@ body.is-mobile .ggai-chat-inputbar {
   font-variant-numeric: tabular-nums;
 }
 
+/* ── 변수 (게임형 카드) — 확장 탭 패널 ──────────────────────────────── */
+
+.ggai-var-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+.ggai-var-row input {
+  min-width: 0; /* flex 안에서 입력칸이 줄어들 수 있게 */
+  font-size: 0.82em;
+  padding: 3px 6px;
+}
+.ggai-var-name {
+  flex: 1 1 55%;
+}
+.ggai-var-value {
+  flex: 1 1 45%;
+}
+.ggai-var-del {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding: 3px 5px;
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+.ggai-var-del:hover {
+  color: var(--text-error);
+}
+.ggai-var-add {
+  font-size: 0.76em;
+  padding: 3px 8px;
+  margin-top: 2px;
+  cursor: pointer;
+}
+
 /* ── 정규식 치환 — 확장 탭 패널 + 편집 모달 ─────────────────────────── */
 
 .ggai-regex-section {

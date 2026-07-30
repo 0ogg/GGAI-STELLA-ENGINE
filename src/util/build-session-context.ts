@@ -106,6 +106,7 @@ import { DEFAULT_LOREBOOK_SELECT_CONTEXT_CHARS } from "./lorebook-ai-select";
 import { resolveActiveLorebooks } from "./resolve-active-lorebooks";
 import { scanPrompts } from "./scan-prompts";
 import { buildSessionLog } from "./session-view-logic";
+import { stripGlobalScope, withGlobalScope } from "./variables";
 import { buildSpans, spansToText } from "./session-text";
 import {
   applyChatTurnNames,
@@ -484,7 +485,19 @@ export async function planSessionRequest(
 
   // 세션을 변형하지 않도록 복사본으로 빌드. setvar 등은 buildContext 가
   // 이 복사본을 in-place 로 갱신하므로, 빌드 후 그 값을 돌려준다.
-  const variables = { ...(session.meta.variables ?? {}) };
+  //
+  // 변수 확장이 켜져 있으면 값의 출처가 둘 늘어난다(게임형 카드 지원 스펙.md U1):
+  //  - 가지 되짚기 — 재생성/과거 점프로 돌아가면 그 지점의 값을 쓴다(기록이 있을 때만).
+  //  - 전역 값 — `global::` 접두를 달아 얹는다. {{getglobalvar::x}} 가 이 자리를 읽는다.
+  // 꺼져 있으면 예전과 완전히 동일하게 meta.variables 만 쓴다(롤백 경계).
+  let variables = { ...(session.meta.variables ?? {}) };
+  if (plugin.isExtensionEnabled("stella:variables")) {
+    const log = await plugin.store.getSessionVariableLog(sessionFile);
+    variables = withGlobalScope(
+      plugin.variables.resolveFor(session, log, leafId),
+      plugin.variables.getGlobals()
+    );
+  }
 
   // ── 정규식 스크립트 (전송본 시점) — 전역 + (허용된) 시나리오별을 히스토리
   // 메시지에 적용한다. ST 와 같은 의미: USER_INPUT = 유저 메시지, AI_OUTPUT = AI
@@ -660,7 +673,9 @@ export async function planSessionRequest(
     output,
     payload,
     paramsOverride,
-    updatedVariables: variables,
+    // 전역 값은 걷어내고 돌려준다 — 호출부가 이 결과를 그대로 meta.variables 에
+    // 넣기 때문에, 안 걷어내면 전역 값이 session.json 에 새어 들어간다(롤백 경계 위반).
+    updatedVariables: stripGlobalScope(variables),
     meta: {
       sessionName: session.meta.name,
       scenarioName: scenarioData.name ?? "(unknown)",

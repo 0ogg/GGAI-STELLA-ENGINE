@@ -5,6 +5,8 @@
  * 재귀 1회 — 치환된 값 안에 또 매크로가 있으면 한 번 더 풀어준다.
  */
 
+import { GLOBAL_VAR_PREFIX } from "./variables";
+
 export interface MacroContext {
   char?: string;
   user?: string;
@@ -122,6 +124,16 @@ function resolveMacro(match: string, key: string, ctx: MacroContext): string {
   if (setvarMatch && ctx.variables) {
     ctx.variables[setvarMatch[1].trim()] = setvarMatch[2];
     return "";
+  }
+
+  // 전역 변수 읽기 (ST {{getglobalvar::x}}) — 전역 값은 `global::` 접두를 달고
+  // 세션 값과 같은 맵에 얹혀 온다 (util/variables.ts `withGlobalScope`).
+  // 쓰기(setglobalvar 등)는 여기서 하지 않는다 — 매크로는 동기 순수 치환이라
+  // 전역 저장까지 할 수 없다. 전역 쓰기는 변수 패널과 QR 커맨드가 맡는다.
+  const getGlobalMatch = k.match(/^getglobalvar::(.+)$/i);
+  if (getGlobalMatch && ctx.variables) {
+    const name = getGlobalMatch[1].trim();
+    return ctx.variables[GLOBAL_VAR_PREFIX + name] ?? match;
   }
 
   const getvarMatch = k.match(/^getvar::(.+)$/);

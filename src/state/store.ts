@@ -64,6 +64,11 @@ import {
   type SessionIllustrations,
 } from "../types/media";
 import {
+  createEmptyVariableLog,
+  normalizeVariableLog,
+  type SessionVariableLog,
+} from "../types/variables";
+import {
   createEmptySessionSummaries,
   normalizeSessionSummaries,
   type SessionSummaries,
@@ -1436,6 +1441,44 @@ export class StellaStore extends Events {
     this.trigger("session-illustrations-changed", sessionFile, detail);
   }
 
+  // ─────────────────────── session variables (variables.json) ───────────────────────
+
+  /**
+   * 세션 폴더의 variables.json (게임형 카드 변수 — 가지별 변화 기록).
+   * 없으면 빈 기록 반환 (디스크에 만들지 않음). 캐시 없이 매번 읽는다.
+   *
+   * 현재 값은 여전히 `session.meta.variables` 에 있다 — 이 파일은 "어느 지점에서
+   * 무엇이 바뀌었나"만 담는다(`게임형 카드 지원 스펙.md` U1). 파일을 지우면
+   * 되짚기만 사라지고 세션은 무손상.
+   */
+  async getSessionVariableLog(sessionFile: string): Promise<SessionVariableLog> {
+    const path = variablesFileOfSessionFile(sessionFile);
+    if (path) {
+      const f = this.vault.getAbstractFileByPath(path);
+      if (f instanceof TFile) {
+        try {
+          return normalizeVariableLog(JSON.parse(await this.vault.read(f)));
+        } catch (err) {
+          console.warn("[GGAI Stella] variables.json 로드 실패:", err);
+        }
+      }
+    }
+    return createEmptyVariableLog();
+  }
+
+  async saveSessionVariableLog(
+    sessionFile: string,
+    log: SessionVariableLog
+  ): Promise<void> {
+    const path = variablesFileOfSessionFile(sessionFile);
+    if (!path) throw new Error("Invalid session path");
+    this.markSelfWrite(path);
+    const body = JSON.stringify(log, null, 2);
+    const f = this.vault.getAbstractFileByPath(path);
+    if (f instanceof TFile) await this.vault.modify(f, body);
+    else await this.vault.create(path, body);
+  }
+
   /**
    * 세션 폴더 assets/ 아래에 바이너리 파일 저장. 세션 폴더 기준 상대 경로(assets/...)를 반환.
    * 미디어 생성물(삽화 PNG 등) 저장 진입점 — View/서비스는 이 메서드를 경유한다.
@@ -2626,6 +2669,12 @@ function illustrationsFileOfSessionFile(sessionFile: string): string | null {
 function streamFileOfSessionFile(sessionFile: string): string | null {
   const folder = sessionFolderOfSessionFilePath(sessionFile);
   return folder ? `${folder}/stream.json` : null;
+}
+
+/** .../session.json → .../variables.json (게임형 카드 변수 — 가지별 변화 기록) */
+function variablesFileOfSessionFile(sessionFile: string): string | null {
+  const folder = sessionFolderOfSessionFilePath(sessionFile);
+  return folder ? `${folder}/variables.json` : null;
 }
 
 async function uniquePath(vault: Vault, basePath: string): Promise<string> {

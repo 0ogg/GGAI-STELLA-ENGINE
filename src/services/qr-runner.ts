@@ -30,6 +30,7 @@ import {
   type QrCommand,
 } from "../util/qr-script";
 import { buildSpans, spansToText } from "../util/session-text";
+import { diffVariables } from "../util/variables";
 import { uuidv4 } from "../util/uuid";
 import { ChoiceModal, PromptModal } from "../views/modals";
 import { flushQrInjections, setQrInjection } from "./qr-injections";
@@ -73,10 +74,24 @@ export async function runQuickReplyScript(
     ? await plugin.store.getSession(sessionFile).catch(() => null)
     : null;
 
+  // 변수 확장이 켜져 있으면 **지금 지점의 값**을 읽고, 바뀐 만큼만 그 지점에 기록한다
+  // (게임형 카드 지원 스펙.md U1). 과거로 되돌아간 상태에서 QR 이 미래 값을 보면 안 되고,
+  // QR 이 meta.variables 에 직접 쓰면 되짚기 기록과 어긋나 전송본에서 값이 사라진다.
+  // 꺼져 있으면 예전 그대로 meta.variables 를 읽고 쓴다(롤백 경계).
+  const useVariableLog =
+    !!session && !!sessionFile && plugin.isExtensionEnabled("stella:variables");
+  const initialVars =
+    useVariableLog && session && sessionFile
+      ? plugin.variables.resolveFor(
+          session,
+          await plugin.variables.getLog(sessionFile)
+        )
+      : { ...(session?.meta.variables ?? {}) };
+
   const state: QrRunState = {
     plugin,
     host,
-    vars: { ...(session?.meta.variables ?? {}) },
+    vars: { ...initialVars },
     macro: await buildQrMacroContext(plugin, sessionFile),
     pipe: "",
     aborted: false,
@@ -87,11 +102,18 @@ export async function runQuickReplyScript(
   await runPipeline(state, parseQrScript(script));
 
   if (state.varsDirty && sessionFile) {
-    // 저장 직전에 다시 읽는다 — 실행 중(모달 대기 / AI 생성) 세션이 바뀌었을 수 있다.
-    const fresh = await plugin.store.getSession(sessionFile).catch(() => null);
-    if (fresh) {
-      fresh.meta.variables = state.vars;
-      await plugin.store.saveSession(sessionFile, fresh, { kinds: ["settings"] });
+    if (useVariableLog) {
+      await plugin.variables.setSessionVars(
+        sessionFile,
+        diffVariables(initialVars, state.vars)
+      );
+    } else {
+      // 저장 직전에 다시 읽는다 — 실행 중(모달 대기 / AI 생성) 세션이 바뀌었을 수 있다.
+      const fresh = await plugin.store.getSession(sessionFile).catch(() => null);
+      if (fresh) {
+        fresh.meta.variables = state.vars;
+        await plugin.store.saveSession(sessionFile, fresh, { kinds: ["settings"] });
+      }
     }
   }
 

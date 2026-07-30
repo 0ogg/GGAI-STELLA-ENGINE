@@ -7,7 +7,7 @@ const root = process.cwd();
 const outDir = await mkdtemp(path.join(tmpdir(), "stella-harness-"));
 const tscBin = path.join(root, "node_modules", "typescript", "bin", "tsc");
 const architectureEntry = path.join(root, "tests", "architecture-rules.mjs");
-const testNames = ["session-view-logic", "translate-key-scope"];
+const testNames = ["session-view-logic", "translate-key-scope", "variables"];
 const testEntries = testNames.map((n) => path.join(root, "tests", `${n}.test.ts`));
 
 try {

@@ -33,6 +33,7 @@ import {
 } from "./services/proactive-service";
 import { PhoneService } from "./services/phone-service";
 import { ProService } from "./services/pro-service";
+import { VariablesService } from "./services/variables-service";
 import { registerPhoneExtension } from "./extensions/phone-extension";
 import { registerLorebookGenExtension } from "./extensions/lorebook-gen-extension";
 import { registerQuickReplyExtension } from "./extensions/quick-reply-extension";
@@ -44,6 +45,7 @@ import {
 } from "./services/settings-panel-registry";
 import { StellaExtensionRegistry } from "./services/extension-registry";
 import { registerSummaryExtension } from "./extensions/summary-extension";
+import { registerVariablesExtension } from "./extensions/variables-extension";
 import { registerTranslationExtension } from "./extensions/translation-extension";
 import { registerIllustrationExtension } from "./extensions/illustration-extension";
 import {
@@ -199,6 +201,11 @@ export interface StellaPluginData {
   /** 스텔라 폰 전역 설정 (PH1) — 로그인 페르소나/모델/언어/기억 연동. */
   phone?: PhonePluginData;
   /**
+   * 게임형 카드 전역 변수 — 모든 세션 공통(ST global variable 대응).
+   * 세션 값은 여기가 아니라 기존 `session.meta.variables` 에 그대로 있다.
+   */
+  globalVariables?: Record<string, string>;
+  /**
    * 기본 제공 확장 켜짐/꺼짐 — 확장 id → enabled. 항목이 없으면 기본 켜짐(true).
    * false 인 확장은 등록 자체를 하지 않아 자동 동작·설정 패널·세션 UI 가 전부 사라진다.
    * 설정 '확장' 탭에서 조작. 게이트는 `plugin.isExtensionEnabled(id)`.
@@ -302,6 +309,8 @@ export default class StellaEnginePlugin extends Plugin {
   lorebookGen!: LorebookGenService;
   /** 집필 프로(PRO) 게이트 — 개인 플러그인이 activate() 하기 전까지 휴면. */
   pro!: ProService;
+  /** 게임형 카드 변수 — 세션 값(가지별 되짚기) + 전역 값의 단일 진입점. */
+  variables!: VariablesService;
   /** 확장 탭 설정 패널 레지스트리. 내장/외부 패널 모두 `registerSettingsPanel()` 로 등록. */
   settingsPanels!: SettingsPanelRegistry;
   /** 확장 모듈 레지스트리 — 컨텍스트 기여 / 생성-완료 훅 / 로어북 선택 대체. */
@@ -355,6 +364,7 @@ export default class StellaEnginePlugin extends Plugin {
     this.lorebookPlus = new LorebookPlusService(this);
     this.lorebookGen = new LorebookGenService(this);
     this.pro = new ProService(this);
+    this.variables = new VariablesService(this);
     this.settingsPanels = new SettingsPanelRegistry(() =>
       this.store.trigger("settings-panels-changed")
     );
@@ -959,6 +969,11 @@ export default class StellaEnginePlugin extends Plugin {
       name: "로어북 확장 매칭",
       desc: "AI가 상황에 맞는 로어북 항목을 골라 넣습니다. 끄면 AI 매칭이 멈추고 로어북 확장 설정이 사라집니다.",
     },
+    {
+      id: "stella:variables",
+      name: "변수",
+      desc: "게임형 카드가 기억하는 값(애정도·소지금·시스템 토글)을 관리합니다. 끄면 변수 설정이 사라지고 가지별 되돌리기도 멈춥니다.",
+    },
   ];
 
   /** 확장이 켜져 있는지 (항목 없으면 기본 켜짐). */
@@ -1033,6 +1048,12 @@ export default class StellaEnginePlugin extends Plugin {
       this.isExtensionEnabled("stella:lorebook-plus") ||
         this.isExtensionEnabled("stella:lorebook-gen"),
       () => this.registerSettingsPanel(createLorebookPlusSettingsPanel())
+    );
+    // 게임형 카드 변수 — 값 반영(가지 되짚기/전역)은 planSessionRequest 가 같은 id 로 게이트.
+    this.syncExtensionResource(
+      "stella:variables",
+      this.isExtensionEnabled("stella:variables"),
+      () => registerVariablesExtension(this)
     );
   }
 
