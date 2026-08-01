@@ -13,6 +13,7 @@
  * 수동 번역(툴바/뷰어 버튼)은 각 세션 뷰가 같은 서비스를 직접 호출한다.
  */
 
+import { Notice } from "obsidian";
 import type StellaEnginePlugin from "../main";
 import type {
   GenerationCompleteInput,
@@ -47,7 +48,15 @@ function createTranslationExtension(): StellaExtension {
         hashes: targets.map((p) => p.hash),
       });
       if (!r.ok) {
+        // 사용자가 켜둔 자동 실행이 실패했으면 반드시 알린다 — 조용히 지나가면
+        // "번역 요청이 아예 안 나갔다"로만 보이고 원인이 어디에도 남지 않는다.
+        // (취소 = 우리가 신호를 준 적 없으므로 Core 의 요청 시간 초과.)
         console.warn("[GGAI Stella] 자동 번역 실패:", r.errors);
+        new Notice(
+          r.cancelled
+            ? "자동 번역이 중단됐습니다(요청 시간 초과/취소)."
+            : "자동 번역 실패: " + (r.errors[0] ?? "알 수 없는 오류")
+        );
         return;
       }
       // 소설 세션은 자동 번역 뒤 번역 보기로 전환한다 (구 세션창 runTranslate 동작 보존).

@@ -52,8 +52,28 @@ export function createNoteWidgetEl(
   body.spellcheck = false;
   // value 로만 넣는다 — 자식 텍스트 노드를 만들지 않으므로 textContent 는 계속 "".
   body.value = note.body;
-  body.hidden = true;
   el.appendChild(body);
+
+  // 접힘 상태는 블록의 `is-open` 클래스 **하나로만** 관리한다.
+  // (`hidden` 속성 금지 — `.ggai-note-body { display: … }` 같은 우리 CSS 가
+  //  브라우저 기본 `[hidden] { display: none }` 을 이겨서 접혀도 그대로 보인다.
+  //  그게 "안 접힘 / 두 줄만 보이고 잘림"의 원인이었다.)
+  const isOpen = () => el.hasClass("is-open");
+  const setOpen = (open: boolean) => {
+    el.toggleClass("is-open", open);
+    setIcon(chev, open ? "chevron-down" : "chevron-right");
+    if (open) fitNoteHeight(body);
+  };
+
+  // 펼친 채로 폭이 바뀌면(창 크기, 사이드바 여닫기, 화면 회전) 줄 수가 달라져
+  // 맞춰 둔 높이가 짧아진다 — overflow:hidden 이라 뒷부분이 소리 없이 잘린다.
+  let lastWidth = 0;
+  new ResizeObserver((entries) => {
+    const width = entries[0]?.contentRect.width ?? 0;
+    if (width === 0 || width === lastWidth) return;
+    lastWidth = width;
+    if (isOpen()) fitNoteHeight(body);
+  }).observe(body);
 
   const deleteMenu = (x: number, y: number) => {
     const menu = new Menu();
@@ -68,13 +88,7 @@ export function createNoteWidgetEl(
 
   // 탭 = 펼치기/접기, 꾹 누르기·우클릭 = 삭제 메뉴 (PC/모바일 공통 규약).
   attachLongPress(head, {
-    onTap: () => {
-      const open = body.hidden;
-      body.hidden = !open;
-      el.toggleClass("is-open", open);
-      setIcon(chev, open ? "chevron-down" : "chevron-right");
-      if (open) fitNoteHeight(body);
-    },
+    onTap: () => setOpen(!isOpen()),
     onLongPress: deleteMenu,
   });
   head.addEventListener("contextmenu", (e) => {

@@ -777,11 +777,19 @@
   width: 15px;
   height: 15px;
 }
+.ggai-note-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .ggai-note-title::after {
   content: attr(data-title);
 }
+/* 접힘/펼침은 블록의 is-open 클래스로만 정한다 (note-widget.ts 주석 참고). */
 .ggai-note-body {
-  display: block;
+  display: none;
   width: 100%;
   box-sizing: border-box;
   border: none;
@@ -796,6 +804,9 @@
   resize: none;
   overflow: hidden;
   white-space: pre-wrap;
+}
+.ggai-note-block.is-open .ggai-note-body {
+  display: block;
 }
 .ggai-note-body:focus {
   box-shadow: none;
@@ -10129,7 +10140,7 @@ body.is-mobile .ggai-phone-homebar {
   margin-top: 0.35em;
 }
 .ggai-tr-propending:empty::before {
-  content: "여기서 한국어로 이어 쓰세요 — 잠시 멈추면 원고(영어판)에 반영됩니다";
+  content: "여기서 이어 쓰세요 — 이어쓰기(▶)를 누를 때 원고에 반영됩니다";
   color: var(--text-faint);
   pointer-events: none;
 }
@@ -10137,9 +10148,8 @@ body.is-mobile .ggai-phone-homebar {
 .ggai-tr-propending-block {
   color: var(--text-accent);
 }
-/* 변환(영어판 반영) 진행 중 — 잠깐 잠긴 구간. */
-.ggai-tr-paragraph.is-pro-converting,
-.ggai-tr-propending-lock {
+/* 변환(영어판 반영) 진행 중 — 잠깐 잠긴 문단. 초고 영역은 잠그지 않는다(계속 쓸 수 있게). */
+.ggai-tr-paragraph.is-pro-converting {
   opacity: 0.55;
 }
 

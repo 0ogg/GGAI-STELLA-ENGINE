@@ -13,6 +13,7 @@
  * 같은 서비스를 직접 호출한다.
  */
 
+import { Notice } from "obsidian";
 import type StellaEnginePlugin from "../main";
 import type {
   GenerationCompleteInput,
@@ -53,7 +54,11 @@ function createIllustrationExtension(): StellaExtension {
       }
 
       const r = await plugin.illustration.generateForNode(sessionFile, nodeId);
-      if (!r.ok) console.warn("[GGAI Stella] 자동 삽화 실패:", r.errors);
+      if (!r.ok) {
+        // 자동 번역과 같은 규칙 — 켜둔 자동 실행의 실패는 화면에 남긴다.
+        console.warn("[GGAI Stella] 자동 삽화 실패:", r.errors);
+        new Notice("자동 삽화 실패: " + (r.errors[0] ?? "알 수 없는 오류"));
+      }
     },
   };
 }

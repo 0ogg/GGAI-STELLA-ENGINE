@@ -7,7 +7,6 @@ import {
 import type StellaEnginePlugin from "../main";
 import { AIService, type GenerationProfileLite } from "../services/ai-service";
 import type { ProSpliceOp } from "../services/pro-service";
-import { PRO_CONVERT_IDLE_MS } from "../util/pro-convert";
 import { StellaStore, type SessionChangeDetail } from "../state/store";
 import type {
   Patch,
@@ -58,6 +57,7 @@ import type { SessionNote, SessionNotes } from "../types/note";
 import { createNoteWidgetEl } from "./note-widget";
 import { computeLatestAiMarkerOffset } from "../util/ai-start-marker";
 import { isImeComposing, runWhenImeIdle } from "./edit-guard";
+import { reportSessionFailure } from "./report-failure";
 import { IllustrationCarousel } from "./illustration-carousel";
 import {
   IllustrationGalleryModal,
@@ -334,14 +334,21 @@ export class SessionView extends ItemView {
    * 초고 입력란을 즉시 띄우거나 없앤다 (설정 저장 → 화면 반영 사이의 공백 제거).
    */
   private proRenderedBidirectional = false;
-  private proConvertTimer: number | null = null;
   /** 진행 중 변환 — flush 가 완료를 기다렸다가 잔여분을 이어 변환한다. */
   private proConvertPromise: Promise<boolean> | null = null;
-  /** 변환 중 잠근 요소들 — 성공/실패 시 해제. */
+  /** 변환 중 잠근 문단들 — 성공/실패 시 해제. */
   private proLockedBlockEls: HTMLElement[] = [];
-  private proLockedTailSpan: HTMLElement | null = null;
-  /** 잠근 초고 프리픽스 길이 — 재렌더로 잠금 DOM 이 사라져도 remainder 계산 가능. */
-  private proInFlightPrefixLen = 0;
+  /**
+   * 지금 변환에 보낸 초고 프리픽스(원문 그대로). 성공하면 이만큼을 초고에서 덜어낸다.
+   *
+   * 예전엔 이 구간을 `contenteditable=false` 로 잠갔는데, 초고 전체가 변환에 실려
+   * 가는 경우(커서가 초고 밖일 때·이어쓰기 flush) **초고 영역에 커서를 놓을 자리가
+   * 없어져** 사용자가 친 글자가 바로 앞 문단 속으로 들어갔다(그 문단이 수정본으로
+   * 커밋 → 다음 변환이 그 문단을 통째로 다시 씀 = "사이에 다른 문장이 끼어듦").
+   * 변환은 수 초~수십 초라 그동안 글을 못 쓰는 것도 집필 도구로선 치명적이다.
+   * → 잠그지 않고, 덜어낼 구간을 이 문자열로 기억한다.
+   */
+  private proInFlightTailPrefix = "";
   /** 번역 실행 중 — 중복 실행 방지 + 버튼 busy 표시. */
   private translating = false;
   /**
@@ -408,6 +415,15 @@ export class SessionView extends ItemView {
     rawText?: string;
     lastRaw?: unknown;
   } | null = null;
+  /**
+   * 생성 준비 중(집필 변환 / 자동 QR / 로어북 AI 선별 / 컨텍스트 조립) 여부.
+   *
+   * `generation` 은 전송본이 확정된 **뒤에야** 세팅되는데, 그 앞의 준비 단계만도
+   * AI 호출을 여러 번 한다(수 초~수십 초). 그동안 버튼이 멀쩡히 눌리면 두 번째
+   * 이어쓰기가 같은 뷰에서 나란히 돌아 서로의 생성 상태를 덮어쓴다. 준비 시작
+   * 시점부터 이 플래그로 잠근다.
+   */
+  private preparing = false;
   /**
    * 생성(스트리밍) 중 새로 도착한 생성 텍스트만 담는 전용 컨테이너.
    * 고정된 앞부분은 그대로 두고 이 컨테이너만 다시 그려, 세션이 길어도 매 delta 마다
@@ -524,7 +540,7 @@ export class SessionView extends ItemView {
     // 집필 프로 — 대기 초고/문단을 영어판에 반영 (소설 뷰는 no-op). 미리보기 =
     // 전송본 불변식에 초고도 포함되어야 하므로 여기서 함께 flush 한다. 실패해도
     // 여기서는 막지 않는다(호출자 다수) — 생성 시작 차단은 handleContinue 몫.
-    if (this.bidirectionalWriting()) await this.runProConvert(true);
+    if (this.bidirectionalWriting()) await this.runProConvert();
   }
 
   /**
@@ -1067,7 +1083,7 @@ export class SessionView extends ItemView {
       this.proPendingDraft = this.translations?.proDraft ?? "";
       return true;
     }
-    const draft = this.proPendingEl?.textContent ?? this.proPendingDraft;
+    const draft = this.readProPendingText();
     if (this.translations && draft !== "" && this.translations.proDraft !== draft) {
       this.translations.proDraft = draft;
       void this.saveTranslationsSuppressed();
@@ -2663,22 +2679,31 @@ export class SessionView extends ItemView {
 
   /** 이어쓰기 — activeLeaf 의 child 로 AI 노드를 만들고 chatStream 으로 생성 시작. */
   private async handleContinue(): Promise<void> {
-    if (!this.session || this.generation) return;
-    await this.commitPending({ force: true });
-    // 양방향 — 대기 초고/수정을 먼저 원장에 반영하고 출발한다. 이어쓰기 버튼이 곧
-    // "필요한 걸 전부 하고 생성"이라, 직전 실패가 있어도 누를 때마다 다시 시도한다.
-    // 지금 이 시도가 실패했을 때만 멈춘다 — 알림은 반영 실행부가 이미 띄웠고
-    // (중복 토스트 금지) 초고는 대기 상태로 남는다.
-    if (this.bidirectionalWriting() && !(await this.runProConvert(true))) return;
-    // 타이핑을 멈출 때마다 잘게 쌓인 유저 작성 노드를 생성 직전 하나로 합친다
-    // (본문은 동일, 분기 트리만 정리). 합쳤으면 저장.
-    if (mergeTrailingUserWrites(this.session)) {
-      this.redoStack = [];
-      await this.persistSession("유저 입력 노드 병합");
+    if (!this.session || this.generation || this.preparing) return;
+    this.preparing = true;
+    this.updateToolbar();
+    try {
+      await this.commitPending({ force: true });
+      // 양방향 — 대기 초고/수정을 먼저 원장에 반영하고 출발한다. 이어쓰기 버튼이 곧
+      // "필요한 걸 전부 하고 생성"이라, 직전 실패가 있어도 누를 때마다 다시 시도한다.
+      // 지금 이 시도가 실패했을 때만 멈춘다 — 알림은 반영 실행부가 이미 띄웠고
+      // (중복 토스트 금지) 초고는 대기 상태로 남는다.
+      if (this.bidirectionalWriting() && !(await this.runProConvert())) return;
+      // 타이핑을 멈출 때마다 잘게 쌓인 유저 작성 노드를 생성 직전 하나로 합친다
+      // (본문은 동일, 분기 트리만 정리). 합쳤으면 저장.
+      if (mergeTrailingUserWrites(this.session)) {
+        this.redoStack = [];
+        await this.persistSession("유저 입력 노드 병합");
+      }
+      // 사용자가 이번 턴에 쓴 내용을 확장 훅으로 (폰 키워드/방송 자동 감지).
+      this.flushPendingUserText();
+      await this.runGeneration(this.session.meta.activeLeafId, "ai-continue");
+    } catch (err) {
+      reportSessionFailure("이어쓰기", err);
+    } finally {
+      this.preparing = false;
+      this.updateToolbar();
     }
-    // 사용자가 이번 턴에 쓴 내용을 확장 훅으로 (폰 키워드/방송 자동 감지).
-    this.flushPendingUserText();
-    await this.runGeneration(this.session.meta.activeLeafId, "ai-continue");
   }
 
   /**
@@ -2686,15 +2711,24 @@ export class SessionView extends ItemView {
    * activeLeaf 가 AI 노드가 아니거나 root 면 동작하지 않는다.
    */
   private async handleRegen(): Promise<void> {
-    if (!this.session || this.generation) return;
-    await this.commitPending({ force: true });
+    if (!this.session || this.generation || this.preparing) return;
+    this.preparing = true;
+    this.updateToolbar();
+    try {
+      await this.commitPending({ force: true });
 
-    const cur = this.session.nodes[this.session.meta.activeLeafId];
-    if (!cur || !isAINode(cur) || cur.parent == null) {
-      new Notice("Regenerate is available only on AI generation nodes.");
-      return;
+      const cur = this.session.nodes[this.session.meta.activeLeafId];
+      if (!cur || !isAINode(cur) || cur.parent == null) {
+        new Notice("Regenerate is available only on AI generation nodes.");
+        return;
+      }
+      await this.runGeneration(cur.parent, "ai-regen");
+    } catch (err) {
+      reportSessionFailure("재생성", err);
+    } finally {
+      this.preparing = false;
+      this.updateToolbar();
     }
-    await this.runGeneration(cur.parent, "ai-regen");
   }
 
   /**
@@ -2794,6 +2828,9 @@ export class SessionView extends ItemView {
     // 3) 생성 상태 준비 — abort controller + generation 필드 + 편집 잠금.
     const abort = new AbortController();
     this.generation = { nodeId, abort, accumulatedText: "" };
+    // 재진입 잠금 인계 — 여기서부터는 generation 이 막으므로 준비 잠금은 푼다
+    // (생성 후 자동 번역/삽화가 도는 동안까지 버튼을 묶어두지 않는다).
+    this.preparing = false;
     this.setBodyEditable(false);
     this.updateToolbar();
     // 이어쓰기/재생성 — 생성이 붙는 지점(본문 끝)으로 이동해 스트리밍을 따라간다.
@@ -3263,15 +3300,21 @@ export class SessionView extends ItemView {
       } else {
         setIcon(this.continueBtn, "play");
         this.continueBtn.removeClass("ggai-cta-generating");
-        this.continueBtn.setAttr("aria-label", "Continue generation");
-        this.continueBtn.disabled = false;
+        // 준비 중(집필 변환/로어북 선별/컨텍스트 조립)에는 아직 정지할 스트림이
+        // 없으므로 재생 아이콘 그대로 두되 눌리지 않게 한다 — 두 번째 이어쓰기가
+        // 나란히 시작되던 문제.
+        this.continueBtn.setAttr(
+          "aria-label",
+          this.preparing ? "생성 준비 중…" : "Continue generation"
+        );
+        this.continueBtn.disabled = this.preparing;
       }
     }
 
     // 재생성 / 형제 nav
     if (this.regenBtn) {
       const canRegen = isAINode(cur) && cur.parent != null;
-      this.regenBtn.disabled = generating || !canRegen;
+      this.regenBtn.disabled = generating || this.preparing || !canRegen;
     }
     const siblings = getSiblings(this.session, cur.id);
     const idx = siblings.findIndex((n) => n.id === cur.id);
@@ -3735,10 +3778,16 @@ export class SessionView extends ItemView {
       if (this.bidirectionalWriting()) this.onProPendingInput();
     });
     editEl.addEventListener("blur", () => this.flushTranslationEdits());
-    // 집필 프로 — 여러 문단에 걸친 선택 삭제를 영어판 구조 삭제로 연동.
-    editEl.addEventListener("keydown", (e) => {
-      if (this.bidirectionalWriting()) this.onProDeleteKeydown(e);
-    });
+    // 문단 통째 삭제 = 원문(본문)에서도 삭제 — 양방향 번역과 무관한 번역 보기의 기본
+    // 동작이다(끄고 켜는 것에 따라 지운 문단이 되살아나면 안 된다).
+    editEl.addEventListener("keydown", (e) => this.onTranslationDeleteKeydown(e));
+    // 모바일 소프트키보드·잘라내기·컨텍스트 메뉴 삭제는 keydown 이 안 오거나 키를
+    // 식별할 수 없다. 같은 판정을 beforeinput 으로도 받는다 — keydown 이 이미
+    // preventDefault 한 경우엔 beforeinput 자체가 오지 않으므로 중복 처리가 없다.
+    // 초고 영역의 줄바꿈도 여기서 가로챈다 (아래 onProPendingNewline).
+    editEl.addEventListener("beforeinput", (e) =>
+      this.onTranslationBeforeInput(e as InputEvent)
+    );
 
     let docOffset = 0;
     for (const token of tokenizeParagraphs(this.baselineText)) {
@@ -3785,15 +3834,11 @@ export class SessionView extends ItemView {
       this.translationBlocks.push(block);
       // 개별 문단 재번역은 문단 재생성 패널(문단 선택 모드 → 재번역 버튼)로 통합됐다.
     }
-    // 집필 프로 — 본문 끝 이어쓰기(초고) 영역 + 남은 대기분 반영 재예약(자기 회복).
+    // 양방향 — 본문 끝 이어쓰기(초고) 영역. 남은 대기분은 여기서 반영하지 않는다
+    // (보기 전환·재렌더 같은 "내가 시키지 않은" 순간에 AI 가 도는 원인이었다) —
+    // 대기함에 그대로 있다가 이어쓰기를 누를 때 한 번에 반영된다.
     if (this.bidirectionalWriting()) {
       this.renderProPendingRegion(editEl);
-      if (
-        this.proPendingDraft.trim() !== "" ||
-        this.translationBlocks.some((b) => this.isProPendingBlock(b))
-      ) {
-        this.scheduleProConvert();
-      }
     } else {
       this.proPendingEl = null;
     }
@@ -3885,14 +3930,14 @@ export class SessionView extends ItemView {
     if (changed) {
       void this.saveTranslationsSuppressed();
       this.updateViewToggleBtn();
-      // 집필 프로 — 방금 커밋된 수정 문단을 대기 표시하고 영어판 반영을 예약.
+      // 양방향 — 방금 커밋된 수정 문단을 "반영 대기"로 표시만 한다. 실제 반영은
+      // 이어쓰기를 누를 때(runProConvert) 한 번에.
       if (this.bidirectionalWriting()) {
         for (const block of this.translationBlocks) {
           if (this.isProPendingBlock(block)) {
             block.el.addClass("ggai-tr-propending-block");
           }
         }
-        this.scheduleProConvert();
       }
     }
   }
@@ -3907,28 +3952,158 @@ export class SessionView extends ItemView {
   /** 번역 뷰 끝의 이어쓰기(초고) 영역 — 여기 쓴 한국어가 잠시 후 영어판으로 확정된다. */
   private renderProPendingRegion(editEl: HTMLElement): void {
     const pending = editEl.createEl("span", { cls: "ggai-tr-propending" });
-    pending.setText(this.proPendingDraft);
+    this.setProPendingContent(pending, this.proPendingDraft, null);
     this.proPendingEl = pending;
+  }
+
+  /**
+   * 초고 영역의 내용을 통째로 다시 세운다 (+ 필요하면 커서 배치).
+   *
+   * **타이핑 중에는 쓰지 않는다** — 텍스트 노드를 갈아치우면 브라우저가 그 노드에
+   * 물려 두었던 편집/IME 상태가 끊겨 바로 다음 글자(한글은 조합 첫 글자)가 삼켜진다.
+   * 재렌더·정리처럼 어차피 DOM 을 새로 만드는 자리에서만 호출한다.
+   */
+  private setProPendingContent(
+    pending: HTMLElement,
+    text: string,
+    caret: number | null
+  ): void {
+    pending.setText(text);
+    this.syncProPendingFiller(pending);
+    if (caret == null) return;
+    const sel = document.getSelection();
+    if (!sel) return;
+    const first = pending.firstChild;
+    if (first && first.nodeType === Node.TEXT_NODE) {
+      sel.collapse(first, Math.min(caret, (first as Text).length));
+    } else {
+      sel.collapse(pending, 0);
+    }
+  }
+
+  /**
+   * 초고 영역 offset → 실제 텍스트 노드와 그 안의 offset.
+   *
+   * 브라우저는 타이핑하면서 텍스트 노드를 여러 개로 남긴다(실측: 개행 뒤에 이어 쓰면
+   * "…\n" + "이어쓴 글" 두 노드). 그래서 "첫 노드 + 영역 offset"으로 계산하면 개행이
+   * 엉뚱한 자리에 들어간다. 노드를 합치지 않고(합치면 IME 상태가 끊긴다) 위치만 환산한다.
+   */
+  private proPendingCaretTarget(
+    pending: HTMLElement,
+    offset: number
+  ): { node: Text; offset: number } {
+    let acc = 0;
+    let last: Text | null = null;
+    for (const child of Array.from(pending.childNodes)) {
+      if (child.nodeType !== Node.TEXT_NODE) continue;
+      const node = child as Text;
+      if (offset <= acc + node.length) return { node, offset: offset - acc };
+      acc += node.length;
+      last = node;
+    }
+    if (last) return { node: last, offset: last.length };
+    const node = document.createTextNode("");
+    pending.insertBefore(node, pending.firstChild);
+    return { node, offset: 0 };
+  }
+
+  /**
+   * 끝 개행용 `<br>` 필러 맞추기 — 텍스트 노드는 건드리지 않는다.
+   * 끝 개행은 레이아웃에서 접혀 커서가 다음 줄로 안 내려가므로, 브라우저가 빈 줄에
+   * 쓰는 것과 같은 필러를 둔다(`textContent` 에는 안 잡혀 초고를 읽는 값은 그대로).
+   */
+  private syncProPendingFiller(pending: HTMLElement): void {
+    const needs = (pending.textContent ?? "").endsWith("\n");
+    const last = pending.lastChild;
+    const hasFiller = !!last && last.nodeName === "BR";
+    if (needs && !hasFiller) pending.appendChild(document.createElement("br"));
+    else if (!needs && hasFiller) last!.remove();
+  }
+
+  /** 초고 영역 조각들 — 브라우저가 줄바꿈에서 span 을 쪼개면 여러 개가 된다. */
+  private proPendingParts(): HTMLElement[] {
+    const edit = this.translationEditEl;
+    if (!edit) return this.proPendingEl ? [this.proPendingEl] : [];
+    return Array.from(edit.querySelectorAll<HTMLElement>(".ggai-tr-propending"));
+  }
+
+  /**
+   * 초고 영역의 현재 내용 — **쪼개진 조각까지 모아** 읽는다.
+   *
+   * Chromium 은 이 영역 안에서 줄바꿈이 생기면 span 자체를 형제 span 으로 쪼갠다
+   * (클래스까지 복제). 첫 조각만 읽던 예전 코드에서는 **둘째 줄부터 쓴 글이
+   * 어디에도 저장되지 않고** 다음 재렌더에 통째로 사라졌다.
+   */
+  private readProPendingText(): string {
+    const parts = this.proPendingParts();
+    if (parts.length === 0) return this.proPendingDraft;
+    return parts.map((p) => p.textContent ?? "").join("\n");
+  }
+
+  /** 쪼개진 조각을 한 span + 진짜 개행으로 되돌린다 (커서 유지, 붙여넣기 대비). */
+  private normalizeProPending(): void {
+    const parts = this.proPendingParts();
+    if (parts.length <= 1) return;
+    // 조합 중에는 DOM 을 재구성하지 않는다 (한글 입력 마비 회귀금지) — 읽는 값은
+    // readProPendingText 가 이미 조각을 합쳐 주므로 정리는 조합이 끝난 뒤로 미룬다.
+    if (isImeComposing()) return;
+    const text = parts.map((p) => p.textContent ?? "").join("\n");
+    let caret: number | null = null;
+    let acc = 0;
+    for (const part of parts) {
+      if (this.selectionStartWithin(part)) {
+        caret = acc + this.caretOffsetWithin(part);
+        break;
+      }
+      acc += (part.textContent ?? "").length + 1; // + 조각 사이 개행
+    }
+    for (let i = 1; i < parts.length; i++) parts[i].remove();
+    this.proPendingEl = parts[0];
+    this.setProPendingContent(parts[0], text, caret);
+  }
+
+  /**
+   * 초고 영역의 줄바꿈은 우리가 직접 `\n` 문자로 넣는다.
+   *
+   * 브라우저에 맡기면 span 을 형제 span 으로 쪼개 버려(위 readProPendingText 참조)
+   * 뷰가 초고를 온전히 못 읽는다. `white-space: pre-wrap` 이라 진짜 개행이 그대로
+   * 보이고, "초고 = span 하나 + 진짜 개행" 불변식이 유지된다.
+   */
+  private onProPendingNewline(e: InputEvent): void {
+    const pending = this.proPendingEl;
+    if (!pending || !this.bidirectionalWriting()) return;
+    const sel = document.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+    const range = sel.getRangeAt(0);
+    if (!pending.contains(range.startContainer)) return;
+    e.preventDefault();
+    range.deleteContents();
+    // 텍스트 노드는 **그대로 두고** 개행 한 글자만 끼워 넣는다. 노드를 새로 만들면
+    // (textContent 재설정) 브라우저의 편집/IME 상태가 끊겨 **엔터 다음 첫 글자가
+    // 삼켜진다**(한글은 조합 첫 글자). 커서도 removeAllRanges 로 잠깐 비우지 않고
+    // collapse 로 바로 옮긴다 — 선택이 비는 순간에도 조합이 깨진다.
+    const target =
+      range.startContainer.nodeType === Node.TEXT_NODE
+        ? { node: range.startContainer as Text, offset: range.startOffset }
+        : this.proPendingCaretTarget(pending, this.caretOffsetWithin(pending));
+    target.node.insertData(target.offset, "\n");
+    sel.collapse(target.node, target.offset + 1);
+    // 끝 개행은 줄이 안 생겨 커서가 제자리처럼 보인다 — 필러를 둔다(이어 쓰기
+    // 시작하면 브라우저가 스스로 치운다, 실측).
+    this.syncProPendingFiller(pending);
+    // beforeinput 을 막았으므로 input 이벤트가 안 온다 — 평소 타이핑과 같은 뒷처리를
+    // 여기서 직접 한다(초고 저장 디바운스 + 변환 예약).
+    this.scheduleTranslationCommit();
+    this.onProPendingInput();
   }
 
   /** editEl input 위임 — 초고 영역 텍스트 변화를 draft 에 반영하고 변환을 예약. */
   private onProPendingInput(): void {
-    const pending = this.proPendingEl;
-    if (!pending) return;
-    const text = pending.textContent ?? "";
-    if (text !== this.proPendingDraft) {
-      this.proPendingDraft = text;
-      this.scheduleProConvert();
-    }
-  }
-
-  private scheduleProConvert(): void {
-    if (!this.bidirectionalWriting()) return;
-    if (this.proConvertTimer != null) window.clearTimeout(this.proConvertTimer);
-    this.proConvertTimer = window.setTimeout(() => {
-      this.proConvertTimer = null;
-      void this.runProConvert(false);
-    }, PRO_CONVERT_IDLE_MS);
+    if (!this.proPendingEl) return;
+    this.normalizeProPending();
+    const text = this.readProPendingText();
+    // 반영은 예약하지 않는다 — 초고는 대기함에만 쌓이고, 이어쓰기 때 한 번에 나간다.
+    this.proPendingDraft = text;
   }
 
   /**
@@ -3967,20 +4142,18 @@ export class SessionView extends ItemView {
   }
 
   /**
-   * 이번에 영어판에 반영할 연산 수집.
-   *  - 수정 문단: 대기 블록 전부 (force 아니면 커서가 있는 문단은 다음 기회로)
-   *  - 초고: 영역 전체 (force 아니면 커서가 있는 줄 앞까지의 완성 문단만)
+   * 이번에 원고에 반영할 연산 수집 — 대기 중인 것 전부(수정 문단 + 초고 전체).
+   * 생성 직전에만 호출되므로 "쓰다 만 줄"을 가릴 이유가 없다(쓰던 것까지 다 반영).
    */
-  private collectProOps(force: boolean): {
+  private collectProOps(): {
     ops: ProSpliceOp[];
     blockEls: HTMLElement[];
-    tailPrefixLen: number;
+    tailPrefix: string;
   } {
     const ops: ProSpliceOp[] = [];
     const blockEls: HTMLElement[] = [];
     for (const block of this.translationBlocks) {
       if (!this.isProPendingBlock(block)) continue;
-      if (!force && this.selectionStartWithin(block.el)) continue;
       // 한국어 원문은 대기함이 1순위 (파일 실체), 폴백은 active user-edit variant.
       const queued = getPendingReflection(
         this.translations!.pendingReflections,
@@ -3997,53 +4170,31 @@ export class SessionView extends ItemView {
       });
       blockEls.push(block.el);
     }
-    let tailPrefixLen = 0;
-    const draft = this.proPendingEl?.textContent ?? this.proPendingDraft;
+    let tailPrefix = "";
+    const draft = this.readProPendingText();
     if (draft.trim() !== "") {
-      let prefix = draft;
-      if (
-        !force &&
-        this.proPendingEl &&
-        this.selectionStartWithin(this.proPendingEl)
-      ) {
-        const caret = this.caretOffsetWithin(this.proPendingEl);
-        const cut = draft.lastIndexOf("\n", Math.max(0, caret - 1));
-        prefix = cut >= 0 ? draft.slice(0, cut + 1) : "";
-      }
-      if (prefix.trim() !== "") {
-        tailPrefixLen = prefix.length;
-        ops.push({
-          from: this.baselineText.length,
-          to: this.baselineText.length,
-          ko: prefix,
-        });
-      }
+      tailPrefix = draft;
+      ops.push({
+        from: this.baselineText.length,
+        to: this.baselineText.length,
+        ko: draft,
+      });
     }
-    return { ops, blockEls, tailPrefixLen };
+    return { ops, blockEls, tailPrefix };
   }
 
-  /** 변환 대상 잠금 — 수정 문단은 편집 불가, 초고 프리픽스는 비편집 span 으로 감싼다. */
-  private lockProOps(blockEls: HTMLElement[], tailPrefixLen: number): void {
+  /**
+   * 변환 대상 잠금 — 수정 문단만 편집 불가로 (커서는 다른 문단·초고에 그대로 놓인다).
+   * 초고 프리픽스는 **잠그지 않고** 문자열만 기억한다 — 잠그면 변환이 끝날 때까지
+   * 초고 영역에 커서를 놓을 자리가 없어져 타이핑이 앞 문단으로 새어 들어갔다.
+   */
+  private lockProOps(blockEls: HTMLElement[], tailPrefix: string): void {
     for (const el of blockEls) {
       el.setAttr("contenteditable", "false");
       el.addClass("is-pro-converting");
       this.proLockedBlockEls.push(el);
     }
-    this.proInFlightPrefixLen = tailPrefixLen;
-    const pending = this.proPendingEl;
-    if (!pending || tailPrefixLen <= 0) return;
-    pending.normalize();
-    const first = pending.firstChild;
-    if (!first || first.nodeType !== Node.TEXT_NODE) return;
-    const textNode = first as Text;
-    // splitText 는 뒤쪽을 새 노드로 떼어낸다 — 커서가 뒤쪽이면 브라우저가 따라간다.
-    if (textNode.length > tailPrefixLen) textNode.splitText(tailPrefixLen);
-    const wrap = document.createElement("span");
-    wrap.className = "ggai-tr-propending-lock";
-    wrap.setAttribute("contenteditable", "false");
-    pending.insertBefore(wrap, textNode);
-    wrap.appendChild(textNode);
-    this.proLockedTailSpan = wrap;
+    this.proInFlightTailPrefix = tailPrefix;
   }
 
   private unlockProOps(): void {
@@ -4052,44 +4203,28 @@ export class SessionView extends ItemView {
       el.removeClass("is-pro-converting");
     }
     this.proLockedBlockEls = [];
-    const wrap = this.proLockedTailSpan;
-    if (wrap?.parentElement) {
-      const parent = wrap.parentElement;
-      while (wrap.firstChild) parent.insertBefore(wrap.firstChild, wrap);
-      wrap.remove();
-      parent.normalize();
-    }
-    this.proLockedTailSpan = null;
-    this.proInFlightPrefixLen = 0;
+    this.proInFlightTailPrefix = "";
   }
 
   /**
-   * 대기분을 영어판에 반영. force = 커서 문단까지 전부(생성/미리보기 직전 flush).
-   * 반환 false = 실패(초고는 대기 상태로 보존됨). 진행 중이면 완료를 기다렸다가
-   * force 일 때만 잔여분을 이어서 반영한다.
+   * 대기분(초고 + 수정 문단)을 원고에 반영한다 — **사용자가 생성을 요청할 때만** 돈다
+   * (이어쓰기·미리보기 flush). 반환 false = 실패(대기함에 그대로 보존, 재시도 가능).
+   *
+   * 예전엔 타이핑이 3초 멈출 때마다 자동으로 돌았는데, 사용자가 시키지 않은 순간에
+   * AI 가 돌고 그 결과로 화면이 다시 그려져 초고 입력란이 비워졌다 — "조건이 뭔지
+   * 모르겠고 오류 같다"(2026-08-01 사용자 제보). 쓰는 동안엔 아무것도 안 하고,
+   * 이어쓰기를 누를 때 한 번에 반영한다(잘못 쓴 문장으로 요청이 새어 나가지도 않는다).
    */
-  private async runProConvert(force: boolean): Promise<boolean> {
+  private async runProConvert(): Promise<boolean> {
     if (!this.bidirectionalWriting() || !this.session || !this.sessionFile) return true;
-    if (this.proConvertPromise) {
-      const prev = await this.proConvertPromise;
-      if (!force) return prev;
-    }
-    if (this.generation) {
-      // 생성 중엔 본문 소유권이 생성 플로우에 있다 — 끝난 뒤로 미룬다.
-      if (!force) this.scheduleProConvert();
-      return !force;
-    }
-    if (
-      !force &&
-      this.deferWhileComposing("pro-convert", () => void this.runProConvert(false))
-    ) {
-      return true;
-    }
+    if (this.proConvertPromise) await this.proConvertPromise;
+    // 생성 중엔 본문 소유권이 생성 플로우에 있다 — 반영은 다음 요청 때로.
+    if (this.generation) return false;
     // DOM 편집을 variant 로 확정해야 수집 재료(active variant)가 최신이 된다.
     this.flushTranslationEdits();
-    const { ops, blockEls, tailPrefixLen } = this.collectProOps(force);
+    const { ops, blockEls, tailPrefix } = this.collectProOps();
     if (ops.length === 0) return true;
-    const run = this.performProConvert(ops, blockEls, tailPrefixLen);
+    const run = this.performProConvert(ops, blockEls, tailPrefix);
     this.proConvertPromise = run;
     return await run.finally(() => {
       this.proConvertPromise = null;
@@ -4099,23 +4234,26 @@ export class SessionView extends ItemView {
   private async performProConvert(
     ops: ProSpliceOp[],
     blockEls: HTMLElement[],
-    tailPrefixLen: number
+    tailPrefix: string
   ): Promise<boolean> {
     if (!this.session || !this.sessionFile) return false;
-    this.lockProOps(blockEls, tailPrefixLen);
+    this.lockProOps(blockEls, tailPrefix);
     try {
       const r = await this.plugin.pro.convertAndSplice(this.sessionFile, ops, {
         origin: this.storeOrigin,
       });
       if (!r.ok) {
         this.unlockProOps();
-        if (!r.cancelled) {
-          new Notice(
-            "집필 변환 실패: " +
+        // 취소도 알린다 — 이 경로는 우리가 취소 신호를 준 적이 없으므로 사실상
+        // Core 의 요청 시간 초과다. 조용히 넘기면 이어쓰기까지 함께 멈춘 이유가
+        // 화면에도 로그에도 남지 않는다.
+        new Notice(
+          r.cancelled
+            ? "집필 변환이 중단됐습니다(요청 시간 초과/취소) — 초고는 대기 상태로 남아 있습니다."
+            : "집필 변환 실패: " +
               (r.errors[0] ?? "알 수 없는 오류") +
               " — 초고는 대기 상태로 남아 있습니다."
-          );
-        }
+        );
         return false;
       }
       this.applyProConversionResult();
@@ -4136,23 +4274,18 @@ export class SessionView extends ItemView {
    */
   private applyProConversionResult(): void {
     if (!this.session) return;
-    // 남은 초고와 커서 위치 회수 — 잠금 span 이 재렌더로 사라졌으면 프리픽스 길이로 폴백.
+    // 남은 초고와 커서 위치 회수 — 변환에 실려 간 프리픽스만 덜어낸다. 변환 중에도
+    // 초고 영역은 편집 가능하므로(잠그지 않는다) 그 사이 이어 쓴 꼬리가 그대로 남는다.
+    // 프리픽스가 그대로 붙어 있지 않으면(그 구간을 직접 고쳤다) 덜어내지 않는다 —
+    // 반영된 내용이 사라지는 것보다 한 번 더 보이는 쪽이 복구 가능하다.
     const pending = this.proPendingEl;
-    let remainder = "";
+    const prefix = this.proInFlightTailPrefix;
+    const full = this.readProPendingText();
+    const consumed = full.startsWith(prefix) ? prefix.length : 0;
+    let remainder = full.slice(consumed);
     let caretInRemainder: number | null = null;
-    if (pending) {
-      const lockedLen =
-        this.proLockedTailSpan?.textContent?.length ?? this.proInFlightPrefixLen;
-      const full = pending.textContent ?? "";
-      remainder = full.slice(Math.min(lockedLen, full.length));
-      if (this.selectionStartWithin(pending)) {
-        caretInRemainder = Math.max(
-          0,
-          this.caretOffsetWithin(pending) - lockedLen
-        );
-      }
-    } else {
-      remainder = this.proPendingDraft.slice(this.proInFlightPrefixLen);
+    if (pending && this.selectionStartWithin(pending)) {
+      caretInRemainder = Math.max(0, this.caretOffsetWithin(pending) - consumed);
     }
     // 확정된 프리픽스가 개행으로 끝났으니 remainder 선두의 남은 개행은 정리한다.
     remainder = remainder.replace(/^\n+/, "");
@@ -4224,15 +4357,37 @@ export class SessionView extends ItemView {
   }
 
   /**
-   * 집필 프로 — 한국어 보기의 "여러 문단 선택 → 삭제"를 영어판과 연동한다
+   * 번역 보기의 "문단 선택 → 삭제"를 원문(본문)과 연동한다
    * (AI 소설 편집의 기본기: 마음에 드는 곳까지 남기고 뒤를 지우기).
-   *  - 통째로 선택된 문단 = 영어판 해당 구간 구조 삭제 (AI 호출 없음, 노드라 undo 가능)
-   *  - 양끝의 부분 선택 문단 = 남은 한국어를 수정본으로 저장 → 대기→변환 흐름 합류
-   *  - 초고(pending) 영역에 걸친 선택 = 초고도 같이 잘림
+   *  - 통째로 선택된 문단 = 본문 해당 구간 구조 삭제 (AI 호출 없음, 노드라 undo 가능)
+   *  - 양끝의 부분 선택 문단 = 남은 번역문을 수정본으로 저장 (양방향이면 대기→변환 합류)
+   *  - 초고(pending) 영역에 걸친 선택 = 초고도 같이 잘림 (양방향 전용 영역)
    * 한 문단 안에서만 이루어지는 부분 삭제는 기존 문단 편집 흐름(기본 동작)에 맡긴다.
+   *
+   * **양방향 번역 설정과 무관하게 동작한다.** 예전엔 집필 프로(양방향) 전용이라
+   * 양방향이 꺼져 있으면 지운 문단이 저장되지 않고 다음 재렌더에 되살아났다
+   * (편집이 조용히 유실 — 회귀금지.md).
    */
-  private onProDeleteKeydown(e: KeyboardEvent): void {
+  private onTranslationDeleteKeydown(e: KeyboardEvent): void {
     if (e.key !== "Delete" && e.key !== "Backspace") return;
+    this.handleTranslationDelete(e);
+  }
+
+  /**
+   * 소프트키보드/잘라내기/컨텍스트 메뉴 삭제는 keydown 과 같은 판정으로 받고,
+   * 초고 영역의 줄바꿈은 우리가 직접 넣는다.
+   */
+  private onTranslationBeforeInput(e: InputEvent): void {
+    if (e.inputType.startsWith("delete")) {
+      this.handleTranslationDelete(e);
+      return;
+    }
+    if (e.inputType === "insertParagraph" || e.inputType === "insertLineBreak") {
+      this.onProPendingNewline(e);
+    }
+  }
+
+  private handleTranslationDelete(e: Event): void {
     if (isImeComposing()) return; // 조합 중엔 개입하지 않는다 (입력 마비 회귀 방지)
     const sel = document.getSelection();
     if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
@@ -4251,16 +4406,20 @@ export class SessionView extends ItemView {
       return;
     }
     e.preventDefault();
-    void this.performProStructuralDelete(range, hit, pendingHit);
+    void this.performTranslationStructuralDelete(range, hit, pendingHit);
   }
 
-  private async performProStructuralDelete(
+  private async performTranslationStructuralDelete(
     range: Range,
     hit: TranslationBlock[],
     pendingHit: boolean
   ): Promise<void> {
     if (!this.session || !this.sessionFile || !this.translations) return;
-    if (this.generation) return;
+    if (this.generation) {
+      // 키 입력은 이미 preventDefault 된 상태 — 조용히 삼키면 "지웠는데 안 지워짐"이 된다.
+      new Notice("생성 중에는 문단을 지울 수 없습니다. 생성이 끝난 뒤 지워주세요.");
+      return;
+    }
     // 본문(영어판) 미커밋 편집 먼저 확정 — 블록 offset 은 커밋된 baseline 기준.
     await this.commitPending({ force: true });
     // 커밋/외부 변경으로 블록이 낡았으면(원문 불일치) 취소 — 어긋난 삭제 방지.
@@ -4302,7 +4461,10 @@ export class SessionView extends ItemView {
           kind: "user-edit",
         });
         // 부분 삭제로 생긴 수정본도 대기함에 실체로 — 반영 전 유실 방지.
-        upsertPendingReflection(this.translations, b.hash, b.source, remain);
+        // (대기함은 양방향 번역의 원장 반영 큐다. 꺼져 있으면 번역문 수정으로만 남는다.)
+        if (this.bidirectionalWriting()) {
+          upsertPendingReflection(this.translations, b.hash, b.source, remain);
+        }
         b.baseline = remain;
         translationsChanged = true;
       }
@@ -4311,11 +4473,13 @@ export class SessionView extends ItemView {
     // 구조 삭제 — 인접 문단은 한 구간으로 병합하고 한쪽 구분자까지 지운다.
     if (fullyCovered.length > 0) {
       // 지워지는 문단의 반영 대기 건도 함께 정리 (유령 대기 방지).
-      clearPendingReflections(
-        this.translations,
-        fullyCovered.map((b) => b.hash)
-      );
-      translationsChanged = true;
+      if (this.translations.pendingReflections) {
+        clearPendingReflections(
+          this.translations,
+          fullyCovered.map((b) => b.hash)
+        );
+        translationsChanged = true;
+      }
       fullyCovered.sort((a, b) => a.offset - b.offset);
       const ranges: Array<{ from: number; to: number }> = [];
       for (const b of fullyCovered) {
@@ -4370,8 +4534,6 @@ export class SessionView extends ItemView {
     }
     this.updateToolbar();
     this.updateViewToggleBtn();
-    // 부분 선택으로 생긴 수정본은 대기 표시 → 변환 예약.
-    if (translationsChanged) this.scheduleProConvert();
   }
 
   /** 삭제 지점(raw offset) 이후 첫 문단 머리로 커서 이동 — 없으면 초고 영역으로. */

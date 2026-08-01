@@ -167,6 +167,8 @@ export class ChatSessionView extends ItemView {
   private illustrations: SessionIllustrations | null = null;
   /** 세션 노트 (notes.json — QR /comment). 말풍선 밑 접이식 위젯으로 표시. */
   private notes: SessionNotes | null = null;
+  /** 노트 위젯 풀 (note.id → 위젯) — 재렌더 때 재사용해야 펼쳐 둔 노트가 안 접힌다. */
+  private noteWidgetPool = new Map<string, HTMLElement>();
   private translationViewActive = false;
   private translating = false;
   private illustrating = false;
@@ -412,7 +414,7 @@ export class ChatSessionView extends ItemView {
       this.store.on("session-notes-changed", (file: string) => {
         if (file !== this.sessionFile) return;
         void this.store.getSessionNotes(file).then((n) => {
-          this.notes = n;
+          this.setNotes(n);
           runWhenImeIdle(() => this.renderMessages());
         });
       })
@@ -454,7 +456,7 @@ export class ChatSessionView extends ItemView {
     }
     this.translations = await this.store.getSessionTranslations(this.sessionFile);
     this.illustrations = await this.store.getSessionIllustrations(this.sessionFile);
-    this.notes = await this.store.getSessionNotes(this.sessionFile);
+    this.setNotes(await this.store.getSessionNotes(this.sessionFile));
     this.translationViewActive = this.translations?.displayMode === "translation";
     this.viewStyle = this.plugin.getViewStyle();
     await this.refreshMacroContext();
@@ -1201,19 +1203,32 @@ export class ChatSessionView extends ItemView {
       .join("");
   }
 
+  /** notes.json 교체 — 없어진 노트의 위젯은 풀에서 버린다(세션 전환 포함). */
+  private setNotes(notes: SessionNotes | null): void {
+    this.notes = notes;
+    const alive = new Set((notes?.notes ?? []).map((n) => n.id));
+    for (const id of [...this.noteWidgetPool.keys()]) {
+      if (!alive.has(id)) this.noteWidgetPool.delete(id);
+    }
+  }
+
   /** AI 말풍선 밑 삽화 캐러셀 — variant 가 있을 때만. */
   /** 말풍선 밑 노트(QR `/comment`) — 노드 귀속, 접이식 위젯(소설 뷰와 같은 위젯). */
   private renderBubbleNotes(stack: HTMLElement, nodeId: string): void {
     if (!this.notes || !this.sessionFile) return;
     for (const note of notesOfNode(this.notes, nodeId)) {
-      stack.appendChild(
-        createNoteWidgetEl(note, {
+      // 풀에서 꺼내 다시 꽂는다 — 새로 만들면 펼쳐 둔 노트가 재렌더마다 도로 접힌다.
+      let el = this.noteWidgetPool.get(note.id);
+      if (!el) {
+        el = createNoteWidgetEl(note, {
           onDelete: (n) => {
             const file = this.sessionFile;
             if (file) void this.store.deleteSessionNote(file, n.id);
           },
-        })
-      );
+        });
+        this.noteWidgetPool.set(note.id, el);
+      }
+      stack.appendChild(el);
     }
   }
 
@@ -2577,13 +2592,15 @@ export class ChatSessionView extends ItemView {
       }
       if (!this.session || !this.sessionFile) return; // 변환 중 세션이 바뀌었을 수 있다
       if (!conv.ok) {
-        if (!conv.cancelled) {
-          new Notice(
-            "양방향 변환 실패: " +
+        // 취소도 알린다 — 우리가 취소 신호를 준 적 없는 경로라 사실상 Core 의
+        // 요청 시간 초과다. 조용히 넘기면 "전송이 안 됐는데 이유가 없는" 상태가 된다.
+        new Notice(
+          conv.cancelled
+            ? "양방향 변환이 중단됐습니다(요청 시간 초과/취소) — 입력은 그대로 남아 있습니다."
+            : "양방향 변환 실패: " +
               (conv.errors[0] ?? "알 수 없는 오류") +
               " — 입력은 그대로 남아 있습니다."
-          );
-        }
+        );
         return;
       }
       messageText = conv.text;
