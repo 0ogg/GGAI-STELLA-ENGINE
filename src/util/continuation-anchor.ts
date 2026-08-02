@@ -38,6 +38,16 @@ const OPENERS = /["'“‘「『（【〔《〈［(\[«‹]/;
  */
 const SCENE_BREAK = /^\*{3,}$/;
 
+/** 한 줄이 장면 구분선인가 (공백 무시). */
+function isSceneBreakLine(line: string): boolean {
+  return SCENE_BREAK.test(line.replace(/\s+/g, ""));
+}
+
+/** 본문(꼬리 공백 제거본)의 마지막 줄이 장면 구분선인가. */
+function endsWithSceneBreak(trimmed: string): boolean {
+  return isSceneBreakLine(trimmed.slice(trimmed.lastIndexOf("\n") + 1));
+}
+
 /**
  * 앵커 반복 앞에 올 수 있는 "서식 문자" — 공백/따옴표/괄호/대시/마크다운 마커.
  * 응답 앞머리에서 앵커 반복을 찾을 때, 이 문자들만 건너뛰고 실제 내용 글자를
@@ -75,10 +85,15 @@ const PARAGRAPH_LONG_MIN = 200;
  *
  * 마지막 문장이 너무 짧으면(감탄사 등) 앞 문장까지 포함한다.
  * 경계를 못 찾으면 본문 끝 ANCHOR_MAX_LEN 자 이내로 자른다.
+ *
+ * 본문이 장면 구분선(`***`)으로 끝나면 이을 이음새가 없으므로 null — 앵커를 붙이면
+ * 구분선 앞 문장을 받아쓰고 "진행 중인 문단이니 새 문단으로 취급하지 말라"고
+ * 지시하는 셈이라, 모델이 장면 전환을 무시하고 앞 장면을 계속 쓴다.
  */
 export function extractAnchorSentence(bodyText: string): string | null {
   const t = bodyText.replace(/\s+$/, "");
   if (!t) return null;
+  if (endsWithSceneBreak(t)) return null;
   const starts = sentenceStarts(t);
   for (let i = starts.length - 1; i >= 0; i--) {
     const cand = t.slice(starts[i]);
@@ -154,9 +169,10 @@ export function anchorEndsParagraph(anchor: string): boolean {
   if (!t) return false;
   // 장면 구분선(***, * * *)으로 끝나면 문단이 확실히 끝나는 자리 — 문장부호로
   // 끝나지 않아도 새 문단이 올 수 있으므로 이음새 줄바꿈을 걷어내지 않고 보존한다.
-  // (구분선을 미완성 조각으로 오해해 뒤 문단이 ***에 들러붙던 버그 수정.)
-  const lastLine = t.slice(t.lastIndexOf("\n") + 1);
-  if (SCENE_BREAK.test(lastLine.replace(/\s+/g, ""))) return true;
+  // (구분선을 미완성 조각으로 오해해 뒤 문단이 ***에 들러붙던 버그 수정.
+  //  extractAnchorSentence 가 구분선으로 끝나는 본문에 앵커를 만들지 않게 된 뒤로도
+  //  안전망으로 남겨 둔다 — 다른 경로에서 넘어온 앵커도 같은 판정을 받게.)
+  if (endsWithSceneBreak(t)) return true;
   const last = t[t.length - 1];
   if (!TERMINATORS.test(last) && !CLOSERS.test(last)) return false;
   return !hasUnclosedOpener(t);

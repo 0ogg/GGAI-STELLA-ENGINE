@@ -2259,6 +2259,14 @@ const asyncTests: Promise<void>[] = [];
   assert.equal(extractAnchorSentence("완결. 그는 천천히 손을  \n"), "그는 천천히 손을");
   // 빈 본문 → null.
   assert.equal(extractAnchorSentence("   \n  "), null);
+  // 장면 구분선(***)으로 끝나면 이을 이음새가 없다 → 앵커 없음(다음 장면을 새로 쓰게).
+  assert.equal(extractAnchorSentence("문장이 끝났다.\n\n***"), null);
+  assert.equal(extractAnchorSentence("문장이 끝났다.\n* * *\n\n"), null);
+  // 구분선이 본문 중간이면 평소대로 마지막 문장이 앵커.
+  assert.equal(
+    extractAnchorSentence("앞 장면.\n***\n새 장면이 시작됐다."),
+    "새 장면이 시작됐다."
+  );
   // 경계가 전혀 없는 초장문은 뒤에서 단어 경계로 자른다.
   const longRun = "가나다라 ".repeat(100).trim();
   const capped = extractAnchorSentence(longRun)!;
