@@ -46,6 +46,11 @@ import {
 import { StellaExtensionRegistry } from "./services/extension-registry";
 import { registerSummaryExtension } from "./extensions/summary-extension";
 import { registerVariablesExtension } from "./extensions/variables-extension";
+import {
+  REPETITION_EXTENSION_ID,
+  registerRepetitionExtension,
+} from "./extensions/repetition-extension";
+import type { RepetitionSettings } from "./util/repetition";
 import { registerTranslationExtension } from "./extensions/translation-extension";
 import { registerIllustrationExtension } from "./extensions/illustration-extension";
 import {
@@ -205,6 +210,11 @@ export interface StellaPluginData {
    * 세션 값은 여기가 아니라 기존 `session.meta.variables` 에 그대로 있다.
    */
   globalVariables?: Record<string, string>;
+  /**
+   * 반복 표현 확장 설정 — 모든 세션 공통(전역). 세션 스키마를 건드리지 않는 게
+   * 이 확장의 롤백 경계라 활성 설정(`ActiveSettings`)이 아니라 여기 산다.
+   */
+  repetition?: RepetitionSettings;
   /**
    * 기본 제공 확장 켜짐/꺼짐 — 확장 id → enabled. 항목이 없으면 기본 켜짐(true).
    * false 인 확장은 등록 자체를 하지 않아 자동 동작·설정 패널·세션 UI 가 전부 사라진다.
@@ -1004,6 +1014,11 @@ export default class StellaEnginePlugin extends Plugin {
       desc: "값에 따라 로어북 항목의 일부만 프롬프트에 넣습니다(성장 단계별 설명, 시스템 on/off 등). 끄면 항목 내용이 조건 없이 통째로 들어갑니다.",
     },
     {
+      id: "stella:repetition",
+      name: "반복 표현",
+      desc: "최근 진행분에서 AI가 되풀이한 표현을 세어 다음 생성 때 피하라고 알려줍니다(AI를 따로 부르지 않습니다). 끄면 알림과 반복 표현 설정이 사라집니다.",
+    },
+    {
       id: "stella:card-display",
       name: "카드 화면 표시",
       desc: "카드가 낸 상태창·표·이미지를 채팅 말풍선에 화면으로 그립니다(스크립트는 실행하지 않습니다). 끄면 태그가 글자 그대로 보입니다.",
@@ -1088,6 +1103,12 @@ export default class StellaEnginePlugin extends Plugin {
       "stella:variables",
       this.isExtensionEnabled("stella:variables"),
       () => registerVariablesExtension(this)
+    );
+    // 반복 표현 — 끄면 컨텍스트 기여 자체가 사라진다(전송본 byte 동일).
+    this.syncExtensionResource(
+      REPETITION_EXTENSION_ID,
+      this.isExtensionEnabled(REPETITION_EXTENSION_ID),
+      () => registerRepetitionExtension(this)
     );
   }
 

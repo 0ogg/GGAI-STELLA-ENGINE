@@ -1109,27 +1109,13 @@ export class ChatSessionView extends ItemView {
       } else if (this.translationViewActive) {
         // 번역 보기 — 번역 슬롯 치환 표시 + 직접 편집(문단별 user-edit variant 로
         // translations.json 에만 저장 — 본문(원문)은 절대 건드리지 않는다).
-        this.setBubbleDisplay(
-          bubble,
-          this.displayRegexText(
-            this.macroText(
-              this.translatedTextOf(
-                this.displayTextOf(msg),
-                this.prevTailOf(index)
-              )
-            ),
-            index
-          )
-        );
+        this.setBubbleDisplay(bubble, this.bubbleDisplayText(msg, index));
         row.addClass("is-translated");
         if (!this.paraSelectMode) this.makeTranslationBubbleEditable(bubble);
       } else {
         // 표시 = 매크로 적용본에 표기(기울임/대사/문단) 반영, 편집 진입(focus)
         // 시 raw 로 스왑.
-        this.setBubbleDisplay(
-          bubble,
-          this.displayRegexText(this.macroText(this.displayTextOf(msg)), index)
-        );
+        this.setBubbleDisplay(bubble, this.bubbleDisplayText(msg, index));
         // 선택 모드에서는 편집 대신 탭 = 재생성 대상 지정.
         if (!this.paraSelectMode) this.makeBubbleEditable(bubble);
       }
@@ -1981,6 +1967,18 @@ export class ChatSessionView extends ItemView {
     return null;
   }
 
+  /**
+   * 말풍선에 보이는 그대로의 텍스트 — 번역 보기면 번역본, 아니면 원문에
+   * 매크로/표시 정규식까지 적용한 결과. 렌더와 복사가 같은 값을 쓴다.
+   */
+  private bubbleDisplayText(msg: ChatSessionMessage, index: number): string {
+    const base = this.displayTextOf(msg);
+    const text = this.translationViewActive
+      ? this.translatedTextOf(base, this.prevTailOf(index))
+      : base;
+    return this.displayRegexText(this.macroText(text), index);
+  }
+
   /** 표시 텍스트 — 메시지 앞 구분자만 벗긴다 (원문 그대로, trim 은 안 함). */
   private displayTextOf(msg: ChatSessionMessage): string {
     return msg.text.startsWith(CHAT_MESSAGE_SEPARATOR)
@@ -2094,6 +2092,12 @@ export class ChatSessionView extends ItemView {
     const menu = new Menu();
     menu.addItem((item) =>
       item
+        .setTitle("메시지 복사")
+        .setIcon("copy")
+        .onClick(() => void this.copyMessage(index))
+    );
+    menu.addItem((item) =>
+      item
         .setTitle("메시지 삭제")
         .setIcon("trash-2")
         .onClick(() => void this.deleteMessages(index, false))
@@ -2110,6 +2114,23 @@ export class ChatSessionView extends ItemView {
       );
     }
     menu.showAtPosition({ x, y });
+  }
+
+  /** 말풍선에 보이는 그대로(번역 보기면 번역본)를 클립보드에 담는다. */
+  private async copyMessage(index: number): Promise<void> {
+    const msg = this.messages[index];
+    if (!msg) return;
+    const text = this.bubbleDisplayText(msg, index).trim();
+    if (!text) {
+      new Notice("복사할 내용이 없습니다.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      new Notice("메시지를 클립보드에 복사했습니다.");
+    } catch {
+      new Notice("복사 실패.");
+    }
   }
 
   /**
