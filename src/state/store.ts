@@ -20,6 +20,7 @@
  *   "session-translations-changed" (sessionFile) - 특정 세션의 translations.json (문단 번역) 변경
  *   "session-summaries-changed" (sessionFile)    - 특정 세션의 summaries.json (노드 앵커 요약) 변경
  *   "session-notes-changed" (sessionFile)        - 특정 세션의 notes.json (QR /comment 노트) 변경
+ *   "session-node-meta-changed" (sessionFile)    - 특정 세션의 node-meta.json (AI 숨김/발화자 이름표) 변경
  *   "quick-replies-changed"              - 빠른 답장(QR) 세트 목록 또는 내용 변경
  *   "quick-reply-changed" (setFile)      - 특정 QR 세트 변경
  *   "groups-changed"                     - 그룹 목록 또는 내용 변경 (G1)
@@ -76,9 +77,15 @@ import {
 import {
   createEmptySessionNotes,
   normalizeSessionNotes,
-  type SessionNote,
   type SessionNotes,
 } from "../types/note";
+import {
+  createEmptyNodeMetaMap,
+  normalizeNodeMetaMap,
+  patchNodeMeta,
+  type SessionNodeMeta,
+  type SessionNodeMetaMap,
+} from "../types/node-meta";
 import {
   backfillAccountsFromSnsFeed,
   createEmptyPhoneGallery,
@@ -1371,8 +1378,9 @@ export class StellaStore extends Events {
   // ─────────────────────────── session notes (notes.json) ───────────────────────────
 
   /**
-   * 세션 폴더의 notes.json (QR `/comment` 노트). 없으면 빈 구조 반환 (디스크에 만들지 않음).
-   * 캐시 없이 매번 읽는다 (표시/추가 시점에만 접근). 이벤트: "session-notes-changed".
+   * 세션 폴더의 notes.json (레거시 QR `/comment` 노트 — **더 이상 새로 쓰지 않는다**,
+   * `/comment` 는 본문 노드 + `node-meta.json` 숨김으로 바뀌었다). 이미 쌓인 노트를
+   * 계속 보여주고 지울 수 있게 읽기·삭제만 남는다. 이벤트: "session-notes-changed".
    */
   async getSessionNotes(sessionFile: string): Promise<SessionNotes> {
     const path = notesFileOfSessionFile(sessionFile);
@@ -1403,21 +1411,60 @@ export class StellaStore extends Events {
     this.trigger("session-notes-changed", sessionFile);
   }
 
-  /** 노트 1개 추가 — 같은 노드에 여러 개가 쌓인다(대체하지 않는다). */
-  async addSessionNote(
-    sessionFile: string,
-    note: SessionNote
-  ): Promise<void> {
-    const notes = await this.getSessionNotes(sessionFile);
-    notes.notes.push(note);
-    await this.saveSessionNotes(sessionFile, notes);
-  }
-
   async deleteSessionNote(sessionFile: string, noteId: string): Promise<void> {
     const notes = await this.getSessionNotes(sessionFile);
     const next = notes.notes.filter((n) => n.id !== noteId);
     if (next.length === notes.notes.length) return;
     await this.saveSessionNotes(sessionFile, { ...notes, notes: next });
+  }
+
+  // ─────────────────────── session node meta (node-meta.json) ───────────────────────
+
+  /**
+   * 세션 폴더의 node-meta.json (노드별 AI 숨김 / 익명 발화자 이름표).
+   * 없으면 빈 구조 반환 (디스크에 만들지 않음). 이벤트: "session-node-meta-changed".
+   *
+   * `session.json` 은 건드리지 않는다 — 이 파일만 지우면 도입 전과 완전히 같아진다.
+   */
+  async getSessionNodeMeta(sessionFile: string): Promise<SessionNodeMetaMap> {
+    const path = nodeMetaFileOfSessionFile(sessionFile);
+    if (path) {
+      const f = this.vault.getAbstractFileByPath(path);
+      if (f instanceof TFile) {
+        try {
+          return normalizeNodeMetaMap(JSON.parse(await this.vault.read(f)));
+        } catch (err) {
+          console.warn("[GGAI Stella] node-meta.json 로드 실패:", err);
+        }
+      }
+    }
+    return createEmptyNodeMetaMap();
+  }
+
+  async saveSessionNodeMeta(
+    sessionFile: string,
+    map: SessionNodeMetaMap
+  ): Promise<void> {
+    const path = nodeMetaFileOfSessionFile(sessionFile);
+    if (!path) throw new Error("Invalid session path");
+    this.markSelfWrite(path);
+    const body = JSON.stringify(map, null, 2);
+    const f = this.vault.getAbstractFileByPath(path);
+    if (f instanceof TFile) await this.vault.modify(f, body);
+    else await this.vault.create(path, body);
+    this.trigger("session-node-meta-changed", sessionFile);
+  }
+
+  /** 노드 하나의 값 변경. 실제로 달라질 때만 저장·방송한다. */
+  async patchSessionNodeMeta(
+    sessionFile: string,
+    nodeId: string,
+    patch: SessionNodeMeta
+  ): Promise<void> {
+    const map = await this.getSessionNodeMeta(sessionFile);
+    const next = patchNodeMeta(map, nodeId, patch);
+    if (JSON.stringify(next.nodes) === JSON.stringify(map.nodes)) return;
+    await this.saveSessionNodeMeta(sessionFile, next);
   }
 
   // ─────────────────────────── session illustrations (illustrations.json) ───────────────────────────
@@ -2396,6 +2443,12 @@ export class StellaStore extends Events {
       this.trigger("session-notes-changed", sessionFile);
       return;
     }
+    // node-meta.json 변경 (노드 AI 숨김 / 익명 발화자 이름표)
+    if (path.endsWith("/node-meta.json")) {
+      const sessionFile = `${path.slice(0, -"/node-meta.json".length)}/session.json`;
+      this.trigger("session-node-meta-changed", sessionFile);
+      return;
+    }
     // illustrations.json 변경 (노드 삽화)
     if (path.endsWith("/illustrations.json")) {
       const sessionFile = `${path.slice(0, -"/illustrations.json".length)}/session.json`;
@@ -2672,6 +2725,12 @@ function summariesFileOfSessionFile(sessionFile: string): string | null {
 function notesFileOfSessionFile(sessionFile: string): string | null {
   const folder = sessionFolderOfSessionFilePath(sessionFile);
   return folder ? `${folder}/notes.json` : null;
+}
+
+/** .../session.json → .../node-meta.json (노드 AI 숨김 / 익명 발화자 이름표) */
+function nodeMetaFileOfSessionFile(sessionFile: string): string | null {
+  const folder = sessionFolderOfSessionFilePath(sessionFile);
+  return folder ? `${folder}/node-meta.json` : null;
 }
 
 /** .../session.json → .../illustrations.json */

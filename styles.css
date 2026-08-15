@@ -742,6 +742,34 @@
   -webkit-user-select: none;
 }
 
+/* 익명 발화자 이름표 (QR /sendas name=) — 소설 본문에 꽂히는 글자 0개 원자 블록.
+   이름은 data 속성 + CSS content 로 그린다 (textContent 에 안 잡혀야 편집 diff 가 안 깨진다). */
+.ggai-speaker-label {
+  display: block;
+  margin: 0.5em 0 0.15em;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.ggai-speaker-label::after {
+  content: attr(data-name);
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-style: normal;
+  line-height: 1.5;
+}
+
+/* AI 에게 보내지 않는 본문 구간 (/hide, /comment) — 글자는 그대로, 표시만 흐리게. */
+.ggai-span-nosend {
+  opacity: 0.55;
+  text-decoration: underline dotted var(--background-modifier-border);
+  text-underline-offset: 3px;
+}
+
 /* 세션 노트 (QR /comment) — 제목 달린 접이식 블록.
    본문 안의 원자 블록이라 글자 0개 규칙을 지킨다: 제목은 data 속성 + CSS content,
    본문은 readonly textarea 의 value (둘 다 textContent 에 안 잡힌다). */
@@ -1679,9 +1707,11 @@ input.ggai-vs-slider[type="range"] {
   vertical-align: top;
 }
 /* 보기 설정: 문단 첫 줄 들여쓰기 (원문 뷰 .ggai-para-indent 와 동일). */
+/* 문단 안 줄바꿈은 진짜 개행 문자로 넣으므로(브라우저 블록 분리 금지) pre-wrap. */
 .ggai-tr-paragraph {
   position: relative;
   padding-left: var(--ggai-view-indent, 0em);
+  white-space: pre-wrap;
 }
 /* 번역 관련 도구 버튼(전환/일괄/되돌리기) — 번역 사용(enabled) 아니면 숨김.
    뷰 헤더 액션 (PC/모바일 공통). */
@@ -7605,6 +7635,44 @@ body.is-mobile .ggai-chat-inputbar {
   align-items: center;
   justify-content: center;
   color: var(--text-muted);
+}
+
+/* 익명 발화자 (QR /sendas name= 가 멤버가 아닌 이름을 준 경우) — 이니셜 아바타 + 흐린 이름. */
+.ggai-chat-avatar-initial {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: calc(var(--ggai-chat-avatar-size, 80px) * 0.4);
+  line-height: 1;
+}
+.ggai-chat-name.is-anon-speaker {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+/* AI 에게 보내지 않는 메시지 (/hide, /comment) — 화면엔 남고 전송본에서만 빠진다. */
+.ggai-chat-nosend-mark {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  vertical-align: -2px;
+  color: var(--text-faint);
+}
+.ggai-chat-nosend-mark svg {
+  width: 12px;
+  height: 12px;
+}
+.ggai-chat-msg.is-nosend .ggai-chat-bubble {
+  opacity: 0.6;
+  border: 1px dashed var(--background-modifier-border);
+}
+.ggai-chat-msg.is-nosend .ggai-chat-avatar {
+  opacity: 0.5;
 }
 
 /* 발화자별 이름 라벨 색 — 멤버 순서 기준 6색 순환 (그룹 챗에서만 부여). */

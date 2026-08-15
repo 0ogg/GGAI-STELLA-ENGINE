@@ -138,16 +138,6 @@ export function buildContext(
     configuredMarkers.add(item.identifier);
     if (item.enabled) activeMarkers.add(item.identifier);
   }
-  // 요약 명시 배치 여부 — chatSummary 마커가 켜져 있거나 프롬프트가 {{summary}}
-  // 매크로를 쓰면 그 위치를 존중하고 자동 삽입하지 않는다 (페르소나와 같은 규칙).
-  const summaryExplicit =
-    activeMarkers.has("chatSummary") ||
-    input.preset.prompts.some(
-      (item) =>
-        item.enabled &&
-        item.kind === "text" &&
-        /\{\{\s*summary\s*\}\}/i.test(item.content)
-    );
   const claimedSources = new Set<string>();
   if (activeMarkers.has("charDescription")) claimedSources.add("description");
   if (activeMarkers.has("charPersonality")) claimedSources.add("personality");
@@ -183,6 +173,19 @@ export function buildContext(
   for (const g of Object.values(lorebookByPos)) {
     g.sort((a, b) => b.order - a.order);
   }
+
+  // 자리 지정 매크로 — chatSummary 마커가 켜져 있거나 {{summary}} 가 쓰이면 그 자리를
+  // 존중하고 자동 삽입하지 않는다 (페르소나와 같은 규칙).
+  // 매크로는 실제로 확장되는 **모든** 자리(프롬프트 항목·마커 가공 템플릿·세션 메모·
+  // 작가노트·매칭된 로어북·본문)에서 찾는다. 프롬프트 항목만 보면 나머지 자리에 쓴
+  // 매크로가 "옮기기"가 아니라 "한 번 더 삽입"이 되어 같은 내용이 두 번 들어간다.
+  const macroTexts = macroPlacementTexts(
+    input,
+    matched.map((m) => m.entry)
+  );
+  const summaryExplicit =
+    activeMarkers.has("chatSummary") ||
+    macroTexts.some((t) => SUMMARY_MACRO_RE.test(t));
 
   // ── 3. 매크로 컨텍스트 ───────────────────────────────────────────
   const wiBefore = renderLorebookEntries(lorebookByPos.before_char);
@@ -887,6 +890,30 @@ function pushPersonaMessage(
   return true;
 }
 
+/** 전역 플래그 없음 — `test()` 를 반복 호출해도 lastIndex 가 남지 않는다. */
+const SUMMARY_MACRO_RE = /\{\{\s*summary\s*\}\}/i;
+
+/**
+ * 자리 지정 매크로({{summary}})가 실제로 확장되는 자리의 원문 전부.
+ * 프롬프트 항목만 보면 나머지 자리에 쓴 매크로가 배치가 아니라 "한 번 더 삽입"이 된다.
+ */
+function macroPlacementTexts(
+  input: ContextBuilderInputV2,
+  matchedEntries: StellaLorebookEntry[]
+): string[] {
+  const texts: string[] = [];
+  for (const item of input.preset.prompts) {
+    if (!item.enabled) continue;
+    if (item.kind === "text") texts.push(item.content);
+    else if (item.wrap) texts.push(item.wrap);
+  }
+  if (input.memory) texts.push(input.memory);
+  if (input.authorNote) texts.push(input.authorNote);
+  for (const entry of matchedEntries) texts.push(entry.content);
+  for (const m of input.sessionLog) texts.push(m.content);
+  return texts;
+}
+
 function presetUsesPersonaMacro(preset: StellaPromptPreset): boolean {
   return preset.prompts.some(
     (item) => item.enabled && item.kind === "text" && /\{\{\s*persona\s*\}\}/i.test(item.content)
@@ -964,7 +991,7 @@ function lorebookSource(label: string, entries: StellaLorebookEntry[]): ContextS
 }
 
 /**
- * 본문 끝-4 지점에 함께 삽입되는 개입 블록 — 요약(있으면) 바로 아래 작가노트.
+ * 본문 끝-4 지점에 함께 삽입되는 개입 블록 — 요약 → 작가노트 순.
  */
 function buildNoteBlock(inserts: {
   authorNote?: string;
@@ -1003,9 +1030,23 @@ function buildChatHistoryMessages(
   mode: "novel" | "textgame" | "chat",
   // 소설모드 본문을 내보낼 롤 (chatHistory 마커 설정, 기본 assistant). 챗 모드 무관.
   novelHistoryRole: "user" | "assistant",
-  inserts: { memory?: string; authorNote?: string; summary?: string }
+  inserts: {
+    memory?: string;
+    authorNote?: string;
+    summary?: string;
+  }
 ): ChatMessage[] {
   const noteBlock = buildNoteBlock(inserts);
+  // 메모리 상단 — 메모리가 비어 있으면 그냥 chatHistory 맨 앞이 된다.
+  const memoryBlock: ChatMessage[] = [];
+  if (inserts.memory?.trim()) {
+    memoryBlock.push({
+      role: "system",
+      content: inserts.memory,
+      source: { type: "memory", label: "Session: memory" },
+      contextKind: "prompt",
+    });
+  }
   if (mode === "chat") {
     const messages: ChatMessage[] = log.map((m, index) => ({
       role: m.role,
@@ -1013,15 +1054,10 @@ function buildChatHistoryMessages(
       source: { type: "chat", label: `Chat History #${index + 1}` },
       contextKind: "history",
     }));
-    if (inserts.memory?.trim()) {
-      // 메모리 — chatHistory 앞 (novel 모드와 동일하게 맨 앞에 삽입).
-      messages.unshift({
-        role: "system",
-        content: inserts.memory,
-        source: { type: "memory", label: "Session: memory" },
-        contextKind: "prompt",
-      });
-    }
+    // 메모리 — chatHistory 앞 (novel 모드와 동일하게 맨 앞에 삽입).
+    // 삽입 순서는 기존 그대로 둔다(메모리 → 노트 블록) — 바꾸면 짧은 로그에서
+    // 노트 블록 자리가 달라져 전송본이 이전과 byte 단위로 달라진다.
+    if (memoryBlock.length > 0) messages.unshift(...memoryBlock);
     if (noteBlock.length > 0) {
       const pos = Math.max(0, messages.length - 4);
       messages.splice(pos, 0, ...noteBlock);
@@ -1034,14 +1070,7 @@ function buildChatHistoryMessages(
     .map((m) => m.content)
     .join("");
   const messages: ChatMessage[] = [];
-  if (inserts.memory?.trim()) {
-    messages.push({
-      role: "system",
-      content: inserts.memory,
-      source: { type: "memory", label: "Session: memory" },
-      contextKind: "prompt",
-    });
-  }
+  messages.push(...memoryBlock);
   messages.push(...storyToMessages(story, noteBlock, novelHistoryRole));
   return messages;
 }

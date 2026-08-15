@@ -96,9 +96,24 @@ export interface ExtensionContextInput {
   plugin: StellaEnginePlugin;
   sessionFile: string;
   session: StellaSession;
-  /** 컨텍스트를 만드는 리프(=이어쓰기가 보낼 지점). */
+  /** 컨텍스트를 만드는 리프(=이어쓰기가 보낼 지점). 재생성이면 **부모 노드**다. */
   leafId: string;
+  /**
+   * 챗 재생성 전용 — 대화 로그 끝의 assistant 1개를 뺀 시점인가.
+   * `leafId` 만으로는 재생성 지점이 완전히 표현되지 않는다(갈아끼울 메시지 뒤에
+   * 편집 노드가 붙어 leaf 를 부모로 못 옮기는 경우). **이 생성이 보는 것과 똑같은
+   * 컨텍스트를 다시 만들어야 하는 확장**(이중 생성 1차 호출)이 이 값을 쓴다.
+   */
+  excludeTailAssistant?: boolean;
+  /** 그룹 챗 이번 발화자 (시나리오 stella.id). 위와 같은 이유로 함께 전달한다. */
+  speakerId?: string;
   settings: ActiveSettings;
+  /**
+   * 미리보기(전송본 확인) 호출인가. **AI 를 부르거나 무언가를 소비하는 기여는
+   * 이때 새로 실행하지 말고 마지막 결과를 재사용한다** — 미리보기를 열었을 뿐인데
+   * 호출과 비용이 발생하면 안 된다(로어북 AI 선별과 같은 규약).
+   */
+  dryRun?: boolean;
 }
 
 export interface GenerationCompleteInput {
@@ -212,7 +227,10 @@ export class StellaExtensionRegistry {
   }
 
   /** 내장 슬롯의 기여 텍스트를 합친다(여러 확장이 같은 슬롯을 채우면 이어붙인다). */
-  pickSlot(contributions: ContextContribution[], slot: "summary" | "phone"): string {
+  pickSlot(
+    contributions: ContextContribution[],
+    slot: "summary" | "phone"
+  ): string {
     return contributions
       .filter((c) => c.slot === slot)
       .map((c) => c.text)

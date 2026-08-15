@@ -107,6 +107,11 @@ import {
 import { IllustrationCarousel } from "./illustration-carousel";
 import { createNoteWidgetEl } from "./note-widget";
 import { notesOfNode, type SessionNotes } from "../types/note";
+import {
+  isNodeHidden,
+  nodeSpeakerName,
+  type SessionNodeMetaMap,
+} from "../types/node-meta";
 import { IllustrationRegenModal } from "./illustration-regen-modal";
 import { ParagraphRegenModal } from "./paragraph-regen-modal";
 import { ViewStylePopover } from "./view-style-popover";
@@ -165,8 +170,10 @@ export class ChatSessionView extends ItemView {
   // ── 미디어/보기 (C3) ──
   private translations: SessionTranslations | null = null;
   private illustrations: SessionIllustrations | null = null;
-  /** 세션 노트 (notes.json — QR /comment). 말풍선 밑 접이식 위젯으로 표시. */
+  /** 세션 노트 (notes.json — 레거시 QR /comment 노트). 말풍선 밑 접이식 위젯으로 표시. */
   private notes: SessionNotes | null = null;
+  /** 노드 부가 정보 (node-meta.json — AI 숨김 / 익명 발화자 이름표). */
+  private nodeMeta: SessionNodeMetaMap | null = null;
   /** 노트 위젯 풀 (note.id → 위젯) — 재렌더 때 재사용해야 펼쳐 둔 노트가 안 접힌다. */
   private noteWidgetPool = new Map<string, HTMLElement>();
   private translationViewActive = false;
@@ -419,6 +426,15 @@ export class ChatSessionView extends ItemView {
         });
       })
     );
+    this.registerEvent(
+      this.store.on("session-node-meta-changed", (file: string) => {
+        if (file !== this.sessionFile) return;
+        void this.store.getSessionNodeMeta(file).then((m) => {
+          this.nodeMeta = m;
+          runWhenImeIdle(() => this.renderMessages());
+        });
+      })
+    );
     this.render();
     // 모바일 — 뷰어 도구(갤러리/번역 전환)를 뷰 헤더 액션에 1회 등록.
     if (Platform.isMobile) this.setupViewerToolActions();
@@ -457,6 +473,7 @@ export class ChatSessionView extends ItemView {
     this.translations = await this.store.getSessionTranslations(this.sessionFile);
     this.illustrations = await this.store.getSessionIllustrations(this.sessionFile);
     this.setNotes(await this.store.getSessionNotes(this.sessionFile));
+    this.nodeMeta = await this.store.getSessionNodeMeta(this.sessionFile);
     this.translationViewActive = this.translations?.displayMode === "translation";
     this.viewStyle = this.plugin.getViewStyle();
     await this.refreshMacroContext();
@@ -652,11 +669,16 @@ export class ChatSessionView extends ItemView {
    * 주어진 대화 이력을 기준으로 다음 발화자를 판결한다 (지목 > 이름 불림 > 가중 랜덤).
    * 재생성은 갈아끼울 메시지를 뺀 이력을 넘겨 "누가 답할지"부터 다시 정한다.
    */
-  private chooseSpeaker(msgs: ChatSessionMessage[]): string | undefined {
+  private chooseSpeaker(all: ChatSessionMessage[]): string | undefined {
     if (!this.session || !this.isGroupChat()) return undefined;
     if (this.pinnedSpeakerId && this.memberOf(this.pinnedSpeakerId)) {
       return this.pinnedSpeakerId;
     }
+    // 익명 발화자(`/sendas` 로 넣은 신문·안내방송 등)는 순번 계산에서 뺀다 —
+    // 멤버가 아니므로 "직전에 누가 말했나 / 연속 몇 번인가"의 대상이 아니다.
+    const msgs = all.filter(
+      (m) => m.role !== "assistant" || !nodeSpeakerName(this.nodeMeta, m.nodeId)
+    );
     const hostId = this.session.meta.scenarioId;
     const last = msgs[msgs.length - 1];
     const speakerOf = (nodeId: string) =>
@@ -834,6 +856,7 @@ export class ChatSessionView extends ItemView {
       sessionFile: () => this.sessionFile,
       currentInput: () => this.inputEl?.value ?? "",
       runText: (text, send) => this.applyQuickReplyText(text, send),
+      triggerGeneration: (speaker) => this.triggerGeneration(speaker),
     });
     void this.qrBar.refresh();
 
@@ -1060,26 +1083,43 @@ export class ChatSessionView extends ItemView {
       });
       row.dataset.nodeId = msg.nodeId;
 
-      // 발화자 표시 재료 — 그룹 챗이면 노드의 발화자 멤버 (G2), 아니면 시나리오.
+      // 발화자 표시 재료. 우선순위:
+      //  ① 익명 발화자 이름표 (`/sendas name=` 이 멤버가 아닌 이름을 준 경우) —
+      //     그룹이 아니어도 그 이름 그대로 뜬다(예전엔 이름이 버려져 캐릭터 본인의
+      //     말풍선으로 보였다). 아바타는 이니셜.
+      //  ② 그룹 챗의 발화자 멤버 (G2)
+      //  ③ 시나리오(호스트)
       const groupChat = this.isGroupChat();
+      const anonName =
+        msg.role === "assistant"
+          ? nodeSpeakerName(this.nodeMeta, msg.nodeId)
+          : null;
       const speaker =
-        msg.role === "assistant" && groupChat
+        msg.role === "assistant" && groupChat && !anonName
           ? this.speakerDisplayOf(msg.nodeId)
           : null;
+      const hidden = isNodeHidden(this.nodeMeta, msg.nodeId);
+      row.toggleClass("is-nosend", hidden);
 
       // 아바타 — AI 는 발화자(시나리오) 표지, 유저는 페르소나 썸네일 (말풍선 옆).
       const avatar = row.createDiv({ cls: "ggai-chat-avatar" });
-      renderThumb(
-        this.app,
-        avatar,
-        msg.role === "user"
-          ? this.personaThumbPath
-          : speaker?.thumbPath ?? this.scenarioThumbPath,
-        msg.role === "user"
-          ? this.displayMacroCtx.user ?? "User"
-          : speaker?.name ?? this.displayMacroCtx.char ?? "AI",
-        msg.role === "user" ? "user" : "book-open"
-      );
+      if (anonName) {
+        avatar
+          .createDiv({ cls: "ggai-chat-avatar-initial" })
+          .setText([...anonName][0] ?? "?");
+      } else {
+        renderThumb(
+          this.app,
+          avatar,
+          msg.role === "user"
+            ? this.personaThumbPath
+            : speaker?.thumbPath ?? this.scenarioThumbPath,
+          msg.role === "user"
+            ? this.displayMacroCtx.user ?? "User"
+            : speaker?.name ?? this.displayMacroCtx.char ?? "AI",
+          msg.role === "user" ? "user" : "book-open"
+        );
+      }
 
       const stack = row.createDiv({ cls: "ggai-chat-stack" });
       // 이름 라벨 — AI = 발화자(시나리오) 이름, 유저 = 페르소나 이름.
@@ -1088,9 +1128,16 @@ export class ChatSessionView extends ItemView {
         text:
           msg.role === "user"
             ? this.displayMacroCtx.user ?? "User"
-            : speaker?.name ?? this.displayMacroCtx.char ?? "AI",
+            : anonName ?? speaker?.name ?? this.displayMacroCtx.char ?? "AI",
       });
-      if (speaker) nameEl.addClass(`is-speaker-${speaker.colorIndex % 6}`);
+      if (anonName) nameEl.addClass("is-anon-speaker");
+      else if (speaker) nameEl.addClass(`is-speaker-${speaker.colorIndex % 6}`);
+      // AI 에 안 가는 메시지 표시 — ST 의 "눈감기기"와 같은 자리.
+      if (hidden) {
+        const mark = nameEl.createSpan({ cls: "ggai-chat-nosend-mark" });
+        setIcon(mark, "eye-off");
+        mark.setAttr("aria-label", "AI 에게 보내지 않음");
+      }
       const bubble = stack.createDiv({ cls: "ggai-chat-bubble" });
       bubble.dataset.index = String(index);
       // 말풍선 우클릭(모바일: 꾹) = 메시지 메뉴. 끝 메시지가 아니어도 지울 수 있다.
@@ -2096,6 +2143,16 @@ export class ChatSessionView extends ItemView {
         .setIcon("copy")
         .onClick(() => void this.copyMessage(index))
     );
+    const nodeId = this.messages[index]?.nodeId;
+    if (nodeId) {
+      const hidden = isNodeHidden(this.nodeMeta, nodeId);
+      menu.addItem((item) =>
+        item
+          .setTitle(hidden ? "AI 에게 다시 보내기" : "AI 에게 숨기기")
+          .setIcon(hidden ? "eye" : "eye-off")
+          .onClick(() => void this.setMessageHidden(nodeId, !hidden))
+      );
+    }
     menu.addItem((item) =>
       item
         .setTitle("메시지 삭제")
@@ -2114,6 +2171,15 @@ export class ChatSessionView extends ItemView {
       );
     }
     menu.showAtPosition({ x, y });
+  }
+
+  /**
+   * "AI 에게 숨기기" 토글 — 화면에는 그대로 두고 전송본에서만 뺀다(ST `/hide`).
+   * 저장은 `node-meta.json` 이라 본문/노드는 건드리지 않는다.
+   */
+  private async setMessageHidden(nodeId: string, hidden: boolean): Promise<void> {
+    if (!this.sessionFile) return;
+    await this.store.patchSessionNodeMeta(this.sessionFile, nodeId, { hidden });
   }
 
   /** 말풍선에 보이는 그대로(번역 보기면 번역본)를 클립보드에 담는다. */
@@ -2567,6 +2633,39 @@ export class ChatSessionView extends ItemView {
   }
 
   // ── 빠른 답장 (QR) ───────────────────────────────────────────────
+
+  /**
+   * QR `/trigger` — 유저 메시지 없이 생성 1회. 입력창은 건드리지 않는다
+   * (쓰다 만 글이 딸려 나가면 안 된다). 전송 버튼이 "빈 입력"일 때 하는 일과 같다.
+   * `speaker` 는 그룹 멤버 이름 또는 순번(1부터) — 맞으면 그 멤버가 답한다.
+   */
+  private async triggerGeneration(speaker?: string): Promise<void> {
+    if (!this.session || !this.sessionFile || this.generation) return;
+    this.cancelAutoChain();
+    await this.flushPendingEdits();
+    if (!this.session || !this.sessionFile) return;
+    const pinned = this.resolveSpeakerArg(speaker);
+    if (this.isGroupChat() && !pinned && !this.pinnedSpeakerId) {
+      this.autoChainRemaining = this.maxAutoReplies() - 1;
+    }
+    await this.runGeneration(this.session.meta.activeLeafId, "ai-continue", {
+      speakerId: pinned ?? this.chooseSpeakerForNext(),
+      chain: true,
+    });
+  }
+
+  /** `/trigger` 인자 → 그룹 멤버 시나리오 id. 이름(대소문자 무시) 또는 1부터의 순번. */
+  private resolveSpeakerArg(speaker?: string): string | undefined {
+    const raw = speaker?.trim();
+    if (!raw || !this.isGroupChat()) return undefined;
+    const index = Number.parseInt(raw, 10);
+    if (String(index) === raw && index >= 1 && index <= this.groupMembers.length) {
+      return this.groupMembers[index - 1].scenarioId;
+    }
+    const lower = raw.toLowerCase();
+    return this.groupMembers.find((m) => m.name.trim().toLowerCase() === lower)
+      ?.scenarioId;
+  }
 
   /** QR 버튼 결과를 입력창에 넣고, send 면 그대로 전송한다. */
   private async applyQuickReplyText(text: string, send: boolean): Promise<void> {

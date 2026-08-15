@@ -1,28 +1,30 @@
 /**
  * 빠른 답장(QR) 스크립트 실행기 — 파서(`util/qr-script.ts`)가 만든 파이프라인을 돌린다.
  *
- * 범위(QR 스펙.md 슬라이스 2a): `/input` `/setvar` `/if` `/echo` `/abort` `/gen` `/comment`.
  * **모르는 커맨드는 조용히 건너뛰고 끝에 한 번만 안내한다** — 임포트한 세트가 지원 밖
  * 커맨드를 써도 버튼 전체가 죽지 않게.
  *
  * 상태:
- *  - 변수는 `session.meta.variables` — 이미 컨텍스트 빌더가 `{{getvar::x}}` 로 읽는 그 저장소다
- *    (QR 전용 변수 저장소를 새로 만들지 않는다).
+ *  - 세션 변수는 `session.meta.variables`(변수 확장이 켜져 있으면 가지별 되짚기 기록),
+ *    전역 변수는 `plugin.variables` — 매크로 맵에는 `global::` 접두로 얹힌다.
  *  - `{{pipe}}` 는 직전 커맨드의 결과. `||` 로 끊긴 자리에서 비워진다.
+ *  - **본문(맨 인자)이 없는 커맨드는 `{{pipe}}` 를 본문으로 받는다** (ST 암묵적 파이프).
+ *    `/gen … | /sendas name="{{char}}"` 처럼 결과를 그대로 넘기는 관용구가 이것에 기댄다.
  *
  * AI 호출은 전부 `plugin.ai` 경유, 저장은 전부 `plugin.store` 경유 (CLAUDE.md 6·7).
  */
 
 import { Notice } from "obsidian";
 import type StellaEnginePlugin from "../main";
-import type { SessionNode } from "../types/session";
+import type { SessionNode, StellaSession } from "../types/session";
 import { planSessionRequest } from "../util/build-session-context";
-import { CHAT_MESSAGE_SEPARATOR } from "../util/chat-messages";
+import { buildChatMessages, CHAT_MESSAGE_SEPARATOR } from "../util/chat-messages";
 import { withoutOutputCap } from "../util/generation-params";
 import { applyMacros, type MacroContext } from "../util/macros";
 import {
   compareQrRule,
   parseDetailsBlock,
+  parseMessageIndices,
   parseQrLabels,
   parseQrScript,
   runQrRegex,
@@ -30,7 +32,11 @@ import {
   type QrCommand,
 } from "../util/qr-script";
 import { buildSpans, spansToText } from "../util/session-text";
-import { diffVariables } from "../util/variables";
+import {
+  diffVariables,
+  GLOBAL_VAR_PREFIX,
+  withGlobalScope,
+} from "../util/variables";
 import { uuidv4 } from "../util/uuid";
 import { ChoiceModal, PromptModal } from "../views/modals";
 import { flushQrInjections, setQrInjection } from "./qr-injections";
@@ -41,6 +47,12 @@ export interface QrRunHost {
   sessionFile(): string | null;
   /** 입력/전송 — 커맨드가 아닌 평문 버튼과 같은 경로. */
   runText(text: string, send: boolean): void | Promise<void>;
+  /**
+   * `/trigger` — 유저 메시지 없이 생성 1회. 챗은 전송 버튼과 같은 경로,
+   * 소설은 이어쓰기와 같은 경로다(별도 생성 경로를 만들지 않는다).
+   * @param speaker 그룹 챗 발화자 지목 (멤버 이름 또는 순번). 없으면 평소 판정.
+   */
+  triggerGeneration?(speaker?: string): void | Promise<void>;
 }
 
 export interface QrRunResult {
@@ -55,12 +67,15 @@ interface QrRunState {
   plugin: StellaEnginePlugin;
   host: QrRunHost;
   vars: Record<string, string>;
+  /** 전역 변수 (접두 없는 이름 → 값). 끝에 한 번만 저장한다. */
+  globals: Record<string, string>;
   macro: MacroContext;
   pipe: string;
   aborted: boolean;
   skipped: Set<string>;
   /** 변수를 실제로 건드렸는가 — 안 건드렸으면 세션을 저장하지 않는다. */
   varsDirty: boolean;
+  globalsDirty: boolean;
 }
 
 /** 스크립트 하나 실행. 예외는 삼키지 않고 호출자(바)가 안내한다. */
@@ -92,14 +107,20 @@ export async function runQuickReplyScript(
     plugin,
     host,
     vars: { ...initialVars },
+    globals: plugin.variables.getGlobals(),
     macro: await buildQrMacroContext(plugin, sessionFile),
     pipe: "",
     aborted: false,
     skipped: new Set(),
     varsDirty: false,
+    globalsDirty: false,
   };
 
   await runPipeline(state, parseQrScript(script));
+
+  if (state.globalsDirty) {
+    await plugin.variables.setGlobals(state.globals);
+  }
 
   if (state.varsDirty && sessionFile) {
     if (useVariableLog) {
@@ -146,7 +167,22 @@ async function runCommand(state: QrRunState, cmd: QrCommand): Promise<string> {
   if (!cmd.name) return "";
   const arg = (key: string): string =>
     cmd.named[key] === undefined ? "" : expand(state, cmd.named[key]);
-  const body = () => expand(state, cmd.body);
+  /**
+   * 맨 인자(본문). **적혀 있지 않으면 `{{pipe}}` 가 그 자리에 온다** — ST 의 암묵적
+   * 파이프다. 이게 없으면 `/gen … | /sendas name="X"` 처럼 앞 결과를 그대로 넘기는
+   * 관용구가 빈 값으로 조용히 통과해 결과가 증발한다.
+   * 적혀 있는데 매크로가 빈 값으로 풀린 경우(`{{pipe}}` 를 손으로 쓴 경우 포함)는
+   * 그대로 빈 값이다 — "안 적음"과 "비어 있음"을 뭉개지 않는다.
+   */
+  const body = () => (cmd.body.trim() === "" ? state.pipe : expand(state, cmd.body));
+  /**
+   * 암묵적 파이프를 **적용하지 않는** 맨 인자 — 인자가 "내용"이 아니라 **대상 지정**인
+   * 커맨드용(`/hide 2-5`, `/trigger 캐릭터명`, `/flushvar 이름`, `/flushinject id`,
+   * `/getglobalvar 이름`). 여기에 앞 결과가 흘러들면 `/gen … | /hide` 가 엉뚱한 메시지를
+   * 숨기고 `/gen … | /flushinject` 가 아무것도 못 지운다. `{{pipe}}` 를 손으로 쓰면 통한다.
+   * (원본과 다른 점 — ST 는 모든 맨 인자에 파이프를 흘린다.)
+   */
+  const rawBody = () => expand(state, cmd.body);
 
   switch (cmd.name) {
     case "abort":
@@ -184,12 +220,45 @@ async function runCommand(state: QrRunState, cmd: QrCommand): Promise<string> {
     case "flushvar": {
       // `/flushvar 이름` — 변수를 지운다(빈 값으로 덮는 게 아니라 없앤다).
       // 이름이 없으면 아무것도 하지 않는다 — 전부 지우는 사고를 막는다.
-      const key = (arg("key") || unquoteQrBody(body())).trim();
+      const key = (arg("key") || unquoteQrBody(rawBody())).trim();
       if (!key || state.vars[key] === undefined) return "";
       delete state.vars[key];
       state.varsDirty = true;
       return "";
     }
+
+    case "addvar": {
+      // `/addvar key=이름 증가량` — 숫자 더하기 (ST). 숫자가 아니면 0 으로 본다.
+      const key = arg("key").trim();
+      if (!key) return "";
+      const prev = Number.parseFloat(state.vars[key] ?? "0");
+      const add = Number.parseFloat(body().trim());
+      const next = String(
+        (Number.isFinite(prev) ? prev : 0) + (Number.isFinite(add) ? add : 0)
+      );
+      state.vars[key] = next;
+      state.varsDirty = true;
+      return next;
+    }
+
+    case "setglobalvar": {
+      // `/setglobalvar key=이름 값` — 전역 값(모든 세션 공통). 세션 변수와 이름
+      // 공간이 아예 다르다(ST 와 같은 의미) — 세션에 새어 들어가지 않는다.
+      const key = arg("key").trim();
+      if (!key) return "";
+      const value = cmd.named.value !== undefined ? arg("value") : body();
+      state.globals[key] = value;
+      state.globalsDirty = true;
+      return value;
+    }
+
+    case "getglobalvar": {
+      const key = (arg("key") || unquoteQrBody(rawBody())).trim();
+      return key ? state.globals[key] ?? "" : "";
+    }
+
+    case "rand":
+      return runRand(state, cmd, arg);
 
     case "if":
       return await runIf(state, cmd, arg);
@@ -211,7 +280,7 @@ async function runCommand(state: QrRunState, cmd: QrCommand): Promise<string> {
 
     case "flushinject": {
       const file = state.host.sessionFile();
-      if (file) flushQrInjections(file, unquoteQrBody(body()).trim() || undefined);
+      if (file) flushQrInjections(file, unquoteQrBody(rawBody()).trim() || undefined);
       return "";
     }
 
@@ -220,6 +289,15 @@ async function runCommand(state: QrRunState, cmd: QrCommand): Promise<string> {
 
     case "impersonate":
       return await runImpersonate(state, unquoteQrBody(body()));
+
+    case "trigger":
+      return await runTrigger(state, unquoteQrBody(rawBody()).trim());
+
+    case "hide":
+      return await runHide(state, unquoteQrBody(rawBody()), true);
+
+    case "unhide":
+      return await runHide(state, unquoteQrBody(rawBody()), false);
 
     default:
       state.skipped.add(cmd.name);
@@ -328,9 +406,15 @@ function runInject(
 
 /**
  * `/sendas name="X" <내용>` — 그 인물의 발화로 세션에 남긴다(AI 호출 없음).
- * 챗 세션은 말풍선 하나, 소설 세션은 본문에 이어지는 한 문단이다. 그룹 세션이면
- * 이름을 멤버와 맞춰 발화자 귀속(`node.speaker`)까지 해 준다 — 라벨·아바타·다음
- * 발화자 판정이 일반 생성과 같아진다.
+ * 챗 세션은 말풍선 하나, 소설 세션은 본문에 이어지는 한 문단이다.
+ *
+ * 이름 처리 두 갈래:
+ *  - 그룹 멤버와 이름이 맞으면 발화자 귀속(`node.speaker`) — 라벨·아바타·다음 발화자
+ *    판정이 일반 생성과 같아진다.
+ *  - 멤버가 아니면(가십지·마법 신문 같은 **익명 발화자**) 이름을 `node-meta.json` 에
+ *    이름표로 남긴다. 예전엔 이 이름이 그냥 버려져 캐릭터 본인의 말풍선으로 떴다.
+ *    **본문에 `이름:` 접두어를 박지 않는다** — 본문은 문자 오프셋 기준이라 접두어가
+ *    편집/번역/삽화 앵커를 전부 밀어낸다.
  */
 async function runSendAs(
   state: QrRunState,
@@ -339,10 +423,35 @@ async function runSendAs(
 ): Promise<string> {
   const file = state.host.sessionFile();
   if (!file || !text.trim()) return text;
+  const session = await appendSessionMessage(state, file, text);
+  if (!session) return text;
+
+  const nodeId = session.meta.activeLeafId;
+  const speakerId = await resolveSpeakerId(state, session, name);
+  if (speakerId) {
+    session.nodes[nodeId].speaker = speakerId;
+    await state.plugin.store.saveSession(file, session);
+  } else if (name && name !== (state.macro.char ?? "")) {
+    await state.plugin.store.patchSessionNodeMeta(file, nodeId, {
+      speakerName: name,
+    });
+  }
+  return text;
+}
+
+/**
+ * 본문 끝에 AI 발화 노드 하나를 붙인다 (`/sendas` `/comment` 공용).
+ * 저장까지 마친 세션 객체를 돌려준다 — 호출부가 그 노드에 더 얹을 게 있으면 이어서 쓴다.
+ */
+async function appendSessionMessage(
+  state: QrRunState,
+  file: string,
+  text: string
+): Promise<StellaSession | null> {
   const plugin = state.plugin;
   await plugin.flushSessionEdits(file);
   const session = await plugin.store.getSession(file).catch(() => null);
-  if (!session) return text;
+  if (!session) return null;
 
   const parentId = session.meta.activeLeafId;
   const parentText = spansToText(buildSpans(session, parentId));
@@ -359,13 +468,11 @@ async function runSendAs(
     patches: [{ op: "append", spans: [{ author: "ai", text: sep + text }] }],
     createdAt: Date.now(),
   };
-  const speakerId = await resolveSpeakerId(state, session, name);
-  if (speakerId) node.speaker = speakerId;
   session.nodes[node.id] = node;
   session.meta.activeLeafId = node.id;
   session.meta.modifiedAt = Date.now();
   await plugin.store.saveSession(file, session);
-  return text;
+  return session;
 }
 
 /** `/sendas name=` 의 이름 → 그룹 멤버 시나리오 id (아니면 null = 호스트 발화). */
@@ -412,23 +519,115 @@ async function runImpersonate(state: QrRunState, extra: string): Promise<string>
 }
 
 /**
- * `/comment <내용>` — 그 스토리 지점에 노트로 남긴다(AI 에는 안 간다).
- * `<details><summary>` 는 원시 HTML 로 렌더하지 않고 제목/본문만 뽑는다.
+ * `/comment <내용>` — 그 스토리 지점에 **본문으로** 남기되 AI 에는 안 보낸다
+ * (ST: "adds a hidden comment that is displayed in the chat but is not visible to
+ * the prompt"). 그래서 다른 발화와 똑같이 말풍선/문단으로 보이고, 전송본에서만 빠진다.
+ *
+ * 예전에는 본문 밖 노트(`notes.json`)로 남겼는데, 그러면 QR 을 "프롬프트 숏컷"으로 쓰는
+ * 카드들이 기대하는 자리(대화 로그)에 결과가 없어 호환이 깨졌다. 이미 쌓인 노트는
+ * 그대로 표시된다(레거시 유지) — 새로 만들지 않을 뿐이다.
+ *
+ * `<details><summary>` 는 원시 HTML 로 렌더하지 않고 제목/본문만 뽑는다(QR 스펙.md).
  */
 async function runComment(state: QrRunState, text: string): Promise<string> {
   const file = state.host.sessionFile();
   if (!file || !text.trim()) return text;
-  const session = await state.plugin.store.getSession(file).catch(() => null);
-  if (!session) return text;
   const { title, body } = parseDetailsBlock(text);
-  await state.plugin.store.addSessionNote(file, {
-    id: uuidv4(),
-    nodeId: session.meta.activeLeafId,
-    title,
-    body,
-    createdAt: Date.now(),
+  const content = title ? `${title}\n${body}` : body;
+  if (!content.trim()) return text;
+  const session = await appendSessionMessage(state, file, content);
+  if (!session) return text;
+  await state.plugin.store.patchSessionNodeMeta(file, session.meta.activeLeafId, {
+    hidden: true,
   });
   return text;
+}
+
+/**
+ * `/trigger [발화자]` — 유저 메시지 없이 생성 1회 (ST: 전송 버튼을 누른 것과 같다).
+ * 앞에 `/inject` 로 심어 둔 지시문이 이번 전송에 그대로 실린다.
+ * 실행 경로는 뷰가 소유한다 — 챗은 전송, 소설은 이어쓰기. 별도 생성 경로를 만들지 않는다.
+ */
+async function runTrigger(state: QrRunState, speaker: string): Promise<string> {
+  if (!state.host.sessionFile()) return "";
+  if (!state.host.triggerGeneration) {
+    // 세션창이 아닌 데서 실행된 경우 — 조용히 넘기지 않고 건너뜀 안내에 합류시킨다.
+    state.skipped.add("trigger");
+    return "";
+  }
+  await state.host.triggerGeneration(speaker || undefined);
+  return "";
+}
+
+/**
+ * `/hide <번호|시작-끝>` / `/unhide …` — 그 메시지를 화면에는 남기고 **전송본에서만**
+ * 뺀다(ST 와 같은 의미, `node-meta.json`). 번호는 챗 메시지 순번(0부터, 음수는 끝에서).
+ *
+ * 우리 추가: **번호를 안 적으면 마지막으로 붙은 본문 덩어리**를 대상으로 한다 —
+ * 소설 모드에는 메시지 번호 개념이 없어 이 형태가 유일한 진입점이다.
+ * 번호를 적었는데 해석되는 메시지가 없으면 아무것도 하지 않는다.
+ */
+async function runHide(
+  state: QrRunState,
+  spec: string,
+  hidden: boolean
+): Promise<string> {
+  const file = state.host.sessionFile();
+  if (!file) return "";
+  const plugin = state.plugin;
+  await plugin.flushSessionEdits(file);
+  const session = await plugin.store.getSession(file).catch(() => null);
+  if (!session) return "";
+
+  const trimmed = spec.trim();
+  let targets: string[];
+  if (!trimmed) {
+    const msgs = buildChatMessages(session);
+    targets = [msgs[msgs.length - 1]?.nodeId ?? session.meta.activeLeafId];
+  } else {
+    const msgs = buildChatMessages(session);
+    targets = [
+      ...new Set(
+        parseMessageIndices(trimmed, msgs.length)
+          .map((i) => msgs[i]?.nodeId)
+          .filter((id): id is string => !!id)
+      ),
+    ];
+  }
+  for (const nodeId of targets) {
+    await plugin.store.patchSessionNodeMeta(file, nodeId, { hidden });
+  }
+  return "";
+}
+
+/**
+ * `/rand [round=round|ceil|floor] [from=0] [to=1] [최대값]` — ST 그대로.
+ * 맨 인자 하나는 `to` 다(`/rand 10` = 0~10). 범위는 양끝 포함이고 기본은 소수다 —
+ * 정수가 필요하면 `round=` 를 쓴다(ST 문서와 같은 규칙).
+ */
+function runRand(
+  state: QrRunState,
+  cmd: QrCommand,
+  arg: (key: string) => string
+): string {
+  const num = (raw: string, fallback: number) => {
+    const n = Number.parseFloat(raw);
+    return Number.isFinite(n) ? n : fallback;
+  };
+  const bare = unquoteQrBody(expand(state, cmd.body)).trim();
+  const from = num(arg("from"), 0);
+  const to = num(arg("to"), bare ? num(bare, 1) : 1);
+  const value = from + Math.random() * (to - from);
+  switch (arg("round").trim().toLowerCase()) {
+    case "ceil":
+      return String(Math.ceil(value));
+    case "floor":
+      return String(Math.floor(value));
+    case "round":
+      return String(Math.round(value));
+    default:
+      return String(value);
+  }
 }
 
 /**
@@ -491,13 +690,17 @@ const RUNTIME_MACRO_KEYS = new Set(["pipe", "groupnotmuted"]);
 function expand(state: QrRunState, text: string): string {
   if (!text) return "";
   const variables: Record<string, string> = {
-    ...state.vars,
+    // 전역 값은 `global::` 접두를 달고 얹힌다 — `{{getglobalvar::x}}` 가 이 자리를 읽는다.
+    ...withGlobalScope(state.vars, state.globals),
     pipe: state.pipe,
     groupnotmuted: state.macro.char ?? "",
   };
   const out = applyMacros(text, { ...state.macro, variables });
   for (const [k, v] of Object.entries(variables)) {
     if (RUNTIME_MACRO_KEYS.has(k)) continue;
+    // 전역 값은 세션 변수로 되돌려 쓰지 않는다 — 넣는 순간 `global::x` 라는 이름의
+    // 세션 변수가 생겨 session.json 에 새어 들어간다.
+    if (k.startsWith(GLOBAL_VAR_PREFIX)) continue;
     if (state.vars[k] !== v) {
       state.vars[k] = v;
       state.varsDirty = true;

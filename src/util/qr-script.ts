@@ -380,6 +380,33 @@ export function runQrRegex(
 }
 
 /**
+ * `/hide 2-5` 의 대상 지정 파싱 — `2` / `2-5` / `1,3, 7-9` / `-1`(끝에서 첫 번째).
+ * ST 는 "message index 또는 `start-finish` 포함 범위"를 받는다. 음수 순번과 여러 개
+ * 나열은 **우리 추가**(끝 메시지를 번호 없이 집을 방법이 필요하다).
+ * 범위를 벗어난 번호는 조용히 버린다 — 잘못 적은 스크립트가 엉뚱한 걸 숨기지 않게.
+ */
+export function parseMessageIndices(spec: string, count: number): number[] {
+  const out: number[] = [];
+  const norm = (n: number) => (n < 0 ? count + n : n);
+  for (const part of (spec ?? "").split(/[,\s]+/)) {
+    if (!part) continue;
+    const range = /^(-?\d+)\s*-\s*(-?\d+)$/.exec(part);
+    if (range) {
+      const a = norm(Number.parseInt(range[1], 10));
+      const b = norm(Number.parseInt(range[2], 10));
+      if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+      for (let i = Math.min(a, b); i <= Math.max(a, b); i++) {
+        if (i >= 0 && i < count) out.push(i);
+      }
+      continue;
+    }
+    const single = norm(Number.parseInt(part, 10));
+    if (Number.isFinite(single) && single >= 0 && single < count) out.push(single);
+  }
+  return out;
+}
+
+/**
  * `<details><summary>제목</summary>본문</details>` 에서 제목/본문만 뽑는다.
  * 원시 HTML 을 렌더하지 않는다(QR 스펙.md) — 뜻하는 건 "제목 달린 접이식 블록" 하나뿐이라
  * 우리 접이식 위젯으로 그린다. details 가 없으면 제목 없는 블록으로 본다.

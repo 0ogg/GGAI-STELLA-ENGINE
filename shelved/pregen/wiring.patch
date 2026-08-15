@@ -1,0 +1,418 @@
+--- a/src/main.ts
++++ b/src/main.ts
+@@ -34,6 +34,7 @@
+ import { PhoneService } from "./services/phone-service";
+ import { ProService } from "./services/pro-service";
+ import { VariablesService } from "./services/variables-service";
++import { PregenService } from "./services/pregen-service";
+ import { registerPhoneExtension } from "./extensions/phone-extension";
+ import { registerLorebookGenExtension } from "./extensions/lorebook-gen-extension";
+ import { registerQuickReplyExtension } from "./extensions/quick-reply-extension";
+@@ -47,6 +48,10 @@
+ import { registerSummaryExtension } from "./extensions/summary-extension";
+ import { registerVariablesExtension } from "./extensions/variables-extension";
+ import {
++  PREGEN_EXTENSION_ID,
++  registerPregenExtension,
++} from "./extensions/pregen-extension";
++import {
+   REPETITION_EXTENSION_ID,
+   registerRepetitionExtension,
+ } from "./extensions/repetition-extension";
+@@ -321,6 +326,8 @@
+   pro!: ProService;
+   /** 게임형 카드 변수 — 세션 값(가지별 되짚기) + 전역 값의 단일 진입점. */
+   variables!: VariablesService;
++  /** 이중 생성 1차 호출 실행기 — 확장이 컨텍스트 기여 시점에 호출. */
++  pregen!: PregenService;
+   /** 확장 탭 설정 패널 레지스트리. 내장/외부 패널 모두 `registerSettingsPanel()` 로 등록. */
+   settingsPanels!: SettingsPanelRegistry;
+   /** 확장 모듈 레지스트리 — 컨텍스트 기여 / 생성-완료 훅 / 로어북 선택 대체. */
+@@ -375,6 +382,7 @@
+     this.lorebookGen = new LorebookGenService(this);
+     this.pro = new ProService(this);
+     this.variables = new VariablesService(this);
++    this.pregen = new PregenService(this);
+     this.settingsPanels = new SettingsPanelRegistry(() =>
+       this.store.trigger("settings-panels-changed")
+     );
+@@ -908,6 +916,7 @@
+           summarize: session.meta.summarize ? { ...session.meta.summarize } : undefined,
+           lorebookPlus: session.meta.lorebookPlus ? { ...session.meta.lorebookPlus } : undefined,
+           pro: session.meta.pro ? { ...session.meta.pro } : undefined,
++          pregen: session.meta.pregen ? { ...session.meta.pregen } : undefined,
+           naiFormat: session.meta.naiFormat,
+           continueAnchor: session.meta.continueAnchor,
+         };
+@@ -1019,6 +1028,11 @@
+       desc: "최근 진행분에서 AI가 되풀이한 표현을 세어 다음 생성 때 피하라고 알려줍니다(AI를 따로 부르지 않습니다). 끄면 알림과 반복 표현 설정이 사라집니다.",
+     },
+     {
++      id: PREGEN_EXTENSION_ID,
++      name: "이중 생성",
++      desc: "본문을 쓰기 전에 다른 프롬프트 세트로 한 번 더 물어보고, 그 답을 문맥에 넣은 채로 본문을 씁니다(생성이 두 번 나갑니다). 끄면 한 번만 생성합니다.",
++    },
++    {
+       id: "stella:card-display",
+       name: "카드 화면 표시",
+       desc: "카드가 낸 상태창·표·이미지를 채팅 말풍선에 화면으로 그립니다(스크립트는 실행하지 않습니다). 끄면 태그가 글자 그대로 보입니다.",
+@@ -1110,6 +1124,12 @@
+       this.isExtensionEnabled(REPETITION_EXTENSION_ID),
+       () => registerRepetitionExtension(this)
+     );
++    // 이중 생성 — 끄면 1차 호출도 기여도 사라진다(전송본 byte 동일).
++    this.syncExtensionResource(
++      PREGEN_EXTENSION_ID,
++      this.isExtensionEnabled(PREGEN_EXTENSION_ID),
++      () => registerPregenExtension(this)
++    );
+   }
+ 
+   /** 리소스 하나를 원하는 켜짐 상태로 맞춘다(등록/해제는 상태가 실제로 바뀔 때만). */
+@@ -1992,6 +2012,7 @@
+   if (patch.summarize !== undefined) target.summarize = { ...patch.summarize };
+   if (patch.lorebookPlus !== undefined) target.lorebookPlus = { ...patch.lorebookPlus };
+   if (patch.pro !== undefined) target.pro = { ...patch.pro };
++  if (patch.pregen !== undefined) target.pregen = { ...patch.pregen };
+   if (patch.naiFormat !== undefined) target.naiFormat = patch.naiFormat;
+   if (patch.continueAnchor !== undefined) target.continueAnchor = patch.continueAnchor;
+ }
+--- a/src/types/preset.ts
++++ b/src/types/preset.ts
+@@ -207,6 +207,33 @@
+   setIds?: string[];
+ }
+ 
++/**
++ * 이중 생성 활성 설정 — 본 생성 직전에 다른 프롬프트 세트로 한 번 더 호출해
++ * 그 결과를 전송본에 끼워 넣는다. 상세는 `이중 생성 스펙.md`.
++ *
++ * **용도를 고정하지 않는다.** 무엇을 뽑을지는 전적으로 프롬프트 세트가 정한다 —
++ * 여기(그리고 확장 코드)에 인물·심리·계획 같은 용도 특정 개념을 넣지 않는다.
++ */
++export interface PregenActiveSettings {
++  enabled?: boolean;
++  /** 1차 호출에 쓸 프롬프트 세트 id. 없으면 켜져 있어도 동작하지 않는다. */
++  promptSetId?: string;
++  /** 1차 호출 모델 프로필. 없으면 세션 모델. */
++  modelProfileId?: string;
++  /** 결과를 끼워 넣을 자리. 생략 시 contextEnd. `{{pregen}}` 매크로가 있으면 무시된다. */
++  position?: PregenPosition;
++  /**
++   * 1차 결과를 감쌀 틀. `{{result}}` 자리에 결과가 들어간다. 결과를 날것 그대로
++   * 넣으면 본 생성이 그것을 대사나 서술로 오해하므로, "이게 무엇인지"를 표시하는
++   * 틀을 거쳐 넣는다. 생략 시 기본 틀, 빈 문자열이면 감싸지 않는다.
++   */
++  injectTemplate?: string;
++  /** 결과 확인 칩을 세션에 표시할지. 생략 시 표시. 꺼도 기록은 계속된다. */
++  showMarker?: boolean;
++}
++
++export type PregenPosition = "contextEnd" | "authorNote" | "memory";
++
+ export interface ActiveSettings {
+   modelProfileId?: string;
+   params?: PromptPresetParams;
+@@ -220,6 +247,8 @@
+   quickReply?: QuickReplyActiveSettings;
+   /** 집필 프로(PRO) — 한→영 집필 변환 설정. PRO 활성 환경에서만 쓰인다. */
+   pro?: ProActiveSettings;
++  /** 이중 생성 — 본 생성 전 1차 호출과 그 결과의 주입 위치. */
++  pregen?: PregenActiveSettings;
+   /** NAI 형식으로 보내기 — 텍스트 컴플리션 전송 시 역할 토큰으로 감싼다. */
+   naiFormat?: boolean;
+   /** 이어쓰기 이음새 보정 (챗 모델) — 마지막 문장 반복을 유도한 뒤 응답에서 제거. */
+--- a/src/types/session.ts
++++ b/src/types/session.ts
+@@ -20,6 +20,7 @@
+ import type {
+   IllustrationActiveSettings,
+   LorebookPlusActiveSettings,
++  PregenActiveSettings,
+   ProActiveSettings,
+   QuickReplyActiveSettings,
+   SummaryActiveSettings,
+@@ -178,6 +179,8 @@
+   quickReply?: QuickReplyActiveSettings;
+   /** 집필 프로(PRO) 활성 설정 — proWriting 세션의 한→영 집필 변환. */
+   pro?: ProActiveSettings;
++  /** 이중 생성 — 본 생성 전 1차 호출과 그 결과의 주입 위치. */
++  pregen?: PregenActiveSettings;
+   /**
+    * 집필 프로 — 번역 용어집 자동 수집이 마지막으로 스캔한 authored 짝의 createdAt.
+    * 이보다 새 짝이 주기만큼 쌓이면 다시 스캔한다 (실패 시 갱신하지 않아 재시도).
+--- a/src/util/build-session-context.ts
++++ b/src/util/build-session-context.ts
+@@ -308,6 +308,7 @@
+   });
+   const summaryContext = plugin.extensions.pickSlot(contributions, "summary");
+   const phoneContext = plugin.extensions.pickSlot(contributions, "phone");
++  const pregenContext = plugin.extensions.pickSlot(contributions, "pregen");
+ 
+   const scenarioFile = scenarioFileOfSessionFile(sessionFile);
+   const scenarios = await plugin.store.getScenarios();
+@@ -644,6 +645,8 @@
+       plugin.data.mediaPrompts?.authorNote
+     ),
+     summary: summaryContext || undefined,
++    pregen: pregenContext || undefined,
++    pregenPosition: settings.pregen?.position ?? "contextEnd",
+     // {{idle_duration}} — 마지막 노드 이후 경과 (ST 호환, 실시간 채팅용).
+     idleDuration:
+       formatIdleEn(
+--- a/src/util/context-builder.ts
++++ b/src/util/context-builder.ts
+@@ -11,6 +11,7 @@
+  */
+ 
+ import type { StellaLorebook, StellaLorebookEntry } from "../types/lorebook";
++import type { PregenPosition } from "../types/preset";
+ import type {
+   MarkerIdentifier,
+   PromptChoiceBlock,
+@@ -46,6 +47,7 @@
+     | "memory"
+     | "authorNote"
+     | "summary"
++    | "pregen"
+     | "fallback";
+   label: string;
+   detail?: string;
+@@ -80,6 +82,13 @@
+    * 그 위치를 존중하고, 없으면 작가노트 바로 위(본문 끝-4문단 지점)에 자동 삽입한다.
+    */
+   summary?: string;
++  /**
++   * 이중 생성 1차 결과. `{{pregen}}` 매크로가 쓰이면 그 자리를 존중하고,
++   * 없으면 `pregenPosition` 이 가리키는 자리에 자동 삽입한다 (요약과 같은 규칙).
++   */
++  pregen?: string;
++  /** 위 자동 삽입 위치. 생략 시 contextEnd(본문 바로 뒤). */
++  pregenPosition?: PregenPosition;
+   /** 이어쓰기 모드 — 마지막 assistant 메시지에 prepend. 있으면 trigger=continue 항목만. */
+   continueText?: string;
+   /** 마지막 노드 이후 경과 표현 — {{idle_duration}} 매크로 값 (P1 실시간 채팅). */
+@@ -175,7 +184,7 @@
+   }
+ 
+   // 자리 지정 매크로 — chatSummary 마커가 켜져 있거나 {{summary}} 가 쓰이면 그 자리를
+-  // 존중하고 자동 삽입하지 않는다 (페르소나와 같은 규칙).
++  // 존중하고 자동 삽입하지 않는다 (페르소나와 같은 규칙). {{pregen}} 도 동일.
+   // 매크로는 실제로 확장되는 **모든** 자리(프롬프트 항목·마커 가공 템플릿·세션 메모·
+   // 작가노트·매칭된 로어북·본문)에서 찾는다. 프롬프트 항목만 보면 나머지 자리에 쓴
+   // 매크로가 "옮기기"가 아니라 "한 번 더 삽입"이 되어 같은 내용이 두 번 들어간다.
+@@ -186,6 +195,7 @@
+   const summaryExplicit =
+     activeMarkers.has("chatSummary") ||
+     macroTexts.some((t) => SUMMARY_MACRO_RE.test(t));
++  const pregenExplicit = macroTexts.some((t) => PREGEN_MACRO_RE.test(t));
+ 
+   // ── 3. 매크로 컨텍스트 ───────────────────────────────────────────
+   const wiBefore = renderLorebookEntries(lorebookByPos.before_char);
+@@ -219,6 +229,7 @@
+     anchorAfter: "",
+     system: input.scenario.system_prompt,
+     summary: input.summary,
++    pregen: input.pregen,
+     charPrompt: input.scenario.system_prompt,
+     charInstruction: input.scenario.post_history_instructions,
+     charDepthPrompt: input.scenario.depth_prompt,
+@@ -488,6 +499,12 @@
+         !summaryExplicit && input.summary?.trim()
+           ? applyMacros(input.summary, macroCtx)
+           : "",
++      // 이중 생성 1차 결과 — {{pregen}} 으로 자리를 잡았으면 자동 삽입하지 않는다.
++      pregen:
++        !pregenExplicit && input.pregen?.trim()
++          ? applyMacros(input.pregen, macroCtx)
++          : "",
++      pregenPosition: input.pregenPosition ?? "contextEnd",
+     }
+   );
+ 
+@@ -892,9 +909,10 @@
+ 
+ /** 전역 플래그 없음 — `test()` 를 반복 호출해도 lastIndex 가 남지 않는다. */
+ const SUMMARY_MACRO_RE = /\{\{\s*summary\s*\}\}/i;
++const PREGEN_MACRO_RE = /\{\{\s*pregen\s*\}\}/i;
+ 
+ /**
+- * 자리 지정 매크로({{summary}})가 실제로 확장되는 자리의 원문 전부.
++ * 자리 지정 매크로({{summary}} / {{pregen}})가 실제로 확장되는 자리의 원문 전부.
+  * 프롬프트 항목만 보면 나머지 자리에 쓴 매크로가 배치가 아니라 "한 번 더 삽입"이 된다.
+  */
+ function macroPlacementTexts(
+@@ -990,12 +1008,27 @@
+   };
+ }
+ 
++/** 이중 생성 1차 결과 메시지 하나. 내용이 비면 만들지 않는다. */
++function pregenMessage(text: string | undefined, detail: string): ChatMessage[] {
++  if (!text?.trim()) return [];
++  return [
++    {
++      role: "system",
++      content: text,
++      source: { type: "pregen", label: "Session: pregen", detail },
++      contextKind: "prompt",
++    },
++  ];
++}
++
+ /**
+- * 본문 끝-4 지점에 함께 삽입되는 개입 블록 — 요약 → 작가노트 순.
++ * 본문 끝-4 지점에 함께 삽입되는 개입 블록 — 요약 → 이중 생성 → 작가노트 순.
+  */
+ function buildNoteBlock(inserts: {
+   authorNote?: string;
+   summary?: string;
++  pregen?: string;
++  pregenPosition?: PregenPosition;
+ }): ChatMessage[] {
+   const block: ChatMessage[] = [];
+   if (inserts.summary?.trim()) {
+@@ -1010,6 +1043,9 @@
+       contextKind: "prompt",
+     });
+   }
++  if (inserts.pregenPosition === "authorNote") {
++    block.push(...pregenMessage(inserts.pregen, "Inserted above the author's note"));
++  }
+   if (inserts.authorNote?.trim()) {
+     block.push({
+       role: "system",
+@@ -1034,11 +1070,16 @@
+     memory?: string;
+     authorNote?: string;
+     summary?: string;
++    pregen?: string;
++    pregenPosition?: PregenPosition;
+   }
+ ): ChatMessage[] {
+   const noteBlock = buildNoteBlock(inserts);
+   // 메모리 상단 — 메모리가 비어 있으면 그냥 chatHistory 맨 앞이 된다.
+   const memoryBlock: ChatMessage[] = [];
++  if (inserts.pregenPosition === "memory") {
++    memoryBlock.push(...pregenMessage(inserts.pregen, "Inserted above session memory"));
++  }
+   if (inserts.memory?.trim()) {
+     memoryBlock.push({
+       role: "system",
+@@ -1047,6 +1088,11 @@
+       contextKind: "prompt",
+     });
+   }
++  // 컨텍스트 끝 — 본문 바로 뒤(= at_depth 0 과 같은 자리).
++  const tailBlock =
++    inserts.pregenPosition === "contextEnd"
++      ? pregenMessage(inserts.pregen, "Inserted after the story body")
++      : [];
+   if (mode === "chat") {
+     const messages: ChatMessage[] = log.map((m, index) => ({
+       role: m.role,
+@@ -1054,7 +1100,7 @@
+       source: { type: "chat", label: `Chat History #${index + 1}` },
+       contextKind: "history",
+     }));
+-    // 메모리 — chatHistory 앞 (novel 모드와 동일하게 맨 앞에 삽입).
++    // 메모리(+ 그 위 이중 생성) — chatHistory 앞 (novel 모드와 동일하게 맨 앞에 삽입).
+     // 삽입 순서는 기존 그대로 둔다(메모리 → 노트 블록) — 바꾸면 짧은 로그에서
+     // 노트 블록 자리가 달라져 전송본이 이전과 byte 단위로 달라진다.
+     if (memoryBlock.length > 0) messages.unshift(...memoryBlock);
+@@ -1062,6 +1108,7 @@
+       const pos = Math.max(0, messages.length - 4);
+       messages.splice(pos, 0, ...noteBlock);
+     }
++    messages.push(...tailBlock);
+     return messages;
+   }
+ 
+@@ -1072,6 +1119,7 @@
+   const messages: ChatMessage[] = [];
+   messages.push(...memoryBlock);
+   messages.push(...storyToMessages(story, noteBlock, novelHistoryRole));
++  messages.push(...tailBlock);
+   return messages;
+ }
+ 
+--- a/src/util/macros.ts
++++ b/src/util/macros.ts
+@@ -27,6 +27,8 @@
+   anchorAfter?: string;
+   system?: string;
+   summary?: string;
++  /** 이중 생성 1차 결과 — 쓰이면 그 자리가 삽입 위치가 된다({{summary}} 와 같은 규칙). */
++  pregen?: string;
+   charPrompt?: string;
+   charInstruction?: string;
+   charDepthPrompt?: string;
+@@ -72,6 +74,7 @@
+   "anchorAfter",
+   "system",
+   "summary",
++  "pregen",
+   "charPrompt",
+   "charInstruction",
+   "charDepthPrompt",
+--- a/src/services/extension-registry.ts
++++ b/src/services/extension-registry.ts
+@@ -43,7 +43,7 @@
+  */
+ export type ContextContribution =
+   | {
+-      slot: "summary" | "phone";
++      slot: "summary" | "phone" | "pregen";
+       /** 슬롯에 채울 텍스트. 빈 문자열이면 무시된다. */
+       text: string;
+     }
+@@ -229,7 +229,7 @@
+   /** 내장 슬롯의 기여 텍스트를 합친다(여러 확장이 같은 슬롯을 채우면 이어붙인다). */
+   pickSlot(
+     contributions: ContextContribution[],
+-    slot: "summary" | "phone"
++    slot: "summary" | "phone" | "pregen"
+   ): string {
+     return contributions
+       .filter((c) => c.slot === slot)
+--- a/scripts/run-harness.mjs
++++ b/scripts/run-harness.mjs
+@@ -14,6 +14,7 @@
+   "lorebook-template",
+   "safe-html",
+   "repetition",
++  "pregen",
+ ];
+ const testEntries = testNames.map((n) => path.join(root, "tests", `${n}.test.ts`));
+ 
+--- a/tests/session-view-logic.test.ts
++++ b/tests/session-view-logic.test.ts
+@@ -465,7 +465,7 @@
+ }
+ 
+ {
+-  // {{summary}} 는 어디에 써도 "그 자리로 옮기기" —
++  // {{summary}} / {{pregen}} 은 어디에 써도 "그 자리로 옮기기" —
+   // 자동 삽입이 더해져 두 번 들어가면 안 된다.
+   const SUM = "Earlier events were summarized here.";
+   const chatOnlyPreset = {
+@@ -481,7 +481,10 @@
+     ],
+   };
+   // 자리 지정 매크로를 담은 슬롯별로, 그 내용이 전송본에 몇 번 나오는지 센다.
+-  const countIn = (macroSlot: "summary", extra: Record<string, unknown>) =>
++  const countIn = (
++    macroSlot: "summary" | "pregen",
++    extra: Record<string, unknown>
++  ) =>
+     buildContext({
+       preset: chatOnlyPreset,
+       scenario: { name: "Char" },
+@@ -493,7 +496,7 @@
+       ...extra,
+     } as any).messages.filter((m) => m.content.includes(SUM)).length;
+ 
+-  for (const slot of ["summary"] as const) {
++  for (const slot of ["summary", "pregen"] as const) {
+     const macro = `{{${slot}}}`;
+     // 매크로가 없으면 자동 삽입 1회
+     assert.equal(countIn(slot, {}), 1);

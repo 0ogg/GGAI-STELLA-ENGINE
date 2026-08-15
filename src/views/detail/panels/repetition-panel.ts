@@ -18,6 +18,7 @@ import {
   type RepetitionUnit,
 } from "../../../util/repetition";
 import {
+  renderEnableToggle,
   renderNumberRow,
   renderOptionGrid,
   renderTextAreaRow,
@@ -39,6 +40,13 @@ export function createRepetitionSettingsPanel(): SettingsPanel {
         text:
           "최근 진행분에서 AI가 되풀이한 표현을 세어, 다음 생성 때 \"이건 다르게 써 달라\"고 알려줍니다. " +
           "AI를 따로 부르지 않으니 생성이 느려지지 않습니다. 사용자가 직접 쓴 문장은 세지 않습니다.",
+      });
+
+      renderEnableToggle({
+        parent: body,
+        label: "반복 표현 알려주기",
+        checked: settings.enabled,
+        onChange: (v) => void save({ enabled: v }),
       });
 
       renderNumberRow({

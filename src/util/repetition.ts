@@ -20,6 +20,11 @@ import { applyPatch, buildSpans, pathToLeaf, spansLength } from "./session-text"
 export type RepetitionUnit = "auto" | "word" | "char";
 
 export interface RepetitionSettings {
+  /**
+   * 이 확장을 지금 쓸지. **기본 꺼짐** — 확장 탭의 켜기/끄기(`isExtensionEnabled`)는
+   * "아예 안 쓸 것을 목록에서 치우는" 스위치라, "쓰긴 하는데 잠시 꺼 둔다"는 여기서 한다.
+   */
+  enabled: boolean;
   /** 활성 경로 끝에서 몇 개 노드까지 볼지. */
   windowNodes: number;
   unit: RepetitionUnit;
@@ -50,6 +55,7 @@ export const REPETITION_DEFAULT_TEMPLATE = [
 ].join("\n");
 
 export const REPETITION_DEFAULTS: RepetitionSettings = {
+  enabled: false,
   windowNodes: 20,
   unit: "auto",
   minCount: 3,
@@ -67,6 +73,7 @@ export function normalizeRepetitionSettings(raw: unknown): RepetitionSettings {
     return Math.min(max, Math.max(min, n));
   };
   return {
+    enabled: src.enabled === true,
     windowNodes: num(src.windowNodes, REPETITION_DEFAULTS.windowNodes, 1, 500),
     unit:
       src.unit === "word" || src.unit === "char" || src.unit === "auto"

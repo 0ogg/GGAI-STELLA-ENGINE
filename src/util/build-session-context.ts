@@ -11,6 +11,11 @@ import {
   type StellaLorebook,
 } from "../types/lorebook";
 import type { ActiveSettings } from "../types/preset";
+import {
+  hiddenNodeIds,
+  nodeSpeakerName,
+  type SessionNodeMetaMap,
+} from "../types/node-meta";
 import type { StellaSession } from "../types/session";
 import {
   buildContext,
@@ -19,7 +24,8 @@ import {
   type ContextBuilderInputV2,
   type ContextBuilderOutputV2,
 } from "./context-builder";
-import { buildChatLog, buildChatMessages } from "./chat-messages";
+import { buildChatMessages } from "./chat-messages";
+import { spansExcludingNodes } from "./node-segments";
 import type { StellaGroup } from "../types/group";
 import { applyMacros } from "./macros";
 import { getDefaultPrompts } from "./default-media-prompts";
@@ -47,45 +53,69 @@ function frameAuthorNote(
   return template.prompt.replace(/\{\{\s*main\s*\}\}/gi, note ?? "");
 }
 
-/** 챗 세션 로그 — excludeTail 이면 끝의 assistant 메시지 1개 제외 (챗 재생성 전용). */
-function buildChatSessionLog(
-  session: StellaSession,
-  leafId: string,
-  excludeTail: boolean
-): { role: "user" | "assistant"; content: string }[] {
-  const log = buildChatLog(session, leafId);
-  if (excludeTail && log.length > 0 && log[log.length - 1].role === "assistant") {
-    log.pop();
-  }
-  return log;
-}
-
 /**
- * 그룹 챗 세션 로그 — 각 메시지에 `이름: ` 프리픽스 (ST 그룹 force-names 호환).
- * AI 메시지 이름은 노드의 발화자(`node.speaker`), 없으면 호스트 캐릭터.
- * 모델이 여러 화자를 구분하고 이름 지목에 반응할 수 있게 한다.
+ * 전송본에 실릴 챗 메시지 목록.
+ *  - `excludeTail` = 끝의 assistant 메시지 1개 제외 (챗 재생성 전용).
+ *  - `hidden` = "AI에게 숨김" 노드 제외 (`node-meta.json`). 화면에는 그대로 남고
+ *    여기서만 빠진다 — ST `/hide` 와 같은 의미다.
+ *
+ * 꼬리 제외를 **숨김 필터보다 먼저** 한다: 갈아끼울 메시지가 숨김이면 이미 로그에
+ * 없으므로, 필터 뒤에 pop 하면 엉뚱한(멀쩡한) 앞 메시지가 잘려 나간다.
  */
-function buildGroupChatSessionLog(
+function chatMessagesForLog(
   session: StellaSession,
   leafId: string,
   excludeTail: boolean,
-  userName: string,
-  hostName: string,
-  nameById: Map<string, string>,
-  // 정규식 치환 — `이름: ` 프리픽스가 붙기 전 원문에 적용한다 (ST 동일).
-  transform?: (text: string, role: "user" | "assistant", depth: number) => string
-): { role: "user" | "assistant"; content: string }[] {
+  hidden: ReadonlySet<string>
+): { nodeId: string; role: "user" | "assistant"; text: string }[] {
   const msgs = buildChatMessages(session, leafId).filter(
     (m) => m.text.trim().length > 0
   );
   if (excludeTail && msgs.length > 0 && msgs[msgs.length - 1].role === "assistant") {
     msgs.pop();
   }
+  return hidden.size === 0 ? msgs : msgs.filter((m) => !hidden.has(m.nodeId));
+}
+
+/** 챗 세션 로그 (일반 세션 — 이름 프리픽스 없음). */
+function buildChatSessionLog(
+  session: StellaSession,
+  leafId: string,
+  excludeTail: boolean,
+  hidden: ReadonlySet<string>
+): { role: "user" | "assistant"; content: string }[] {
+  return chatMessagesForLog(session, leafId, excludeTail, hidden).map((m) => ({
+    role: m.role,
+    content: m.text.trim(),
+  }));
+}
+
+/**
+ * 그룹 챗 세션 로그 — 각 메시지에 `이름: ` 프리픽스 (ST 그룹 force-names 호환).
+ * AI 메시지 이름은 익명 발화자 이름표(`node-meta.json`, QR `/sendas name=`) →
+ * 노드의 발화자(`node.speaker`) → 호스트 캐릭터 순으로 정한다.
+ * 모델이 여러 화자를 구분하고 이름 지목에 반응할 수 있게 한다.
+ */
+function buildGroupChatSessionLog(
+  session: StellaSession,
+  leafId: string,
+  excludeTail: boolean,
+  hidden: ReadonlySet<string>,
+  userName: string,
+  hostName: string,
+  nameById: Map<string, string>,
+  nodeMeta: SessionNodeMetaMap,
+  // 정규식 치환 — `이름: ` 프리픽스가 붙기 전 원문에 적용한다 (ST 동일).
+  transform?: (text: string, role: "user" | "assistant", depth: number) => string
+): { role: "user" | "assistant"; content: string }[] {
+  const msgs = chatMessagesForLog(session, leafId, excludeTail, hidden);
   return msgs.map((m, i) => {
     const speaker =
       m.role === "user"
         ? userName
-        : nameById.get(session.nodes[m.nodeId]?.speaker ?? "") ?? hostName;
+        : nodeSpeakerName(nodeMeta, m.nodeId) ??
+          nameById.get(session.nodes[m.nodeId]?.speaker ?? "") ??
+          hostName;
     const text = transform
       ? transform(m.text.trim(), m.role, msgs.length - 1 - i)
       : m.text.trim();
@@ -251,7 +281,17 @@ export async function planSessionRequest(
   }
 
   const leafId = opts.leafId ?? session.meta.activeLeafId;
-  const parentSpans = buildSpans(session, leafId);
+
+  // "AI에게 숨김" 노드 (`node-meta.json`) — 화면에는 남기고 전송본에서만 뺀다
+  // (ST `/hide` 와 같은 의미). 숨긴 게 하나도 없으면 예전과 완전히 같은 경로다.
+  const nodeMeta = await plugin.store
+    .getSessionNodeMeta(sessionFile)
+    .catch((): SessionNodeMetaMap => ({ schemaVersion: 1, nodes: {} }));
+  const hiddenIds = hiddenNodeIds(nodeMeta);
+  const parentSpans =
+    hiddenIds.size > 0
+      ? spansExcludingNodes(session, leafId, hiddenIds)
+      : buildSpans(session, leafId);
 
   // 확장 컨텍스트 기여 — 요약 등은 확장이 슬롯을 채운다(요약 사용 off 면 빈 값).
   // 미리보기(dry-run)도 이 경로를 그대로 쓰므로 확장 기여가 함께 보인다.
@@ -259,7 +299,12 @@ export async function planSessionRequest(
     sessionFile,
     session,
     leafId,
+    // 재생성 지점을 그대로 넘긴다 — 1차 호출을 따로 조립하는 확장이 본 생성과
+    // 같은 지점을 보게. 빠지면 1차만 한 턴 앞(갈아끼울 응답이 붙은 채)을 본다.
+    excludeTailAssistant: opts.excludeTailAssistant === true,
+    speakerId: opts.speakerId,
     settings,
+    dryRun: opts.dryRun === true,
   });
   const summaryContext = plugin.extensions.pickSlot(contributions, "summary");
   const phoneContext = plugin.extensions.pickSlot(contributions, "phone");
@@ -468,8 +513,8 @@ export async function planSessionRequest(
         lorebookPlus.contextChars ?? DEFAULT_LOREBOOK_SELECT_CONTEXT_CHARS;
       const recentText =
         session.meta.mode === "chat"
-          ? buildChatLog(session, leafId)
-              .map((m) => m.content)
+          ? chatMessagesForLog(session, leafId, false, hiddenIds)
+              .map((m) => m.text.trim())
               .join("\n")
           : spansToText(parentSpans);
       forcedEntryKeys = await plugin.lorebookPlus.selectEntries({
@@ -482,7 +527,11 @@ export async function planSessionRequest(
     }
   }
 
-  const tokenBudget = settings.params?.maxContext ?? 16000;
+  const tokenBudget = resolveTokenBudget(
+    settings.params?.maxContext,
+    profile.maxContextTokens,
+    settings.params?.maxOutputTokens
+  );
 
   // 세션을 변형하지 않도록 복사본으로 빌드. setvar 등은 buildContext 가
   // 이 복사본을 in-place 로 갱신하므로, 빌드 후 그 값을 돌려준다.
@@ -572,13 +621,20 @@ export async function planSessionRequest(
               session,
               leafId,
               opts.excludeTailAssistant === true,
+              hiddenIds,
               userName,
               scenarioData.name?.trim() || "(unknown)",
               memberNameById,
+              nodeMeta,
               regexScripts.length > 0 ? regexMessage : undefined
             )
           : applyPromptRegex(
-              buildChatSessionLog(session, leafId, opts.excludeTailAssistant === true)
+              buildChatSessionLog(
+                session,
+                leafId,
+                opts.excludeTailAssistant === true,
+                hiddenIds
+              )
             )
         : applyPromptRegex(buildSessionLog(parentSpans, session.meta.mode)),
     memory: session.meta.memory,
@@ -747,6 +803,48 @@ export async function buildSessionContextDryRun(
       payload.kind === "chat" ? payload.messages.map((m) => countTok(m.content)) : undefined,
     meta,
   };
+}
+
+/** `Max Context` 미지정 시의 기본 예산. */
+const DEFAULT_TOKEN_BUDGET = 16000;
+
+/**
+ * 모델 한도까지 꽉 채울 때 남겨 두는 답변 자리 — 출력 길이를 지정하지 않았을 때의 몫.
+ * (컨텍스트 빌더의 출력 길이 기본값과 같은 값.)
+ */
+const OUTPUT_HEADROOM_FALLBACK = 1024;
+
+/**
+ * 전송본 조립에 쓸 입력(프롬프트) 토큰 예산.
+ *
+ *  - 기준은 사용자가 지정한 `Max Context`(없으면 기본값)다. 내리면 내린 만큼 적게 보낸다.
+ *  - 다만 **모델 프로필의 입력 한도를 넘지 못한다** — 넘기면 Core 가 요청 자체를
+ *    거부한다(설정 존중이 아니라 물리적 천장이다). 한도에 걸려 잘릴 때는 모델이
+ *    답을 쓸 자리(출력 길이)만큼 비워 둔다 — 입력으로 창을 가득 채우면 답이 안 나온다.
+ *
+ * 다른 모델로 나가는 부속 호출(이중 생성 1차 등)은 **세션의 Max Context 를 물려받지
+ * 않는다** — 그건 세션 모델에 대한 설정이다. 호출부가 `settingsOverride` 에서
+ * `params.maxContext` 를 빼서 넘기면 이 함수가 기본값 + 그 모델의 한도로 떨어진다.
+ */
+export function resolveTokenBudget(
+  userMaxContext: number | undefined,
+  profileMaxContextTokens: number | undefined,
+  maxOutputTokens?: number
+): number {
+  const requested =
+    typeof userMaxContext === "number" && userMaxContext > 0
+      ? userMaxContext
+      : DEFAULT_TOKEN_BUDGET;
+  const profileLimit =
+    typeof profileMaxContextTokens === "number" && profileMaxContextTokens > 0
+      ? profileMaxContextTokens
+      : undefined;
+  if (profileLimit == null) return requested;
+  const headroom =
+    typeof maxOutputTokens === "number" && maxOutputTokens > 0
+      ? maxOutputTokens
+      : OUTPUT_HEADROOM_FALLBACK;
+  return Math.min(requested, Math.max(1024, profileLimit - headroom));
 }
 
 export function scenarioFileOfSessionFile(sessionFile: string): string | null {

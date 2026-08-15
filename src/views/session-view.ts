@@ -55,6 +55,14 @@ import type { IllustrationAnchor } from "../util/illustration-anchors";
 import { computeNoteAnchors, type NoteAnchor } from "../util/note-anchors";
 import type { SessionNote, SessionNotes } from "../types/note";
 import { createNoteWidgetEl } from "./note-widget";
+import { createSpeakerLabelEl } from "./speaker-label-widget";
+import type { SessionNodeMetaMap } from "../types/node-meta";
+import { hiddenNodeIds } from "../types/node-meta";
+import { nodeSpanRanges } from "../util/node-segments";
+import {
+  computeSpeakerLabelAnchors,
+  type SpeakerLabelAnchor,
+} from "../util/speaker-anchors";
 import { computeLatestAiMarkerOffset } from "../util/ai-start-marker";
 import { isImeComposing, runWhenImeIdle } from "./edit-guard";
 import { reportSessionFailure } from "./report-failure";
@@ -163,6 +171,13 @@ interface TranslationBlock {
   el: HTMLElement;
   timer: number | null;
 }
+/**
+ * 번역 편집면의 커서 자리 — 재렌더를 사이에 두고 되돌리기 위한 데이터 좌표.
+ * `focused` = 재렌더 직전에 편집면이 포커스를 갖고 있었는가(그때만 되돌린다).
+ */
+type TranslationCaret =
+  | ({ focused: boolean } & ({ draft: number } | { hash: string; offset: number }))
+  | null;
 /** 일괄 번역이 이 분량을 넘으면 실행 전 확인 다이얼로그 (실수로 전체 텍스트 전송 방지). */
 const TRANSLATE_CONFIRM_PARAGRAPHS = 6;
 const TRANSLATE_CONFIRM_CHARS = 2000;
@@ -385,6 +400,11 @@ export class SessionView extends ItemView {
   private inlineNoteEls: HTMLElement[] = [];
   /** 노트 위젯 풀 — key = `b\n<noteId>`(본문) / `t\n<noteId>`(번역). 접힘 상태 보존용. */
   private inlineNotePool = new Map<string, HTMLElement>();
+
+  // ── 노드 부가 정보 (node-meta.json — AI 숨김 / 익명 발화자 이름표) ──
+  private nodeMeta: SessionNodeMetaMap | null = null;
+  /** 익명 발화자 이름표 위젯들 — 재배치마다 만들고 지운다(상태가 없다). */
+  private speakerLabelEls: HTMLElement[] = [];
   /** 가장 최근 AI 생성 시작 마커(다섯 잎 꽃) — 재배치 시 제거용. */
   private aiStartMarkerEl: HTMLElement | null = null;
   /** 번역 뷰의 AI 생성 시작 마커 — 원문 패널과 별개로 추적/제거. */
@@ -733,6 +753,12 @@ export class SessionView extends ItemView {
         void this.refreshNotes();
       })
     );
+    this.registerEvent(
+      this.store.on("session-node-meta-changed", (file: string) => {
+        if (file !== this.sessionFile) return;
+        void this.refreshNodeMeta();
+      })
+    );
 
     // 시나리오 정보(표지/이름 등)가 바뀌면 캐시만 다시 읽어 갱신한다.
     this.registerEvent(
@@ -864,6 +890,7 @@ export class SessionView extends ItemView {
     this.translations = await this.store.getSessionTranslations(this.sessionFile);
     this.illustrations = await this.store.getSessionIllustrations(this.sessionFile);
     this.notes = await this.store.getSessionNotes(this.sessionFile);
+    this.nodeMeta = await this.store.getSessionNodeMeta(this.sessionFile);
     // 집필 — 반영 전에 닫았던 초고를 대기함에서 복원 (재시작 생존).
     this.proPendingDraft = this.bidirectionalWriting()
       ? this.translations.proDraft ?? ""
@@ -1199,6 +1226,7 @@ export class SessionView extends ItemView {
     this.splitHandleEl = null;
     this.inlineIllusEls = [];
     this.inlineNoteEls = [];
+    this.speakerLabelEls = [];
     // root.empty() 로 옛 위젯 DOM 이 모두 파괴됐으니 풀도 비운다(죽은 참조 제거).
     this.inlineWidgetPool.clear();
     this.inlineNotePool.clear();
@@ -1290,6 +1318,8 @@ export class SessionView extends ItemView {
     this.qrBar = new SessionQuickReplyBar(root, this.plugin, {
       sessionFile: () => this.sessionFile,
       runText: (text, send) => this.applyQuickReplyText(text, send),
+      // `/trigger` = 유저 입력 없이 이어쓰기 한 번 — 버튼을 누른 것과 같은 경로.
+      triggerGeneration: () => this.handleContinue(),
     });
     void this.qrBar.refresh();
 
@@ -1553,26 +1583,42 @@ export class SessionView extends ItemView {
     //  - 줄 시작 첫 텍스트 span 에 ggai-para-indent 클래스 → 첫 줄 들여쓰기(빈 span 은
     //    contenteditable 에서 사라지므로 실제 텍스트 span 에 padding-left 를 준다).
     // 어느 것도 textContent 를 바꾸지 않아 offset 매핑은 그대로 유지된다.
+    // "AI 에게 숨김" 구간 — 글자는 그대로 두고 클래스만 얹어 흐리게 그린다
+    // (textContent 불변 = 편집 diff/offset 매핑에 영향 없음).
+    const hiddenRanges = this.hiddenDisplayRanges();
+    const isHidden = (at: number) =>
+      hiddenRanges.some((r) => at >= r.from && at < r.to);
+
     let indentNext = true;
+    let offset = 0;
     for (const s of this.displaySpans) {
       if (s.text.length === 0) continue;
-      const cls = s.author === "ai" ? "ggai-span-ai" : "ggai-span-user";
+      const base = s.author === "ai" ? "ggai-span-ai" : "ggai-span-user";
 
       let buf = "";
+      let bufHidden = false;
       const flush = () => {
         if (buf.length === 0) return;
+        const cls = bufHidden ? `${base} ggai-span-nosend` : base;
         this.appendMarkdownRun(body, buf, cls, indentNext);
         indentNext = false;
         buf = "";
       };
       for (const ch of s.text) {
+        const hidden = hiddenRanges.length > 0 && isHidden(offset);
         if (ch === "\n") {
           flush();
-          body.createEl("span", { cls: `ggai-para-gap ${cls}`, text: "\n" });
+          body.createEl("span", {
+            cls: `ggai-para-gap ${base}${hidden ? " ggai-span-nosend" : ""}`,
+            text: "\n",
+          });
           indentNext = true;
         } else {
+          if (buf.length > 0 && hidden !== bufHidden) flush();
+          bufHidden = hidden;
           buf += ch;
         }
+        offset += ch.length;
       }
       flush();
     }
@@ -3754,6 +3800,10 @@ export class SessionView extends ItemView {
   private renderTranslationBlocks(): void {
     const root = this.translationEl;
     if (!root || !this.session) return;
+    // 쓰던 자리(커서)를 기억해 두고 다시 그린다 — 백그라운드 저장·자동 번역이 끝나
+    // 재렌더가 끼어들면 칸은 그대로인데 커서만 사라져 "치는데 글이 안 써지는" 상태가
+    // 됐다(국소 갱신은 포커스를 보존한다 — CLAUDE.md §6).
+    const caret = this.captureTranslationCaret();
     this.flushTranslationEdits();
     // split 모드에선 번역 패널(translationEl) 자체가 스크롤 컨테이너.
     const scroller =
@@ -3774,6 +3824,7 @@ export class SessionView extends ItemView {
     editEl.setAttr("spellcheck", "false");
     this.translationEditEl = editEl;
     editEl.addEventListener("input", () => {
+      this.restoreMissingProPending();
       this.scheduleTranslationCommit();
       if (this.bidirectionalWriting()) this.onProPendingInput();
     });
@@ -3784,7 +3835,7 @@ export class SessionView extends ItemView {
     // 모바일 소프트키보드·잘라내기·컨텍스트 메뉴 삭제는 keydown 이 안 오거나 키를
     // 식별할 수 없다. 같은 판정을 beforeinput 으로도 받는다 — keydown 이 이미
     // preventDefault 한 경우엔 beforeinput 자체가 오지 않으므로 중복 처리가 없다.
-    // 초고 영역의 줄바꿈도 여기서 가로챈다 (아래 onProPendingNewline).
+    // 줄바꿈(Enter)도 여기서 가로챈다 (아래 onTranslationNewline).
     editEl.addEventListener("beforeinput", (e) =>
       this.onTranslationBeforeInput(e as InputEvent)
     );
@@ -3846,6 +3897,47 @@ export class SessionView extends ItemView {
     this.renderInlineWidgets();
     this.renderAiStartMarkerTranslation();
     scroller.scrollTop = scrollTop;
+    this.restoreTranslationCaret(caret);
+  }
+
+  /** 재렌더 전 커서 자리 — 초고 안이면 offset, 문단 안이면 문단 키 + offset. */
+  private captureTranslationCaret(): TranslationCaret {
+    const edit = this.translationEditEl;
+    const sel = document.getSelection();
+    if (!edit || !sel || sel.rangeCount === 0) return null;
+    const range = sel.getRangeAt(0);
+    if (!edit.contains(range.startContainer)) return null;
+    const focused = edit.contains(document.activeElement);
+    const pending = this.proPendingEl;
+    if (pending && pending.contains(range.startContainer)) {
+      return { focused, draft: this.caretOffsetWithin(pending) };
+    }
+    const block = this.translationBlocks.find((b) =>
+      b.el.contains(range.startContainer)
+    );
+    if (!block) return null;
+    return { focused, hash: block.hash, offset: this.caretOffsetWithin(block.el) };
+  }
+
+  /**
+   * 기억해 둔 커서 자리 복원 — 그 문단이 사라졌으면 아무것도 하지 않는다.
+   *
+   * **포커스까지 되돌려야 한다** — `root.empty()` 로 편집면이 통째로 새로 만들어지면
+   * 포커스는 `body` 로 떨어지고, 그 상태에서 selection 만 놓으면 커서는 보이는데
+   * 키 입력이 아무 데도 안 들어간다(실측). 재렌더 직전에 편집면이 포커스를 갖고
+   * 있었을 때만 되돌린다 — 다른 입력칸에서 타이핑 중이면 뺏지 않는다.
+   */
+  private restoreTranslationCaret(caret: TranslationCaret): void {
+    if (!caret) return;
+    if (caret.focused) {
+      this.translationEditEl?.focus({ preventScroll: true });
+    }
+    if ("draft" in caret) {
+      this.setCaretInProPending(caret.draft);
+      return;
+    }
+    const block = this.translationBlocks.find((b) => b.hash === caret.hash);
+    if (block) this.setCaretWithin(block.el, caret.offset);
   }
 
   private clearTranslationBlocks(): void {
@@ -3948,6 +4040,23 @@ export class SessionView extends ItemView {
   // 표시되고, 손을 멈추면(디바운스) plugin.pro.convertAndSplice 가 영어판에 접합한다.
   // IME 안전 원칙: 커서가 있는 문단/초고 줄은 강제 flush 외엔 건드리지 않고,
   // 변환 중인 구간은 contenteditable=false 로 잠가 경합 자체를 없앤다.
+
+  /**
+   * 그물 — 초고 영역이 DOM 에서 사라졌으면 그 자리에 다시 세운다 (입력마다 확인).
+   *
+   * 알려진 파괴 경로(경계 삭제·Enter)는 막았지만 contenteditable 은 브라우저 버전마다
+   * 새 방식으로 구조를 건드린다. 그때 **입력란이 없는 채로 남는 것**만은 막는다 —
+   * 사용자에게는 "칸이 사라지고 아래에 더 쓸 수 없다"가 곧 작업 중단이다.
+   * 재렌더가 아니라 span 만 다시 붙이므로(초고 문자열은 뷰가 들고 있다) 문단 편집
+   * 상태·커서는 건드리지 않는다.
+   */
+  private restoreMissingProPending(): void {
+    const edit = this.translationEditEl;
+    if (!edit || !this.bidirectionalWriting()) return;
+    if (this.proPendingParts().length > 0) return;
+    if (isImeComposing()) return; // 조합 중 DOM 삽입 금지 (입력 마비 회귀 방지)
+    this.renderProPendingRegion(edit);
+  }
 
   /** 번역 뷰 끝의 이어쓰기(초고) 영역 — 여기 쓴 한국어가 잠시 후 영어판으로 확정된다. */
   private renderProPendingRegion(editEl: HTMLElement): void {
@@ -4063,29 +4172,78 @@ export class SessionView extends ItemView {
   }
 
   /**
-   * 초고 영역의 줄바꿈은 우리가 직접 `\n` 문자로 넣는다.
+   * 번역 편집 영역의 줄바꿈은 **항상 우리가** `\n` 문자로 직접 넣는다.
    *
-   * 브라우저에 맡기면 span 을 형제 span 으로 쪼개 버려(위 readProPendingText 참조)
-   * 뷰가 초고를 온전히 못 읽는다. `white-space: pre-wrap` 이라 진짜 개행이 그대로
-   * 보이고, "초고 = span 하나 + 진짜 개행" 불변식이 유지된다.
+   * 브라우저에 맡기면 Enter 자리에서 편집 영역을 `<div>` 블록으로 쪼개고, 뒤따르던
+   * 문단 꼬리와 초고 span 을 그 div 안으로 끌고 들어간다(실측). 그러면 문단 스팬은
+   * 잘린 채로 커밋되고(문단 뒷부분 유실), div 안에 새로 친 글은 초고에도 문단에도
+   * 속하지 않아 다음 재렌더에 통째로 사라진다. `white-space: pre-wrap` 이라
+   * 진짜 개행이 그대로 보이고 "문단/초고 = span 하나" 불변식이 유지된다.
    */
-  private onProPendingNewline(e: InputEvent): void {
-    const pending = this.proPendingEl;
-    if (!pending || !this.bidirectionalWriting()) return;
+  private onTranslationNewline(e: InputEvent): void {
+    const edit = this.translationEditEl;
     const sel = document.getSelection();
-    if (!sel || sel.rangeCount === 0) return;
+    if (!edit || !sel || sel.rangeCount === 0) return;
     const range = sel.getRangeAt(0);
-    if (!pending.contains(range.startContainer)) return;
+    if (!edit.contains(range.commonAncestorContainer)) return;
+    const pending = this.bidirectionalWriting() ? this.proPendingEl : null;
+
+    // 초고 영역 안 → 커서 자리에. 마지막 문단 끝(초고 바로 앞) → 초고 머리에
+    // (본문 끝에서 줄을 바꾸면 새 줄은 초고에서 쓰는 것이다).
+    if (pending && pending.contains(range.startContainer)) {
+      e.preventDefault();
+      range.deleteContents();
+      this.insertProPendingNewline(sel, {
+        node: range.startContainer,
+        offset: range.startOffset,
+      });
+      return;
+    }
+    if (
+      pending &&
+      (this.caretAtProPendingStart(range, pending) ||
+        this.caretAtParagraphEnd(range, this.paragraphBeforeProPending()))
+    ) {
+      e.preventDefault();
+      this.insertProPendingNewline(sel, null);
+      return;
+    }
+
+    // 문단 안 → 그 문단 텍스트에 개행 한 글자. 문단 경계(구분자·위젯)에서는
+    // 아무것도 하지 않는다 (구조 변경은 이어쓰기/삭제 경로의 몫).
     e.preventDefault();
-    range.deleteContents();
-    // 텍스트 노드는 **그대로 두고** 개행 한 글자만 끼워 넣는다. 노드를 새로 만들면
-    // (textContent 재설정) 브라우저의 편집/IME 상태가 끊겨 **엔터 다음 첫 글자가
-    // 삼켜진다**(한글은 조합 첫 글자). 커서도 removeAllRanges 로 잠깐 비우지 않고
-    // collapse 로 바로 옮긴다 — 선택이 비는 순간에도 조합이 깨진다.
+    if (!range.collapsed) return;
+    const block = this.translationBlocks.find((b) =>
+      b.el.contains(range.startContainer)
+    );
+    if (!block || range.startContainer.nodeType !== Node.TEXT_NODE) return;
+    const node = range.startContainer as Text;
+    node.insertData(range.startOffset, "\n");
+    sel.collapse(node, range.startOffset + 1);
+    this.scheduleTranslationCommit();
+  }
+
+  /**
+   * 초고에 개행 한 글자 — `at` 이 없으면 초고 머리에 넣는다.
+   *
+   * 텍스트 노드는 **그대로 두고** 글자만 끼워 넣는다. 노드를 새로 만들면
+   * (textContent 재설정) 브라우저의 편집/IME 상태가 끊겨 **엔터 다음 첫 글자가
+   * 삼켜진다**(한글은 조합 첫 글자). 커서도 removeAllRanges 로 잠깐 비우지 않고
+   * collapse 로 바로 옮긴다 — 선택이 비는 순간에도 조합이 깨진다.
+   */
+  private insertProPendingNewline(
+    sel: Selection,
+    at: { node: Node; offset: number } | null
+  ): void {
+    const pending = this.proPendingEl;
+    if (!pending) return;
     const target =
-      range.startContainer.nodeType === Node.TEXT_NODE
-        ? { node: range.startContainer as Text, offset: range.startOffset }
-        : this.proPendingCaretTarget(pending, this.caretOffsetWithin(pending));
+      at && at.node.nodeType === Node.TEXT_NODE
+        ? { node: at.node as Text, offset: at.offset }
+        : this.proPendingCaretTarget(
+            pending,
+            at ? this.caretOffsetWithin(pending) : 0
+          );
     target.node.insertData(target.offset, "\n");
     sel.collapse(target.node, target.offset + 1);
     // 끝 개행은 줄이 안 생겨 커서가 제자리처럼 보인다 — 필러를 둔다(이어 쓰기
@@ -4093,6 +4251,108 @@ export class SessionView extends ItemView {
     this.syncProPendingFiller(pending);
     // beforeinput 을 막았으므로 input 이벤트가 안 온다 — 평소 타이핑과 같은 뒷처리를
     // 여기서 직접 한다(초고 저장 디바운스 + 변환 예약).
+    this.scheduleTranslationCommit();
+    this.onProPendingInput();
+  }
+
+  /**
+   * 초고 영역 **경계를 넘는 삭제**는 브라우저에 맡기지 않는다
+   * (개행을 우리가 직접 넣는 것과 같은 이유 — 영역 구조가 우리 것이라서).
+   *
+   * 실측(Chromium): 초고 머리에서 Backspace, 또는 마지막 문단 끝에서 Delete 를
+   * 브라우저가 처리하면 **초고 span 을 앞 문단에 통째로 합치고 지워 버린다**.
+   * 그래서 입력란이 화면에서 사라지고, 커서가 위 문단에 붙고, 이어 쓴 문장이 앞 문단
+   * 수정으로 들어갔다(제보: "입력창 사라지고 위로 입력포커스가 가서 붙는다").
+   * 경계에서의 한 글자 삭제만 우리가 대신 수행해 영역을 살려 둔다.
+   *
+   * @returns 우리가 처리했으면 true (호출자는 더 진행하지 않는다).
+   */
+  private handleProPendingBoundaryDelete(e: Event, range: Range): boolean {
+    const pending = this.proPendingEl;
+    if (!pending || !this.bidirectionalWriting()) return false;
+    if (!range.collapsed) return false; // 선택 삭제는 구조 삭제 경로가 맡는다
+    const backward = deleteIsBackward(e);
+    if (backward == null) return false;
+    const paraBefore = this.paragraphBeforeProPending();
+
+    if (backward) {
+      if (!this.caretAtProPendingStart(range, pending)) return false;
+      e.preventDefault();
+      if (paraBefore) this.deleteLastCharOfBlock(paraBefore.el);
+      return true;
+    }
+    if (
+      !this.caretAtProPendingStart(range, pending) &&
+      !this.caretAtParagraphEnd(range, paraBefore)
+    ) {
+      return false;
+    }
+    e.preventDefault();
+    this.deleteFirstCharOfProPending();
+    return true;
+  }
+
+  /**
+   * 초고 바로 앞 문단 — 본문이 개행으로 끝나면 사이에 구분자(구조)가 있으므로 null
+   * (경계에서의 한 글자 삭제 대상은 문단 글자뿐, 구조는 건드리지 않는다).
+   */
+  private paragraphBeforeProPending(): TranslationBlock | null {
+    if (/\n$/.test(this.baselineText)) return null;
+    return this.translationBlocks[this.translationBlocks.length - 1] ?? null;
+  }
+
+  private caretAtParagraphEnd(
+    range: Range,
+    block: TranslationBlock | null
+  ): boolean {
+    if (!block || !block.el.contains(range.startContainer)) return false;
+    return (
+      this.caretOffsetWithin(block.el) === (block.el.textContent ?? "").length
+    );
+  }
+
+  /**
+   * 커서가 초고 영역의 머리(= 마지막 문단과 초고 사이 경계)에 있는가.
+   * 빈 초고를 클릭하면 커서가 span 안이 아니라 편집 영역 레벨(초고 앞/뒤 인덱스)에
+   * 놓이기도 한다 — 실측: 그 자리에서의 Backspace 가 초고 span 을 통째로 지웠다.
+   */
+  private caretAtProPendingStart(range: Range, pending: HTMLElement): boolean {
+    if (pending.contains(range.startContainer)) {
+      return this.caretOffsetWithin(pending) === 0;
+    }
+    const edit = this.translationEditEl;
+    if (!edit || range.startContainer !== edit) return false;
+    const idx = Array.from(edit.childNodes).indexOf(pending);
+    if (idx < 0) return false;
+    if (range.startOffset === idx) return true;
+    // 초고 뒤 자리도 초고가 비었으면 머리와 같은 지점이다.
+    return range.startOffset === idx + 1 && (pending.textContent ?? "") === "";
+  }
+
+  /** 문단 끝 한 글자 삭제 (초고 머리 Backspace 대행) — 커서는 초고에 그대로 둔다. */
+  private deleteLastCharOfBlock(el: HTMLElement): void {
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    let node: Text | null = null;
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      if ((n as Text).length > 0) node = n as Text;
+    }
+    if (!node) return;
+    const len = trailingCharLength(node.data);
+    node.deleteData(node.length - len, len);
+    // beforeinput 을 막았으므로 input 이 오지 않는다 — 커밋 예약을 직접 한다.
+    this.scheduleTranslationCommit();
+  }
+
+  /** 초고 첫 글자 삭제 (마지막 문단 끝 Delete 대행) — 초고 영역은 그대로 살려 둔다. */
+  private deleteFirstCharOfProPending(): void {
+    const pending = this.proPendingEl;
+    if (!pending) return;
+    const node = Array.from(pending.childNodes).find(
+      (n) => n.nodeType === Node.TEXT_NODE && (n as Text).length > 0
+    ) as Text | undefined;
+    if (!node) return; // 초고가 비었으면 지울 것이 없다 (영역만 지킨다)
+    node.deleteData(0, leadingCharLength(node.data));
+    this.syncProPendingFiller(pending);
     this.scheduleTranslationCommit();
     this.onProPendingInput();
   }
@@ -4383,16 +4643,19 @@ export class SessionView extends ItemView {
       return;
     }
     if (e.inputType === "insertParagraph" || e.inputType === "insertLineBreak") {
-      this.onProPendingNewline(e);
+      this.onTranslationNewline(e);
     }
   }
 
   private handleTranslationDelete(e: Event): void {
     if (isImeComposing()) return; // 조합 중엔 개입하지 않는다 (입력 마비 회귀 방지)
     const sel = document.getSelection();
-    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+    if (!sel || sel.rangeCount === 0) return;
     const range = sel.getRangeAt(0);
     if (!this.translationEditEl?.contains(range.commonAncestorContainer)) return;
+    // 초고 영역 경계를 넘는 한 글자 삭제는 우리가 처리한다 (아래 주석 참조).
+    if (this.handleProPendingBoundaryDelete(e, range)) return;
+    if (sel.isCollapsed) return;
 
     const hit = this.translationBlocks.filter((b) => range.intersectsNode(b.el));
     const pendingHit =
@@ -4443,6 +4706,8 @@ export class SessionView extends ItemView {
     // 문단 분류: 전부 선택 = 구조 삭제 / 부분 선택(양끝) = 한국어 수정본으로.
     const fullyCovered: TranslationBlock[] = [];
     let translationsChanged = false;
+    // 부분 삭제로 살아남는 첫 문단과 그 안의 잘라낸 자리 — 삭제 후 커서 자리다.
+    let caretInBlock: { hash: string; offset: number } | null = null;
     for (const b of hit) {
       if (this.rangeCoversElement(range, b.el)) {
         fullyCovered.push(b);
@@ -4467,6 +4732,7 @@ export class SessionView extends ItemView {
         }
         b.baseline = remain;
         translationsChanged = true;
+        if (!caretInBlock) caretInBlock = { hash: b.hash, offset: start };
       }
     }
 
@@ -4530,24 +4796,59 @@ export class SessionView extends ItemView {
     this.suppressEvents = false;
     if (this.translationViewActive || this.outputMode === "split-h") {
       this.renderTranslationBlocks();
-      this.setCaretAfterProDelete(caretOffset);
+      this.setCaretAfterProDelete(caretOffset, caretInBlock);
     }
     this.updateToolbar();
     this.updateViewToggleBtn();
   }
 
-  /** 삭제 지점(raw offset) 이후 첫 문단 머리로 커서 이동 — 없으면 초고 영역으로. */
-  private setCaretAfterProDelete(rawOffset: number): void {
+  /**
+   * 삭제 후 커서 — 부분 삭제로 살아남은 문단이 있으면 **잘라낸 그 자리**로,
+   * 없으면(통째 삭제) 삭제 지점 이후 첫 문단 머리로. 둘 다 없으면 초고 영역으로.
+   *
+   * 부분 삭제인데도 문단 머리로 보내면 "끝을 지웠더니 커서가 위로 튀어 올라 붙는다"가
+   * 된다 — 잘라낸 자리는 문단 머리가 아니라 지운 지점이다.
+   */
+  private setCaretAfterProDelete(
+    rawOffset: number,
+    caretInBlock: { hash: string; offset: number } | null
+  ): void {
+    const partial = caretInBlock
+      ? this.translationBlocks.find((b) => b.hash === caretInBlock.hash)
+      : null;
+    if (partial) {
+      this.setCaretWithin(partial.el, caretInBlock!.offset);
+      return;
+    }
     const target =
       this.translationBlocks.find(
         (b) => b.offset + b.source.length > rawOffset
       ) ?? null;
     const el = target?.el ?? this.proPendingEl;
-    if (!el) return;
+    if (el) this.setCaretWithin(el, 0);
+  }
+
+  /** el 안 표시 offset 자리에 커서를 놓는다 (마커 span 등 중첩 텍스트 노드 대응). */
+  private setCaretWithin(el: HTMLElement, offset: number): void {
     const sel = window.getSelection();
     if (!sel) return;
     const r = document.createRange();
-    r.selectNodeContents(el);
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    let acc = 0;
+    let placed = false;
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const node = n as Text;
+      if (offset <= acc + node.length) {
+        r.setStart(node, offset - acc);
+        placed = true;
+        break;
+      }
+      acc += node.length;
+    }
+    if (!placed) {
+      r.selectNodeContents(el);
+      r.collapse(offset === 0);
+    }
     r.collapse(true);
     sel.removeAllRanges();
     sel.addRange(r);
@@ -4924,10 +5225,111 @@ export class SessionView extends ItemView {
    * 영향이 없고, 텍스트 노드를 건드리지 않으므로 재배치해도 편집·스크롤이 보존된다.
    * 생성(스트리밍) 중에는 배치하지 않는다 — 끝나면 renderBodySpans 경유로 재배치.
    */
-  /** 본문에 꽂히는 원자 위젯 재배치 — 인라인 삽화 + 세션 노트(QR /comment). */
+  /**
+   * 본문에 꽂히는 원자 위젯 재배치 — 인라인 삽화 + 세션 노트(레거시 QR /comment)
+   * + 익명 발화자 이름표(QR /sendas name=).
+   */
   private renderInlineWidgets(): void {
     this.renderInlineIllustrations();
     this.renderInlineNotes();
+    this.renderSpeakerLabels();
+  }
+
+  /**
+   * "AI 에게 숨김" 노드가 지금 본문에서 차지하는 구간 (표시 offset 기준).
+   * 저장하지 않고 그릴 때마다 노드 귀속 세그먼트에서 계산한다 — 삽화/노트 앵커와 같은 규칙.
+   */
+  private hiddenDisplayRanges(): { from: number; to: number }[] {
+    const hidden = hiddenNodeIds(this.nodeMeta);
+    if (hidden.size === 0 || !this.session) return [];
+    const out: { from: number; to: number }[] = [];
+    for (const range of nodeSpanRanges(this.session)) {
+      if (!hidden.has(range.nodeId)) continue;
+      out.push({
+        from: this.rawOffsetToDisplayOffset(range.from),
+        to: this.rawOffsetToDisplayOffset(range.to),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * 익명 발화자 이름표 — 그 발화가 시작되는 문단 **앞**에 꽂는 글자 0개 원자 블록.
+   * 본문에 `이름:` 을 박지 않으므로 전송본·내보내기·문단 세기에 영향이 없다.
+   * 상태(접힘 등)가 없는 위젯이라 풀 없이 매번 새로 만든다.
+   */
+  private renderSpeakerLabels(): void {
+    if (this.generation) return;
+    if (
+      this.deferWhileComposing("speaker-labels", () => this.renderSpeakerLabels())
+    ) {
+      return;
+    }
+    for (const el of this.speakerLabelEls) el.remove();
+    this.speakerLabelEls = [];
+    if (!this.session) return;
+    const anchors = computeSpeakerLabelAnchors(this.session, this.nodeMeta);
+    if (anchors.length === 0) return;
+    this.placeSpeakerLabels(anchors, this.bodyEl);
+    if (this.translationEditEl) {
+      this.placeSpeakerLabelsInTranslation(anchors);
+    }
+  }
+
+  private placeSpeakerLabels(
+    anchors: SpeakerLabelAnchor[],
+    host: HTMLElement | null
+  ): void {
+    if (!host) return;
+    for (const anchor of anchors) {
+      const el = createSpeakerLabelEl(anchor.name);
+      const target = this.rawOffsetToDisplayOffset(anchor.offset);
+      let ref: Node | null = null;
+      let acc = 0;
+      for (const child of Array.from(host.childNodes)) {
+        if (acc >= target && !isInlineWidgetNode(child)) {
+          ref = child;
+          break;
+        }
+        acc += child.textContent?.length ?? 0;
+      }
+      host.insertBefore(el, ref);
+      this.speakerLabelEls.push(el);
+    }
+  }
+
+  private placeSpeakerLabelsInTranslation(anchors: SpeakerLabelAnchor[]): void {
+    const editEl = this.translationEditEl;
+    if (!editEl) return;
+    for (const anchor of anchors) {
+      const el = createSpeakerLabelEl(anchor.name);
+      const block = this.translationBlocks.find((b) => b.offset >= anchor.offset);
+      editEl.insertBefore(el, block?.el ?? null);
+      this.speakerLabelEls.push(el);
+    }
+  }
+
+  /** node-meta.json 이 바뀌면(내가 쓴 것 포함) 본문 표시만 다시 맞춘다. */
+  private async refreshNodeMeta(): Promise<void> {
+    if (!this.sessionFile) {
+      this.nodeMeta = null;
+      return;
+    }
+    this.nodeMeta = await this.store.getSessionNodeMeta(this.sessionFile);
+    this.applyNodeMetaToBody();
+  }
+
+  /**
+   * 숨김 표시/이름표를 본문에 반영 — 본문을 통째로 다시 그리므로
+   * 조합 중이면 미루고(입력 마비 회귀 금지) 생성 중이면 건너뛴다
+   * (스트리밍 tail 이 본문을 소유 중, 생성이 끝나면 전체 재렌더가 반영한다).
+   */
+  private applyNodeMetaToBody(): void {
+    if (this.generation) return;
+    if (this.deferWhileComposing("node-meta", () => this.applyNodeMetaToBody())) {
+      return;
+    }
+    this.preserveReadingPosition(() => this.redrawBodyPreservingCaret());
   }
 
   /**
@@ -5814,7 +6216,34 @@ function hasVisibleText(text: string): boolean {
 }
 
 /**
- * 본문에 꽂힌 **글자 0개 원자 위젯**인가 (인라인 삽화 / 노트 / AI 시작 마커).
+ * 삭제 방향 — 뒤로(Backspace) true / 앞으로(Delete) false / 삭제가 아니면 null.
+ * keydown(키 이름)과 beforeinput(inputType) 양쪽에서 같은 판정을 쓴다.
+ */
+function deleteIsBackward(e: Event): boolean | null {
+  if (e instanceof KeyboardEvent) {
+    if (e.key === "Backspace") return true;
+    if (e.key === "Delete") return false;
+    return null;
+  }
+  const type = (e as InputEvent).inputType ?? "";
+  if (type.endsWith("Backward")) return true;
+  if (type.endsWith("Forward")) return false;
+  return null;
+}
+
+/** 문자열 끝 한 글자의 길이 — 서로게이트 쌍(이모지)을 반으로 자르지 않는다. */
+function trailingCharLength(s: string): number {
+  const tail = s.slice(-2);
+  return /^[\uD800-\uDBFF][\uDC00-\uDFFF]$/.test(tail) ? 2 : 1;
+}
+
+/** 문자열 앞 한 글자의 길이 — 서로게이트 쌍(이모지)을 반으로 자르지 않는다. */
+function leadingCharLength(s: string): number {
+  return /^[\uD800-\uDBFF][\uDC00-\uDFFF]/.test(s) ? 2 : 1;
+}
+
+/**
+ * 본문에 꽂힌 **글자 0개 원자 위젯**인가 (인라인 삽화 / 노트 / 발화자 이름표 / AI 시작 마커).
  * 위젯 앞에 다른 위젯을 꽂지 않도록 삽입 기준점 탐색에서 건너뛴다.
  */
 function isInlineWidgetNode(node: Node): boolean {
@@ -5822,6 +6251,7 @@ function isInlineWidgetNode(node: Node): boolean {
     node instanceof HTMLElement &&
     (node.hasClass("ggai-inline-illustration") ||
       node.hasClass("ggai-note-block") ||
+      node.hasClass("ggai-speaker-label") ||
       node.hasClass("ggai-ai-start-marker"))
   );
 }

@@ -36,6 +36,8 @@ export function registerRepetitionExtension(plugin: StellaEnginePlugin): () => v
     id: REPETITION_EXTENSION_ID,
     async contributeContext({ sessionFile, session, leafId }): Promise<ContextContribution[]> {
       const settings = normalizeRepetitionSettings(plugin.data.repetition);
+      // 패널의 켜기/끄기 — 꺼 두면 기여 자체가 없어 전송본이 예전과 byte 단위로 같다.
+      if (!settings.enabled) return [];
       const key = `${sessionFile}|${leafId}|${Object.keys(session.nodes).length}|${JSON.stringify(settings)}`;
       let note = cache.get(key);
       if (note == null) {

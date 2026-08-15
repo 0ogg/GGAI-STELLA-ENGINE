@@ -36,6 +36,8 @@ export interface QuickReplyBarHost {
   runText(text: string, send: boolean): void | Promise<void>;
   /** 입력창의 현재 텍스트 — injectInput 합성용. 없으면 "". */
   currentInput?(): string;
+  /** `/trigger` — 유저 메시지 없이 생성 1회 (챗=전송, 소설=이어쓰기와 같은 경로). */
+  triggerGeneration?(speaker?: string): void | Promise<void>;
 }
 
 export class SessionQuickReplyBar {
@@ -350,6 +352,9 @@ export class SessionQuickReplyBar {
         await runQuickReplyScript(this.plugin, {
           sessionFile: () => this.host.sessionFile(),
           runText: (t, send) => this.host.runText(t, send),
+          triggerGeneration: this.host.triggerGeneration
+            ? (speaker) => this.host.triggerGeneration!(speaker)
+            : undefined,
         }, text);
       } catch (err) {
         console.warn("[GGAI Stella] 빠른 답장 커맨드 실패:", err);

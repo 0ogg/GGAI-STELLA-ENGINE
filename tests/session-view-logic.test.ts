@@ -15,6 +15,7 @@ import {
   compareQrRule,
   isQrCommandScript,
   parseDetailsBlock,
+  parseMessageIndices,
   parseQrCommand,
   parseQrLabels,
   parseQrScript,
@@ -85,7 +86,19 @@ import {
   splitTextByBudget,
 } from "../src/util/split-passage";
 import { getChildren } from "../src/util/session-tree";
-import { buildNodeSegments } from "../src/util/node-segments";
+import {
+  buildNodeSegments,
+  nodeSpanRanges,
+  spansExcludingNodes,
+} from "../src/util/node-segments";
+import {
+  hiddenNodeIds,
+  isNodeHidden,
+  nodeSpeakerName,
+  normalizeNodeMetaMap,
+  patchNodeMeta,
+} from "../src/types/node-meta";
+import { computeSpeakerLabelAnchors } from "../src/util/speaker-anchors";
 import { recordIllustrationVariant } from "../src/util/illustrations";
 import {
   completedParagraphsAfter,
@@ -449,6 +462,78 @@ const asyncTests: Promise<void>[] = [];
     ),
     true
   );
+}
+
+{
+  // {{summary}} 는 어디에 써도 "그 자리로 옮기기" —
+  // 자동 삽입이 더해져 두 번 들어가면 안 된다.
+  const SUM = "Earlier events were summarized here.";
+  const chatOnlyPreset = {
+    meta: { id: "p", name: "Preset", favorite: false },
+    prompts: [
+      {
+        id: "chat",
+        kind: "marker",
+        identifier: "chatHistory",
+        name: "Chat History",
+        enabled: true,
+      },
+    ],
+  };
+  // 자리 지정 매크로를 담은 슬롯별로, 그 내용이 전송본에 몇 번 나오는지 센다.
+  const countIn = (macroSlot: "summary", extra: Record<string, unknown>) =>
+    buildContext({
+      preset: chatOnlyPreset,
+      scenario: { name: "Char" },
+      lorebooks: [],
+      sessionLog: [{ role: "assistant", content: "Current story." }],
+      [macroSlot]: SUM,
+      tokenBudget: 10000,
+      countTokens: (s) => s.length,
+      ...extra,
+    } as any).messages.filter((m) => m.content.includes(SUM)).length;
+
+  for (const slot of ["summary"] as const) {
+    const macro = `{{${slot}}}`;
+    // 매크로가 없으면 자동 삽입 1회
+    assert.equal(countIn(slot, {}), 1);
+    // 작가노트 / 세션 메모 / 본문 어디에 써도 1회
+    assert.equal(countIn(slot, { authorNote: `Recap: ${macro}` }), 1);
+    assert.equal(countIn(slot, { memory: `Recap: ${macro}` }), 1);
+    assert.equal(
+      countIn(slot, {
+        sessionLog: [{ role: "assistant", content: `Recap: ${macro}` }],
+      }),
+      1
+    );
+    // 마커 가공 템플릿에 써도 1회
+    assert.equal(
+      countIn(slot, {
+        preset: {
+          meta: { id: "p", name: "Preset", favorite: false },
+          prompts: [
+            {
+              id: "desc",
+              kind: "marker",
+              identifier: "charDescription",
+              name: "Description",
+              enabled: true,
+              wrap: `{{description}}\nRecap: ${macro}`,
+            },
+            {
+              id: "chat",
+              kind: "marker",
+              identifier: "chatHistory",
+              name: "Chat History",
+              enabled: true,
+            },
+          ],
+        },
+        scenario: { name: "Char", description: "desc" },
+      }),
+      1
+    );
+  }
 }
 
 {
@@ -1913,6 +1998,110 @@ const asyncTests: Promise<void>[] = [];
     { nodeId: "a", text: "BBBB. " },
   ]);
   assert.deepEqual(buildNodeSegments(session, "missing"), []);
+
+  // nodeSpanRanges — 세그먼트와 같은 순서/길이의 [from,to) 구간.
+  assert.deepEqual(nodeSpanRanges(session, "d"), [
+    { nodeId: "root", from: 0, to: 4 },
+    { nodeId: "a", from: 4, to: 6 },
+    { nodeId: "b", from: 6, to: 8 },
+    { nodeId: "a", from: 8, to: 10 },
+    { nodeId: "d", from: 10, to: 15 },
+  ]);
+
+  // spansExcludingNodes — 숨긴 노드의 구간만 빠지고 나머지는 byte 그대로.
+  // 제외 집합이 비면 buildSpans 와 완전히 동일해야 한다 (기능 도입 전 동작 보존).
+  assert.deepEqual(
+    spansExcludingNodes(session, "d", new Set()),
+    buildSpans(session, "d")
+  );
+  assert.equal(
+    spansToText(spansExcludingNodes(session, "d", new Set(["d"]))),
+    "AA. BBXY. "
+  );
+  // 한 노드가 여러 조각으로 흩어져 있어도 전부 빠진다 (a = 앞·뒤 두 조각).
+  assert.equal(
+    spansToText(spansExcludingNodes(session, "d", new Set(["a"]))),
+    "AA. XYCCCC."
+  );
+}
+
+{
+  // node-meta.json — 정규화는 아는 필드만 남기고, 빈 항목은 아예 안 만든다.
+  const raw = {
+    schemaVersion: 1,
+    nodes: {
+      n1: { hidden: true, speakerName: "마법 신문", junk: 1 },
+      n2: { hidden: false, speakerName: "   " },
+      n3: "nope",
+    },
+  };
+  const map = normalizeNodeMetaMap(raw);
+  assert.deepEqual(map.nodes, { n1: { hidden: true, speakerName: "마법 신문" } });
+  assert.equal(isNodeHidden(map, "n1"), true);
+  assert.equal(isNodeHidden(map, "n2"), false);
+  assert.equal(nodeSpeakerName(map, "n1"), "마법 신문");
+  assert.equal(nodeSpeakerName(map, "n2"), null);
+  assert.deepEqual([...hiddenNodeIds(map)], ["n1"]);
+
+  // 값이 비면 항목 자체를 지운다 — 파일이 껍데기로 부풀지 않게.
+  const unhidden = patchNodeMeta(map, "n1", { hidden: false });
+  assert.deepEqual(unhidden.nodes, { n1: { speakerName: "마법 신문" } });
+  assert.deepEqual(patchNodeMeta(unhidden, "n1", { speakerName: "" }).nodes, {});
+  // 원본 불변 (호출부가 비교로 저장 여부를 판단한다).
+  assert.deepEqual(map.nodes, { n1: { hidden: true, speakerName: "마법 신문" } });
+}
+
+{
+  // 익명 발화자 이름표 앵커 — 그 노드가 **처음** 기여한 문단 앞.
+  const session: StellaSession = {
+    schemaVersion: 1,
+    meta: {
+      id: "s-lab",
+      name: "S",
+      scenarioId: "sc",
+      mode: "novel",
+      createdAt: 1,
+      modifiedAt: 1,
+      lastPlayedAt: 1,
+      favorite: false,
+      rootId: "root",
+      activeLeafId: "b",
+    },
+    nodes: {
+      root: {
+        id: "root",
+        parent: null,
+        kind: "root",
+        patches: [{ op: "append", spans: [{ author: "ai", text: "첫 문단." }] }],
+        createdAt: 1,
+      },
+      a: {
+        id: "a",
+        parent: "root",
+        kind: "ai-continue",
+        patches: [{ op: "append", spans: [{ author: "ai", text: "\n호외요 호외." }] }],
+        createdAt: 2,
+      },
+      b: {
+        id: "b",
+        parent: "a",
+        kind: "ai-continue",
+        patches: [{ op: "append", spans: [{ author: "ai", text: "\n다음 문단." }] }],
+        createdAt: 3,
+      },
+    },
+  };
+  const meta = normalizeNodeMetaMap({
+    schemaVersion: 1,
+    nodes: { a: { speakerName: "마법 신문" } },
+  });
+  // "첫 문단."(5자) + "\n" 다음이 a 의 문단 시작 = offset 6.
+  // 노드가 붙인 앞머리 줄바꿈을 건너뛰지 않으면 앞 문단(0)으로 밀린다 — 그게 사고.
+  assert.deepEqual(computeSpeakerLabelAnchors(session, meta), [
+    { nodeId: "a", name: "마법 신문", offset: 6 },
+  ]);
+  // 이름표가 없으면 앵커도 없다 (기능 도입 전과 동일).
+  assert.deepEqual(computeSpeakerLabelAnchors(session, null), []);
 }
 
 {
@@ -4082,6 +4271,21 @@ function regexScript(overrides: Partial<RegexScript>): RegexScript {
   assert.deepEqual(sendas.named, { name: "{{groupNotMuted}}" });
   assert.equal(sendas.body, "안녕하세요");
   assert.equal(parseQrCommand("/flushvar choiceText").body, "choiceText");
+
+  // 본문 없는 커맨드 — 파서는 빈 본문으로 남기고(실행기가 {{pipe}} 를 채운다),
+  // 이름붙은 인자는 그대로 잡힌다. `/gen … | /sendas name="X"` 관용구의 기반.
+  const bareSendas = parseQrCommand('/sendas name="{{char}}"');
+  assert.deepEqual(bareSendas.named, { name: "{{char}}" });
+  assert.equal(bareSendas.body, "");
+
+  // `/hide` 대상 지정 — 단일 / 범위(양끝 포함) / 나열 / 음수(끝에서) / 범위 밖 무시.
+  assert.deepEqual(parseMessageIndices("2", 5), [2]);
+  assert.deepEqual(parseMessageIndices("1-3", 5), [1, 2, 3]);
+  assert.deepEqual(parseMessageIndices("3-1", 5), [1, 2, 3]);
+  assert.deepEqual(parseMessageIndices("0,2 4", 5), [0, 2, 4]);
+  assert.deepEqual(parseMessageIndices("-1", 5), [4]);
+  assert.deepEqual(parseMessageIndices("9", 5), []);
+  assert.deepEqual(parseMessageIndices("헛소리", 5), []);
 
   console.log("qr-script parser harness passed");
 }

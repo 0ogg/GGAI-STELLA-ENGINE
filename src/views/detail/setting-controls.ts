@@ -274,6 +274,52 @@ export function renderEnableToggle(opts: {
 }
 
 /**
+ * 프롬프트 **세트** 선택 — 드롭다운 + 편집 버튼. (미디어 프롬프트 그리드와 다른 물건이다:
+ * 저 쪽은 지시문 한 덩어리, 이 쪽은 프롬프트 세트 전체다.)
+ *
+ * 세부 항목(순서·마커·역할)은 여기서 다루지 않는다 — 편집 버튼이 전용 편집기를 연다.
+ * 목록 조회는 호출부가 미리 해서 넘긴다(이 킷은 store 를 모른다).
+ */
+export function renderPromptSetPicker(opts: {
+  parent: HTMLElement;
+  label: string;
+  sets: Array<{ id: string; name: string }>;
+  activeId: string | undefined;
+  placeholder: string;
+  emptyText: string;
+  onSelect: (id: string) => void;
+  /** 편집 버튼 — 지정된 세트가 있을 때만 그린다. */
+  onEdit?: (id: string) => void;
+}): void {
+  const block = opts.parent.createDiv({ cls: "ggai-media-block" });
+  block.createDiv({ cls: "ggai-media-label", text: opts.label });
+  if (opts.sets.length === 0) {
+    block.createDiv({ cls: "ggai-detail-empty", text: opts.emptyText });
+    return;
+  }
+
+  const row = block.createDiv({ cls: "ggai-prompts-toolbar" });
+  const select = row.createEl("select", { cls: "ggai-prompts-select" });
+  // 미지정 자리 — 고르기 전에는 이 확장이 동작하지 않는다는 뜻이라 항상 남겨 둔다.
+  const none = select.createEl("option", { value: "", text: opts.placeholder });
+  if (!opts.activeId) none.selected = true;
+  for (const set of opts.sets) {
+    const option = select.createEl("option", { value: set.id, text: set.name });
+    if (set.id === opts.activeId) option.selected = true;
+  }
+  select.addEventListener("change", () => opts.onSelect(select.value));
+
+  if (opts.onEdit && opts.activeId) {
+    const editBtn = row.createEl("button", {
+      cls: "ggai-icon-btn",
+      attr: { type: "button", "aria-label": "이 세트 편집", title: "이 세트 편집" },
+    });
+    setIcon(editBtn, "pencil");
+    editBtn.addEventListener("click", () => opts.onEdit!(opts.activeId!));
+  }
+}
+
+/**
  * 동그란 물음표 도움말 버튼 — 누르면 토스트(Notice)로 설명. 설정 항목 어디든 재사용.
  */
 export function renderHelpButton(parent: HTMLElement, help: string): void {
