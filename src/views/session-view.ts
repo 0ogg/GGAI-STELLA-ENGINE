@@ -5958,10 +5958,13 @@ export class SessionView extends ItemView {
   private renderRewindBars(): void {
     this.clearRewindUI();
     const wrap = this.bodyWrapEl;
-    const body = this.bodyEl;
-    if (!this.session || !wrap || !body) return;
-    // 번역이 원문을 대체해 보이는 상태에서는 띠를 걸 본문이 화면에 없다.
-    if (this.translationViewActive && this.outputMode !== "split-h") return;
+    if (!this.session || !wrap) return;
+    // 번역이 원문을 대체해 보이는 상태면 번역 문단을 기준으로 잡는다(원문은 숨겨져 있다).
+    const onTranslation =
+      this.translationViewActive && this.outputMode !== "split-h";
+    const anchorEl = onTranslation ? this.translationEl : this.bodyEl;
+    if (!anchorEl) return;
+    if (onTranslation && this.translationBlocks.length === 0) return;
 
     const scroller = this.activeScroller() ?? wrap;
     this.rewindScrollBase = scroller === wrap ? 0 : scroller.scrollTop;
@@ -5969,26 +5972,64 @@ export class SessionView extends ItemView {
     this.rewindLayerEl = layer;
 
     const wrapRect = wrap.getBoundingClientRect();
-    const bodyRect = body.getBoundingClientRect();
+    const colRect = anchorEl.getBoundingClientRect();
     // 본문 칼럼 왼쪽 여백 위에 겹쳐 그린다 — 본문을 밀지 않아 읽던 줄이 흔들리지 않는다.
-    const left = Math.max(2, bodyRect.left - wrapRect.left + wrap.scrollLeft - 20);
+    const left = Math.max(2, colRect.left - wrapRect.left + wrap.scrollLeft - 20);
     const activeId = this.session.meta.activeLeafId;
 
+    let last: { bar: HTMLElement; top: number; bottom: number } | null = null;
     for (const range of generatorSpanRanges(this.session)) {
-      const rect = this.rawRangeRect(range.from, range.to);
+      const rect = onTranslation
+        ? this.translationRangeRect(range.from, range.to)
+        : this.rawRangeRect(range.from, range.to);
       if (!rect) continue;
+      // 번역 보기는 문단이 최소 단위 — 한 문단에 여러 턴이 걸치면 띠가 겹친다.
+      // 같은 자리면 새로 만들지 않고 **뒤쪽 턴**으로 갱신한다(그 문단까지는 남는 쪽).
+      if (
+        last &&
+        Math.abs(rect.top - last.top) < 1 &&
+        Math.abs(rect.bottom - last.bottom) < 1
+      ) {
+        this.markRewindBar(last.bar, range.nodeId, activeId);
+        continue;
+      }
       const bar = layer.createEl("div", { cls: "ggai-rewind-bar" });
-      bar.dataset.rewindNode = range.nodeId;
       bar.style.left = `${left}px`;
       bar.style.top = `${rect.top - wrapRect.top + wrap.scrollTop}px`;
       bar.style.height = `${Math.max(14, rect.height)}px`;
-      // 현재 지점 = 돌아갈 곳이 없다. 보이되 눌리지 않는다.
-      if (range.nodeId === activeId) bar.addClass("is-current");
-      bar.setAttr(
-        "aria-label",
-        range.nodeId === activeId ? "지금 지점" : "이 지점으로 돌아가기"
-      );
+      this.markRewindBar(bar, range.nodeId, activeId);
+      last = { bar, top: rect.top, bottom: rect.bottom };
     }
+  }
+
+  /** 띠에 착지 노드를 물리고 현재 지점이면 비활성 표시. */
+  private markRewindBar(
+    bar: HTMLElement,
+    nodeId: string,
+    activeId: string
+  ): void {
+    bar.dataset.rewindNode = nodeId;
+    const current = nodeId === activeId;
+    // 현재 지점 = 돌아갈 곳이 없다. 보이되 눌리지 않는다.
+    bar.toggleClass("is-current", current);
+    bar.setAttr("aria-label", current ? "지금 지점" : "이 지점으로 돌아가기");
+  }
+
+  /** 번역 보기 기준 구간 사각형 — 겹치는 번역 문단 블록들의 세로 범위. */
+  private translationRangeRect(fromRaw: number, toRaw: number): DOMRect | null {
+    let top = Infinity;
+    let bottom = -Infinity;
+    for (const block of this.translationBlocks) {
+      const start = block.offset;
+      const end = block.offset + block.source.length;
+      if (start > toRaw || end < fromRaw) continue;
+      const r = block.el.getBoundingClientRect();
+      if (r.height <= 0) continue;
+      top = Math.min(top, r.top);
+      bottom = Math.max(bottom, r.bottom);
+    }
+    if (!Number.isFinite(top) || bottom <= top) return null;
+    return new DOMRect(0, top, 0, bottom - top);
   }
 
   /** raw(본문) 구간이 화면에서 차지하는 사각형 — 띠 위치/높이 계산용. */
@@ -6020,6 +6061,7 @@ export class SessionView extends ItemView {
     this.rewindConfirmEl = null;
     this.rewindTarget = null;
     this.clearBodyHighlight();
+    this.clearTranslationRemovalPreview();
   }
 
   /**
@@ -6048,6 +6090,12 @@ export class SessionView extends ItemView {
     for (const el of Array.from(this.rewindLayerEl?.children ?? [])) {
       const bar = el as HTMLElement;
       bar.toggleClass("is-picked", bar.dataset.rewindNode === nodeId);
+    }
+    // 빠지는 구간 강조 — 번역 보기는 문단 블록 단위(원문이 숨겨져 있어도 보인다).
+    if (this.translationViewActive) {
+      this.highlightTranslationRemoval([
+        { from: cut, to: this.baselineText.length },
+      ]);
     }
     this.applyBodyHighlight([
       { from: this.rawOffsetToDisplayOffset(cut), to: this.displayText.length },
