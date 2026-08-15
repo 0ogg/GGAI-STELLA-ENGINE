@@ -979,6 +979,97 @@
   color: var(--color-accent, var(--interactive-accent));
 }
 
+/* 되돌리기 띠 — 문단 선택 모드에서만 본문 좌측에 나타난다(생성 턴 1개 = 띠 1개).
+   본문 칼럼 왼쪽 여백 위에 겹쳐 그려 본문을 밀지 않는다(읽던 줄 보존). */
+.ggai-session-body-wrap.ggai-para-select-mode {
+  position: relative;
+}
+.ggai-rewind-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 5;
+}
+.ggai-rewind-bar {
+  position: absolute;
+  width: 12px;
+  border-radius: 6px;
+  background: var(--interactive-accent);
+  opacity: 0.35;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: opacity 120ms ease, width 120ms ease;
+}
+/* 손가락용 히트 영역 확장 — 보이는 띠 밖으로 누를 곳만 넓힌다. */
+.ggai-rewind-bar::before {
+  content: "";
+  position: absolute;
+  inset: -4px -8px;
+}
+.ggai-rewind-bar:hover,
+.ggai-rewind-bar.is-picked {
+  opacity: 0.85;
+  width: 16px;
+}
+.ggai-rewind-bar.is-picked {
+  opacity: 1;
+}
+/* 지금 지점 = 돌아갈 곳이 없다. */
+.ggai-rewind-bar.is-current,
+.ggai-rewind-bar.is-current:hover {
+  background: var(--text-faint);
+  opacity: 0.3;
+  width: 12px;
+  cursor: default;
+}
+
+/* 챗 모드 — 띠는 말풍선 왼쪽 안여백(padding-left 12px) 위에 얹는다.
+   레이아웃을 밀지 않으므로 말풍선 줄바꿈·스크롤이 그대로다. */
+.ggai-chat-messages.is-para-select .ggai-chat-bubble {
+  position: relative;
+}
+.ggai-chat-bubble .ggai-rewind-bar {
+  top: 0;
+  bottom: 0;
+  left: 0;
+  height: auto;
+  border-radius: 14px 0 0 14px;
+}
+.ggai-chat-bubble .ggai-rewind-bar:hover,
+.ggai-chat-bubble .ggai-rewind-bar.is-picked {
+  width: 14px;
+}
+.ggai-chat-bubble .ggai-rewind-bar.is-current,
+.ggai-chat-bubble .ggai-rewind-bar.is-current:hover {
+  width: 12px;
+}
+/* 되돌리면 현재 줄기에서 빠지는 메시지 — 미리보기(확정 전) 흐림. */
+.ggai-chat-msg.is-rewind-cut {
+  opacity: 0.35;
+}
+
+/* 되돌리기 확인 바 — 하단 툴바 바로 위. */
+.ggai-rewind-confirm {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  font-size: var(--font-ui-small);
+}
+.ggai-rewind-confirm-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-muted);
+}
+.ggai-rewind-confirm button {
+  flex: 0 0 auto;
+}
+
 /* ─── 파생 창(모달) 공통 뼈대 ───────────────────────────────────────────
    고정 크기(L/M) + 제목(Obsidian 기본 titleEl) + 도구줄(고정, 선택) + 본문(유일한
    스크롤 영역) + 액션줄(고정) 4구역. 창 크기는 내용 길이와 무관하게 항상 같다 —

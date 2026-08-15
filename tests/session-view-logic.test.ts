@@ -55,6 +55,7 @@ import {
   recordSummaryAnchor,
 } from "../src/util/summarize-session";
 import { buildSpans, spansToText } from "../src/util/session-text";
+import { generatorSpanRanges } from "../src/util/node-segments";
 import {
   buildChatLog,
   buildChatMessages,
@@ -2659,6 +2660,52 @@ const asyncTests: Promise<void>[] = [];
   );
   assert.equal(multiRoots.length, 2, "씨드 2개 → 형제 루트 2개");
   assert.equal(spansToText(buildSpans(multi, multi.meta.activeLeafId)), seed);
+}
+
+// 되돌리기 띠 — 나중에 고친 문단도 "원래 만든 생성 턴"에 귀속돼야 한다.
+{
+  const s = makeSession();
+  s.nodes.root.patches = [
+    { op: "append", spans: [{ author: "ai", text: "A" }] },
+  ];
+  s.nodes.leaf = {
+    id: "leaf",
+    parent: "root",
+    kind: "ai-continue",
+    patches: [{ op: "append", spans: [{ author: "ai", text: "B" }] }],
+    createdAt: 2,
+  };
+  s.nodes.n2 = {
+    id: "n2",
+    parent: "leaf",
+    kind: "ai-continue",
+    patches: [{ op: "append", spans: [{ author: "ai", text: "C" }] }],
+    createdAt: 3,
+  };
+  // 뒤늦게 "B"(가운데) 를 고친 국소 수정 — 트리에서는 맨 끝에 달린다.
+  s.nodes.n3 = {
+    id: "n3",
+    parent: "n2",
+    kind: "user-edit",
+    patches: [
+      { op: "replace", from: 1, to: 2, spans: [{ author: "user", text: "b!" }] },
+    ],
+    createdAt: 4,
+  };
+  s.meta.activeLeafId = "n3";
+
+  assert.equal(spansToText(buildSpans(s, "n3")), "Ab!C");
+  // 소유 노드 기준이면 고친 구간의 주인은 맨 끝 n3 다.
+  assert.deepEqual(
+    nodeSpanRanges(s, "n3").map((r) => r.nodeId),
+    ["root", "n3", "n2"]
+  );
+  // 생성 턴 기준이면 그 자리는 원래 만든 leaf(B 를 쓴 턴) 로 돌아간다.
+  assert.deepEqual(generatorSpanRanges(s, "n3"), [
+    { nodeId: "root", from: 0, to: 1 },
+    { nodeId: "leaf", from: 1, to: 3 },
+    { nodeId: "n2", from: 3, to: 4 },
+  ]);
 }
 
 void Promise.all(asyncTests)

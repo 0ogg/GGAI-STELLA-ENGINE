@@ -186,6 +186,14 @@ export class ChatSessionView extends ItemView {
   private rightWingEl: HTMLElement | null = null;
   /** 문단 재생성 선택 모드 — 말풍선(또는 입력창)을 탭해 대상을 고른다. */
   private paraSelectMode = false;
+  /**
+   * 되돌리기 띠 — 선택 모드에서만 말풍선 왼쪽 모서리에 뜬다(메시지 1개 = 생성 턴 1개).
+   * 누르면 그 메시지로 activeLeaf 를 옮긴다(뒤 메시지는 지우지 않고 가지로 남는다).
+   */
+  private rewindTargetId: string | null = null;
+  private rewindConfirmEl: HTMLElement | null = null;
+  /** 입력바 — 되돌리기 확인 바를 그 바로 위에 끼워 넣을 기준. */
+  private inputBarEl: HTMLElement | null = null;
   private viewToggleBtn: HTMLElement | null = null;
   /** undo 로 되돌린 리프 스택 — 새 커밋(전송/편집/생성)이 생기면 비운다. */
   private redoStack: string[] = [];
@@ -839,6 +847,15 @@ export class ChatSessionView extends ItemView {
       (e) => {
         if (!this.paraSelectMode) return;
         const target = e.target as HTMLElement;
+        // 왼쪽 되돌리기 띠 = 문단 재생성이 아니라 그 메시지로 이동.
+        const rewindBar = target.closest?.(".ggai-rewind-bar");
+        if (rewindBar instanceof HTMLElement) {
+          e.preventDefault();
+          e.stopPropagation();
+          const nodeId = rewindBar.dataset.rewindNode;
+          if (nodeId) this.selectRewindTarget(nodeId);
+          return;
+        }
         const bubble = target.closest?.(".ggai-chat-bubble");
         if (!(bubble instanceof HTMLElement)) return;
         e.preventDefault();
@@ -864,6 +881,7 @@ export class ChatSessionView extends ItemView {
     // 좌측 날개(되감기·미디어 2줄) + 가운데(입력+전송) + 우측 날개(세이브·보기·패널).
     // 재생성·형제이동은 마지막 말풍선 아래(renderTailControls)가 담당한다.
     const bar = root.createDiv({ cls: "ggai-chat-inputbar ggai-chat-cockpit" });
+    this.inputBarEl = bar;
     this.leftWingEl = bar.createDiv({
       cls: "ggai-cockpit-wing ggai-cockpit-left",
     });
@@ -1166,6 +1184,9 @@ export class ChatSessionView extends ItemView {
         // 선택 모드에서는 편집 대신 탭 = 재생성 대상 지정.
         if (!this.paraSelectMode) this.makeBubbleEditable(bubble);
       }
+      // 되돌리기 띠는 표시 텍스트를 채운 **뒤에** 얹는다 — setBubbleDisplay 가
+      // 말풍선 안을 다시 그리므로 먼저 붙이면 그때 날아간다.
+      if (this.paraSelectMode) this.renderRewindBar(bubble, msg.nodeId);
 
       // AI 말풍선 밑 삽화 캐러셀 (노드 기준 illustrations.json 그대로).
       if (msg.role === "assistant" && !generatingThis) {
@@ -1201,6 +1222,8 @@ export class ChatSessionView extends ItemView {
 
     // 마지막 메시지 컨트롤 — 스와이프(형제 이동) + 재생성.
     if (!this.generation) this.renderTailControls(host);
+    // 되돌리기 지점을 고른 상태로 재렌더가 돌면(외부 변경 등) 흐림 표시를 다시 입힌다.
+    if (this.rewindTargetId) this.applyRewindDim();
     this.updateToolbar();
     if (savedScrollTop == null) this.scrollToBottom();
     else host.scrollTop = savedScrollTop;
@@ -1677,13 +1700,131 @@ export class ChatSessionView extends ItemView {
     void this.flushPendingEdits().then(() => {
       this.paraSelectMode = true;
       this.renderMessages(); // updateToolbar 가 is-select-on 표시를 겸한다
-      new Notice("재생성할 말풍선(또는 입력창)을 탭하세요.");
+      new Notice(
+        "말풍선을 탭하면 다시 씁니다. 왼쪽 띠를 누르면 그 지점으로 돌아갑니다."
+      );
     });
   }
 
   private exitParaSelectMode(): void {
     if (!this.paraSelectMode) return;
     this.paraSelectMode = false;
+    this.clearRewindSelection();
+    this.renderMessages();
+  }
+
+  // ── 되돌리기 띠 (선택 모드에서만 뜨는 편의 UI) ──────────────────
+
+  /**
+   * 말풍선 왼쪽 모서리에 얹는 띠 — 메시지 1개 = 생성 턴 1개라 그 메시지의 노드가
+   * 곧 착지점이다(`buildChatMessages` 의 nodeId 는 나중에 편집해도 원래 노드를 유지).
+   * 말풍선 안여백 위에 겹쳐 그리므로 줄바꿈·스크롤이 밀리지 않는다.
+   */
+  private renderRewindBar(bubble: HTMLElement, nodeId: string): void {
+    const bar = bubble.createDiv({ cls: "ggai-rewind-bar" });
+    bar.dataset.rewindNode = nodeId;
+    const current = nodeId === this.session?.meta.activeLeafId;
+    if (current) bar.addClass("is-current");
+    if (this.rewindTargetId === nodeId) bar.addClass("is-picked");
+    bar.setAttr("aria-label", current ? "지금 지점" : "이 지점으로 돌아가기");
+  }
+
+  /**
+   * 띠를 누른 순간 — 바로 옮기지 않고 빠질 메시지를 흐리게 + 확인 바를 띄운다.
+   * 다른 띠를 누르면 지점만 바뀐다(모바일 오탭 방지).
+   */
+  private selectRewindTarget(nodeId: string): void {
+    if (!this.session) return;
+    if (nodeId === this.session.meta.activeLeafId) {
+      new Notice("지금 보고 있는 지점입니다.");
+      return;
+    }
+    if (!this.session.nodes[nodeId]) return;
+
+    this.rewindTargetId = nodeId;
+    const host = this.messagesEl;
+    if (host) {
+      for (const el of Array.from(
+        host.querySelectorAll<HTMLElement>(".ggai-rewind-bar")
+      )) {
+        el.toggleClass("is-picked", el.dataset.rewindNode === nodeId);
+      }
+    }
+    this.applyRewindDim();
+
+    // 돌아간 뒤 본문과 지금 본문의 공통 앞부분 뒤 = 현재 줄기에서 빠지는 분량.
+    const nextText = spansToText(buildSpans(this.session, nodeId));
+    const nowText = spansToText(buildSpans(this.session));
+    const max = Math.min(nextText.length, nowText.length);
+    let cut = 0;
+    while (cut < max && nextText[cut] === nowText[cut]) cut++;
+    this.showRewindConfirm(nowText.length - cut);
+  }
+
+  /** 되돌리면 현재 줄기에서 빠질 메시지(고른 지점 뒤)를 흐리게. */
+  private applyRewindDim(): void {
+    const host = this.messagesEl;
+    const targetId = this.rewindTargetId;
+    if (!host || !targetId) return;
+    let past = false;
+    for (const row of Array.from(
+      host.querySelectorAll<HTMLElement>(".ggai-chat-msg")
+    )) {
+      row.toggleClass("is-rewind-cut", past);
+      if (row.dataset.nodeId === targetId) past = true;
+    }
+  }
+
+  private showRewindConfirm(removed: number): void {
+    this.rewindConfirmEl?.remove();
+    const bar = this.contentEl.createDiv({ cls: "ggai-rewind-confirm" });
+    if (this.inputBarEl) this.contentEl.insertBefore(bar, this.inputBarEl);
+    this.rewindConfirmEl = bar;
+
+    bar.createEl("span", {
+      cls: "ggai-rewind-confirm-text",
+      text:
+        removed > 0
+          ? `이 지점으로 돌아갑니다 · 뒤 ${removed.toLocaleString()}자는 가지에 남아요`
+          : "이 지점으로 돌아갑니다",
+    });
+    const cancel = bar.createEl("button", { text: "취소" });
+    cancel.addEventListener("click", () => {
+      this.clearRewindSelection();
+    });
+    const ok = bar.createEl("button", { cls: "mod-cta", text: "돌아가기" });
+    ok.addEventListener("click", () => void this.confirmRewind());
+  }
+
+  private clearRewindSelection(): void {
+    this.rewindTargetId = null;
+    this.rewindConfirmEl?.remove();
+    this.rewindConfirmEl = null;
+    const host = this.messagesEl;
+    if (!host) return;
+    for (const row of Array.from(
+      host.querySelectorAll<HTMLElement>(".ggai-chat-msg.is-rewind-cut")
+    )) {
+      row.removeClass("is-rewind-cut");
+    }
+    for (const el of Array.from(
+      host.querySelectorAll<HTMLElement>(".ggai-rewind-bar.is-picked")
+    )) {
+      el.removeClass("is-picked");
+    }
+  }
+
+  /** 확정 — 메시지를 지우지 않고 activeLeaf 만 그 턴으로 옮긴다(뒤는 가지로 생존). */
+  private async confirmRewind(): Promise<void> {
+    const targetId = this.rewindTargetId;
+    if (!this.session || !this.sessionFile || !targetId) return;
+    if (!this.session.nodes[targetId]) return;
+    this.cancelAutoChain();
+    this.exitParaSelectMode();
+    this.session.meta.activeLeafId = targetId;
+    this.redoStack = [];
+    await this.persistSession("되돌리기 저장 실패");
+    this.followTail = true; // 새 끝(고른 메시지)이 보이게
     this.renderMessages();
   }
 

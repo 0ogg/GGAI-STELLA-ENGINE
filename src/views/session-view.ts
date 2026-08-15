@@ -58,7 +58,7 @@ import { createNoteWidgetEl } from "./note-widget";
 import { createSpeakerLabelEl } from "./speaker-label-widget";
 import type { SessionNodeMetaMap } from "../types/node-meta";
 import { hiddenNodeIds } from "../types/node-meta";
-import { nodeSpanRanges } from "../util/node-segments";
+import { generatorSpanRanges, nodeSpanRanges } from "../util/node-segments";
 import {
   computeSpeakerLabelAnchors,
   type SpeakerLabelAnchor,
@@ -421,6 +421,17 @@ export class SessionView extends ItemView {
   private batchBtnSelectionMode = false;
   /** 문단 선택 모드 (문단 재생성) — 툴바 버튼 토글, 문단 클릭/탭 시 재생성 패널. */
   private paraSelectMode = false;
+  /**
+   * 되돌리기 띠 — 문단 선택 모드에서만 나타나는 본문 좌측 세로 띠(생성 턴 하나 = 띠 하나).
+   * 띠를 누르면 그 턴으로 activeLeaf 를 옮긴다(글은 지우지 않고 가지로 남는다).
+   */
+  private rewindLayerEl: HTMLElement | null = null;
+  /** 띠를 그릴 때의 본문 스크롤 위치 — split-h(본문이 스스로 스크롤)에서 띠를 따라 밀 기준. */
+  private rewindScrollBase = 0;
+  /** 현재 고른 되돌리기 지점 (확인 바가 떠 있는 상태). */
+  private rewindTarget: { nodeId: string; cutFrom: number; removed: number } | null =
+    null;
+  private rewindConfirmEl: HTMLElement | null = null;
 
   /** 발신자 토큰 — 이 뷰의 저장이 쏜 session-changed 를 detail.origin 으로 구분. */
   private readonly storeOrigin = `session-view:${uuidv4()}`;
@@ -1231,6 +1242,9 @@ export class SessionView extends ItemView {
     this.inlineWidgetPool.clear();
     this.inlineNotePool.clear();
     this.paraSelectMode = false;
+    this.rewindLayerEl = null;
+    this.rewindConfirmEl = null;
+    this.rewindTarget = null;
     this.clearTranslationBlocks();
 
     if (!this.sessionFile) {
@@ -2154,6 +2168,7 @@ export class SessionView extends ItemView {
   /** 본문 스크롤 시 — 디바운스로 읽던 노드 앵커를 PluginData 에 영속화 (재실행 복원용). */
   private onBodyScroll(): void {
     if (!this.sessionFile) return;
+    if (this.rewindLayerEl) this.syncRewindLayerScroll();
     if (this.generation) {
       // 생성 중: 위로 올리면 꼬리 따라가기 해제, 바닥으로 돌아오면 재개.
       const scroller = this.activeScroller();
@@ -5893,15 +5908,166 @@ export class SessionView extends ItemView {
     await this.commitPending();
     this.paraSelectMode = true;
     this.bodyWrapEl?.addClass("ggai-para-select-mode");
+    this.renderRewindBars();
     this.updateToolbar();
-    new Notice("재생성할 문단을 클릭/탭하세요.");
+    new Notice("문단을 탭하면 다시 씁니다. 왼쪽 띠를 누르면 그 지점으로 돌아갑니다.");
   }
 
   private exitParaSelectMode(): void {
     if (!this.paraSelectMode) return;
     this.paraSelectMode = false;
     this.bodyWrapEl?.removeClass("ggai-para-select-mode");
+    this.clearRewindUI();
     this.updateToolbar();
+  }
+
+  // --- 되돌리기 띠 (문단 선택 모드에서만 나타나는 편의 UI) ---
+
+  /**
+   * 생성 턴 하나당 본문 좌측에 세로 띠 하나. 띠 길이 = 그 턴이 본문에서 차지하는
+   * 높이라, 한 번에 길게 뽑은 턴은 긴 띠로 잡힌다(누르기 쉬움 = 모바일 대응).
+   * 나중에 고친 문단도 "원래 그 글을 만든 턴"에 귀속된다(generatorSpanRanges).
+   */
+  private renderRewindBars(): void {
+    this.clearRewindUI();
+    const wrap = this.bodyWrapEl;
+    const body = this.bodyEl;
+    if (!this.session || !wrap || !body) return;
+    // 번역이 원문을 대체해 보이는 상태에서는 띠를 걸 본문이 화면에 없다.
+    if (this.translationViewActive && this.outputMode !== "split-h") return;
+
+    const scroller = this.activeScroller() ?? wrap;
+    this.rewindScrollBase = scroller === wrap ? 0 : scroller.scrollTop;
+    const layer = wrap.createEl("div", { cls: "ggai-rewind-layer" });
+    this.rewindLayerEl = layer;
+
+    const wrapRect = wrap.getBoundingClientRect();
+    const bodyRect = body.getBoundingClientRect();
+    // 본문 칼럼 왼쪽 여백 위에 겹쳐 그린다 — 본문을 밀지 않아 읽던 줄이 흔들리지 않는다.
+    const left = Math.max(2, bodyRect.left - wrapRect.left + wrap.scrollLeft - 20);
+    const activeId = this.session.meta.activeLeafId;
+
+    for (const range of generatorSpanRanges(this.session)) {
+      const rect = this.rawRangeRect(range.from, range.to);
+      if (!rect) continue;
+      const bar = layer.createEl("div", { cls: "ggai-rewind-bar" });
+      bar.dataset.rewindNode = range.nodeId;
+      bar.style.left = `${left}px`;
+      bar.style.top = `${rect.top - wrapRect.top + wrap.scrollTop}px`;
+      bar.style.height = `${Math.max(14, rect.height)}px`;
+      // 현재 지점 = 돌아갈 곳이 없다. 보이되 눌리지 않는다.
+      if (range.nodeId === activeId) bar.addClass("is-current");
+      bar.setAttr(
+        "aria-label",
+        range.nodeId === activeId ? "지금 지점" : "이 지점으로 돌아가기"
+      );
+    }
+  }
+
+  /** raw(본문) 구간이 화면에서 차지하는 사각형 — 띠 위치/높이 계산용. */
+  private rawRangeRect(fromRaw: number, toRaw: number): DOMRect | null {
+    const start = this.textNodeAtDisplayOffset(
+      this.rawOffsetToDisplayOffset(fromRaw)
+    );
+    const end = this.textNodeAtDisplayOffset(this.rawOffsetToDisplayOffset(toRaw));
+    if (!start || !end) return null;
+    const r = document.createRange();
+    r.setStart(start.node, Math.min(start.local, start.node.length));
+    r.setEnd(end.node, Math.min(end.local, end.node.length));
+    const rect = r.getBoundingClientRect();
+    return rect.height > 0 ? rect : null;
+  }
+
+  /** split-h(본문이 스스로 스크롤)에서 띠를 본문과 같이 민다. */
+  private syncRewindLayerScroll(): void {
+    const layer = this.rewindLayerEl;
+    const body = this.bodyEl;
+    if (!layer || !body || this.activeScroller() !== body) return;
+    layer.style.transform = `translateY(${this.rewindScrollBase - body.scrollTop}px)`;
+  }
+
+  private clearRewindUI(): void {
+    this.rewindLayerEl?.remove();
+    this.rewindLayerEl = null;
+    this.rewindConfirmEl?.remove();
+    this.rewindConfirmEl = null;
+    this.rewindTarget = null;
+    this.clearBodyHighlight();
+  }
+
+  /**
+   * 띠를 누른 순간 — 바로 옮기지 않고 사라질 구간을 강조 + 확인 바를 띄운다.
+   * 다른 띠를 누르면 지점만 바뀐다(모바일 오탭 방지).
+   */
+  private selectRewindTarget(nodeId: string): void {
+    if (!this.session) return;
+    if (nodeId === this.session.meta.activeLeafId) {
+      new Notice("지금 보고 있는 지점입니다.");
+      return;
+    }
+    if (!this.session.nodes[nodeId]) return;
+
+    // 돌아간 뒤의 본문과 지금 본문의 공통 앞부분 = 그대로 남는 구간.
+    const nextText = spansToText(buildSpans(this.session, nodeId));
+    const max = Math.min(nextText.length, this.baselineText.length);
+    let cut = 0;
+    while (cut < max && nextText[cut] === this.baselineText[cut]) cut++;
+
+    this.rewindTarget = {
+      nodeId,
+      cutFrom: cut,
+      removed: this.baselineText.length - cut,
+    };
+    for (const el of Array.from(this.rewindLayerEl?.children ?? [])) {
+      const bar = el as HTMLElement;
+      bar.toggleClass("is-picked", bar.dataset.rewindNode === nodeId);
+    }
+    this.applyBodyHighlight([
+      { from: this.rawOffsetToDisplayOffset(cut), to: this.displayText.length },
+    ]);
+    this.showRewindConfirm();
+  }
+
+  private showRewindConfirm(): void {
+    const target = this.rewindTarget;
+    if (!target) return;
+    this.rewindConfirmEl?.remove();
+    const bar = this.contentEl.createEl("div", { cls: "ggai-rewind-confirm" });
+    if (this.toolbarEl) this.contentEl.insertBefore(bar, this.toolbarEl);
+    this.rewindConfirmEl = bar;
+
+    bar.createEl("span", {
+      cls: "ggai-rewind-confirm-text",
+      text:
+        target.removed > 0
+          ? `이 지점으로 돌아갑니다 · 뒤 ${target.removed.toLocaleString()}자는 가지에 남아요`
+          : "이 지점으로 돌아갑니다",
+    });
+    const cancel = bar.createEl("button", { text: "취소" });
+    cancel.addEventListener("click", () => this.cancelRewindTarget());
+    const ok = bar.createEl("button", { cls: "mod-cta", text: "돌아가기" });
+    ok.addEventListener("click", () => void this.confirmRewind());
+  }
+
+  private cancelRewindTarget(): void {
+    this.rewindTarget = null;
+    this.rewindConfirmEl?.remove();
+    this.rewindConfirmEl = null;
+    this.clearBodyHighlight();
+    for (const el of Array.from(this.rewindLayerEl?.children ?? [])) {
+      (el as HTMLElement).removeClass("is-picked");
+    }
+  }
+
+  /** 확정 — 글을 지우지 않고 activeLeaf 만 그 턴으로 옮긴다(뒤는 가지로 생존). */
+  private async confirmRewind(): Promise<void> {
+    const target = this.rewindTarget;
+    if (!this.session || !this.sessionFile || !target) return;
+    if (!this.session.nodes[target.nodeId]) return;
+    this.exitParaSelectMode();
+    this.session.meta.activeLeafId = target.nodeId;
+    this.redoStack = [];
+    await this.afterLeafChange();
   }
 
   /** 선택 모드 중 본문/번역 클릭 → 문단 매핑 → 재생성 패널. 문단 밖 클릭은 모드 유지. */
@@ -5909,6 +6075,15 @@ export class SessionView extends ItemView {
     if (!this.paraSelectMode) return;
     e.preventDefault();
     e.stopPropagation();
+    // 좌측 되돌리기 띠 = 문단 재생성이 아니라 그 생성 턴으로 이동.
+    const bar = (e.target as HTMLElement | null)?.closest?.(
+      ".ggai-rewind-bar"
+    ) as HTMLElement | null;
+    if (bar) {
+      const nodeId = bar.dataset.rewindNode;
+      if (nodeId) this.selectRewindTarget(nodeId);
+      return;
+    }
     const idx = this.paragraphIndexAtPoint(e);
     if (idx == null) return;
     // 패널이 닫히면(취소/승인 모두) 선택 모드도 함께 꺼진 상태여야 한다 — 여기서 끈다.

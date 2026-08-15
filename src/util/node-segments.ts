@@ -8,7 +8,7 @@
  * 차지하는 구간을 렌더 시점에 찾는다 (미디어 확장 스펙.md 삽화 절).
  */
 
-import type { Patch, Span, StellaSession } from "../types/session";
+import type { Patch, SessionNode, Span, StellaSession } from "../types/session";
 import { normalize, pathToLeaf } from "./session-text";
 
 export interface NodeSegment {
@@ -20,6 +20,12 @@ export interface NodeSegment {
 /** 소유 노드 + 저자를 함께 들고 있는 미병합 조각 (내부 표현). */
 interface AuthoredSegment extends NodeSegment {
   author: Span["author"];
+  /**
+   * 이 구간을 **처음 만들어낸** 노드 id — 나중의 국소 수정(`user-edit`)은 남의 글을
+   * 덮어쓴 것이므로 덮기 전 주인을 그대로 물려받는다. "이 문단을 만든 생성 턴"을
+   * 물을 때 쓰는 값이라 `nodeId`(마지막으로 쓴 노드)와 다를 수 있다.
+   */
+  genNodeId: string;
 }
 
 export function buildNodeSegments(
@@ -62,24 +68,36 @@ function buildAuthoredSegments(
   let segs: AuthoredSegment[] = [];
   for (const node of path) {
     for (const patch of node.patches) {
-      segs = applySegmentPatch(segs, patch, node.id);
+      segs = applySegmentPatch(segs, patch, node);
     }
   }
   return segs;
 }
 
-/** session-text.ts applyPatch 와 같은 의미론 — 소유 노드 추적만 추가. */
+/** session-text.ts applyPatch 와 같은 의미론 — 소유/생성 노드 추적만 추가. */
 function applySegmentPatch(
   segs: AuthoredSegment[],
   patch: Patch,
-  nodeId: string
+  node: SessionNode
 ): AuthoredSegment[] {
+  const nodeId = node.id;
+  // 국소 수정은 새 글을 "만든" 게 아니라 있던 글을 고친 것 — 생성 노드는 물려받는다.
+  const edit = node.kind === "user-edit";
   switch (patch.op) {
-    case "append":
+    case "append": {
+      const inherited = edit
+        ? segs[segs.length - 1]?.genNodeId ?? nodeId
+        : nodeId;
       return [
         ...segs,
-        ...patch.spans.map((s) => ({ nodeId, author: s.author, text: s.text })),
+        ...patch.spans.map((s) => ({
+          nodeId,
+          genNodeId: inherited,
+          author: s.author,
+          text: s.text,
+        })),
       ];
+    }
     case "delete": {
       const [left, rest] = splitSegments(segs, patch.from);
       const [, right] = splitSegments(rest, patch.to - patch.from);
@@ -87,10 +105,22 @@ function applySegmentPatch(
     }
     case "replace": {
       const [left, rest] = splitSegments(segs, patch.from);
-      const [, right] = splitSegments(rest, patch.to - patch.from);
+      const [mid, right] = splitSegments(rest, patch.to - patch.from);
+      // 덮어쓴 자리의 주인 → 없으면(빈 자리 삽입) 앞뒤 이웃 → 그래도 없으면 자기 자신.
+      const inherited = edit
+        ? mid[0]?.genNodeId ??
+          left[left.length - 1]?.genNodeId ??
+          right[0]?.genNodeId ??
+          nodeId
+        : nodeId;
       return [
         ...left,
-        ...patch.spans.map((s) => ({ nodeId, author: s.author, text: s.text })),
+        ...patch.spans.map((s) => ({
+          nodeId,
+          genNodeId: inherited,
+          author: s.author,
+          text: s.text,
+        })),
         ...right,
       ];
     }
@@ -133,6 +163,32 @@ export interface NodeSpanRange {
   nodeId: string;
   from: number;
   to: number;
+}
+
+/**
+ * "이 구간을 만든 생성 턴" 기준 구간들 — 되돌리기(과거 노드로 이동)의 착지점 계산용.
+ *
+ * `nodeSpanRanges` 와 달리 나중의 국소 수정(`user-edit`)에 가려지지 않는다. 2화의 한
+ * 문단을 나중에 고쳐도 그 문단은 여전히 "2화를 쓴 노드"의 구간으로 잡힌다.
+ */
+export function generatorSpanRanges(
+  session: StellaSession,
+  leafId: string = session.meta.activeLeafId
+): NodeSpanRange[] {
+  const out: NodeSpanRange[] = [];
+  let offset = 0;
+  for (const seg of buildAuthoredSegments(session, leafId)) {
+    if (!seg.text) continue;
+    const from = offset;
+    offset += seg.text.length;
+    const last = out[out.length - 1];
+    if (last && last.nodeId === seg.genNodeId && last.to === from) {
+      last.to = offset;
+    } else {
+      out.push({ nodeId: seg.genNodeId, from, to: offset });
+    }
+  }
+  return out;
 }
 
 /** 노드가 최종 본문에서 차지하는 구간들 (등장 순서, 인접한 같은 노드는 합침). */
