@@ -3823,6 +3823,34 @@ input.ggai-param-slider[type="range"] {
   stroke-width: 3;
   opacity: 1;
 }
+/* 접힌 일직선 구간 표시 — 이음선 가운데에 얹는 작은 알약. */
+.ggai-bt-map-run {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  padding: 1px 7px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+.ggai-bt-map-run:hover {
+  border-color: var(--interactive-accent);
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+.ggai-bt-map-run.is-active {
+  border-color: var(--interactive-accent);
+  color: var(--text-normal);
+}
+.ggai-bt-map-run.is-open {
+  background: var(--background-primary);
+}
 .ggai-bt-map-node {
   position: absolute;
   display: flex;

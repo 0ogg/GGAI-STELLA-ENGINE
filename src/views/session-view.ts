@@ -1057,12 +1057,15 @@ export class SessionView extends ItemView {
     this.clearIdleTimer();
     const shouldRestoreCaret = this.isBodyActive();
     const caret = shouldRestoreCaret ? this.getCaretOffset() : 0;
+    // 재렌더 전 매핑 기준으로 보던 지점을 잡아 둔다 — 분기 패널에서 노드를 옮겨도
+    // (본문 DOM 이 통째로 새로 그려져 scrollTop 이 0이 되어도) 맨 위로 튀지 않는다.
+    const keepRaw = this.currentViewRawOffset();
     await this.refreshMacroContext();
     this.baselineSpans = buildSpans(this.session);
     this.baselineText = spansToText(this.baselineSpans);
     this.refreshDisplayBaseline();
     this.suppressEvents = true;
-    this.renderBodySpans();
+    this.preserveReadingPosition(() => this.renderBodySpans(), keepRaw);
     if (shouldRestoreCaret) {
       this.setCaretOffset(Math.min(caret, this.displayText.length));
       // renderBodySpans 의 body.empty() 로 contenteditable DOM 포커스가 풀린다 —
@@ -1075,8 +1078,15 @@ export class SessionView extends ItemView {
     this.outputMode = this.session.meta.translation?.output ?? "replace";
     this.applyDisplayMode();
     // 편집 중(caret 복원)이 아니면 보던 노드 위치를 이어준다 — 외부 변경으로
-    // 본문이 재구성돼도 읽던 자리가 유지되게.
-    if (!shouldRestoreCaret && this.lastAnchor) {
+    // 본문이 재구성돼도 읽던 자리가 유지되게. 단 그 노드가 새 활성 경로에서
+    // 사라졌으면(다른 가지로 이동) 손대지 않는다 — restoreToAnchor 는 그 경우
+    // 무조건 맨 끝으로 보내지만, preserveReadingPosition 이 이미 가장 가까운
+    // 지점(대개 분기점)으로 맞춰 뒀다.
+    if (
+      !shouldRestoreCaret &&
+      this.lastAnchor &&
+      nodeAnchorToOffset(this.session, this.lastAnchor) != null
+    ) {
       this.restoreToAnchor(this.lastAnchor);
     }
   }
@@ -2019,10 +2029,15 @@ export class SessionView extends ItemView {
     fn();
     if (raw == null || !scroller) return;
     let expectedTop = -1;
+    let firstTry = true;
     const recenter = () => {
       if (scroller.clientHeight === 0) return;
       if (expectedTop >= 0 && Math.abs(scroller.scrollTop - expectedTop) > 4) return;
-      this.scrollRawOffsetToCenter(scroller, raw, false);
+      // 첫 시도에서 위치를 못 찾으면(분기 이동으로 보던 대목이 이 가지에 없는 경우)
+      // 재렌더 직후의 scrollTop=0 에 그대로 머물러 맨 위로 튄다 — 끝(지금 지점)으로
+      // 폴백한다. 이후 삽화 로드 재중앙은 폴백 없이(위치가 이미 잡혀 있다).
+      this.scrollRawOffsetToCenter(scroller, raw, firstTry);
+      firstTry = false;
       expectedTop = scroller.scrollTop;
     };
     recenter();
@@ -2104,20 +2119,32 @@ export class SessionView extends ItemView {
   private charRectAtDisplayOffset(display: number): DOMRect | null {
     const body = this.bodyEl;
     if (!body) return null;
-    // 줄바꿈/빈 글자에 걸리면 rect 가 비므로 몇 글자 앞으로 스캔.
-    for (let d = display; d <= display + 6; d++) {
-      const found = this.textNodeAtDisplayOffset(d);
-      if (!found) break;
-      const { node, local } = found;
-      if (local >= node.length) continue;
-      const r = document.createRange();
-      r.setStart(node, local);
-      r.setEnd(node, local + 1);
-      const rects = r.getClientRects();
-      if (rects.length > 0 && rects[0].height > 0) return rects[0] as DOMRect;
+    // 분기 이동으로 본문이 짧아지면 보던 지점이 새 본문 끝을 넘어선다 — 끝으로 당긴다.
+    const start = Math.max(0, Math.min(display, this.displayText.length));
+    // 줄바꿈/빈 글자에 걸리면 rect 가 비므로 뒤로 몇 글자 스캔, 그래도 없으면 앞으로.
+    for (let d = start; d <= start + 6; d++) {
+      const rect = this.charRectAt(d);
+      if (rect) return rect;
+    }
+    for (let d = start - 1; d >= Math.max(0, start - 6); d--) {
+      const rect = this.charRectAt(d);
+      if (rect) return rect;
     }
     // 못 찾음 — 본문 전체 rect 를 돌려주면 맨 위로 오판하므로 null (호출부가 끝으로 폴백).
     return null;
+  }
+
+  /** display offset 한 글자의 rect (글자가 없거나 rect 가 비면 null). */
+  private charRectAt(display: number): DOMRect | null {
+    const found = this.textNodeAtDisplayOffset(display);
+    if (!found) return null;
+    const { node, local } = found;
+    if (local >= node.length) return null;
+    const r = document.createRange();
+    r.setStart(node, local);
+    r.setEnd(node, local + 1);
+    const rects = r.getClientRects();
+    return rects.length > 0 && rects[0].height > 0 ? (rects[0] as DOMRect) : null;
   }
 
   private textNodeAtDisplayOffset(

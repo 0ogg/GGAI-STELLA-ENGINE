@@ -19,6 +19,7 @@ import {
   tokenizeParagraphs,
 } from "../../util/translate-paragraphs";
 import type { SessionTranslations } from "../../types/media";
+import { buildMapGraph, type MapEdge } from "../../util/branch-map";
 
 type BranchMode = "active" | "map" | "favorites";
 type MapSortMode = "active" | "created";
@@ -47,6 +48,8 @@ export class BranchSection {
   private searchQuery = "";
   private mapZoom = 0.72;
   private mapSortMode: MapSortMode = "active";
+  /** 지도에서 펼쳐 둔 일직선 구간 (키 = 구간이 끝나는 노드 id). */
+  private expandedRuns = new Set<string>();
   private showTranslation = false;
   private translations: SessionTranslations | null = null;
   /** 노드별 "앞 문단" 캐시 — 세션을 다시 읽을 때만 비운다. */
@@ -54,6 +57,11 @@ export class BranchSection {
   /** 맵 모드 최초 렌더에서 현재(마지막 플레이) 노드를 화면 중앙으로 스크롤. */
   private autoCenterCurrent = false;
   private pendingAutoCenter = false;
+  // 재렌더(노드 이동/카드 펼치기/외부 갱신) 전 보던 자리 — 목록 세로 스크롤과
+  // 지도 뷰포트(가로·세로). 재렌더는 DOM 을 통째로 새로 만들어 스크롤이 0으로
+  // 떨어지므로 여기 담아 두었다가 되돌린다.
+  private bodyScrollTop = 0;
+  private mapScroll: { left: number; top: number } | null = null;
 
   private toolbarEl: HTMLElement | null = null;
   private bodyEl: HTMLElement | null = null;
@@ -76,15 +84,16 @@ export class BranchSection {
 
   async load(): Promise<void> {
     await this.loadSession();
-    this.render();
+    this.render(false);
   }
 
   setActiveSessionFile(file: string | null): void {
     this.activeSessionFile = file;
     this.expandedNodeId = null;
+    this.expandedRuns.clear();
     void (async () => {
       await this.loadSession();
-      this.render();
+      this.render(false);
     })();
   }
 
@@ -119,7 +128,33 @@ export class BranchSection {
 
   // ── render ──
 
-  private render(): void {
+  // ── 스크롤 보존 ──
+
+  /** 세션/모드가 바뀌어 내용 자체가 달라질 때 — 보던 자리 기억을 버린다. */
+  private resetScrollMemory(): void {
+    this.bodyScrollTop = 0;
+    this.mapScroll = null;
+  }
+
+  /** 재렌더로 DOM 을 지우기 직전에 스크롤 위치를 담아 둔다. */
+  private captureScroll(): void {
+    if (this.bodyEl) this.bodyScrollTop = this.bodyEl.scrollTop;
+    const vp = this.root.querySelector(".ggai-bt-map-viewport");
+    if (vp instanceof HTMLElement) {
+      this.mapScroll = { left: vp.scrollLeft, top: vp.scrollTop };
+    }
+  }
+
+  /** 새로 그린 스크롤러에 담아 둔 위치를 되돌린다(레이아웃 확정 후 한 번 더). */
+  private restoreScroll(el: HTMLElement, apply: (el: HTMLElement) => void): void {
+    apply(el);
+    window.requestAnimationFrame(() => apply(el));
+  }
+
+  /** preserve=false: 다른 세션/다른 화면 — 보던 자리 기억을 버리고 처음부터 그린다. */
+  private render(preserve = true): void {
+    if (preserve) this.captureScroll();
+    else this.resetScrollMemory();
     this.root.empty();
     this.toolbarEl = null;
     this.bodyEl = null;
@@ -142,7 +177,7 @@ export class BranchSection {
 
     this.renderToolbar();
     this.bodyEl = this.root.createDiv({ cls: "ggai-branch-body" });
-    this.renderBody();
+    this.renderBody(false); // 위에서 이미 담았다 (새 bodyEl 은 scrollTop 0).
   }
 
   private renderToolbar(): void {
@@ -220,7 +255,8 @@ export class BranchSection {
     this.mode = next;
     this.expandedNodeId = null;
     this.searchQuery = "";
-    this.render();
+    // 다른 화면이므로 보던 자리 기억은 버린다(옛 위치로 엉뚱하게 내려가지 않게).
+    this.render(false);
   }
 
   private setMapSort(next: MapSortMode): void {
@@ -254,10 +290,12 @@ export class BranchSection {
     return tail;
   }
 
-  private renderBody(): void {
+  /** capture=false: 호출자(render)가 이미 스크롤 위치를 담아 둔 경우. */
+  private renderBody(capture = true): void {
     const body = this.bodyEl;
     const session = this.session;
     if (!body || !session) return;
+    if (capture) this.captureScroll();
     body.empty();
 
     const total = Object.keys(session.nodes).length;
@@ -284,6 +322,12 @@ export class BranchSection {
     if (this.pendingAutoCenter && this.mode !== "map") {
       this.pendingAutoCenter = false;
       window.requestAnimationFrame(() => this.focusCurrentNode(false));
+    } else if (this.bodyScrollTop > 0) {
+      // 첫 진입(현재 노드 자동 중앙)이 아니면 보던 자리 그대로.
+      const top = this.bodyScrollTop;
+      this.restoreScroll(body, (el) => {
+        el.scrollTop = top;
+      });
     }
   }
 
@@ -403,6 +447,48 @@ export class BranchSection {
 
   // ── 모드 2: 전체 트리 (들여쓰기 깊이) ──
 
+  /**
+   * 지도에 카드로 남길 노드 — 루트 / 갈라지는 자리(자식 2개 이상) / 갈래 끝(자식 없음)
+   * / 현재 노드 / 즐겨찾기 / 상세카드를 펼쳐 둔 노드. 그 사이의 일직선 구간은 접는다.
+   */
+  private keepOnMap(session: StellaSession, node: SessionNode): boolean {
+    if (node.parent == null) return true;
+    if (getChildren(session, node.id).length !== 1) return true;
+    if (node.id === session.meta.activeLeafId) return true;
+    if (node.favorite) return true;
+    return node.id === this.expandedNodeId;
+  }
+
+  /** 접힌/펼친 구간 표시 — 누르면 그 구간만 펼치고 접는다. */
+  private renderRunChip(
+    inner: HTMLElement,
+    edge: MapEdge,
+    x: number,
+    y: number,
+    onActive: boolean
+  ): void {
+    const runKey = edge.runKey;
+    if (!runKey) return;
+    const chip = inner.createDiv({ cls: "ggai-bt-map-run" });
+    chip.style.left = `${x}px`;
+    chip.style.top = `${y}px`;
+    chip.toggleClass("is-active", onActive);
+    chip.toggleClass("is-open", edge.expanded === true);
+    chip.setText(edge.expanded ? `접기 ${edge.count}` : `⋯ ${edge.count}`);
+    chip.setAttr(
+      "aria-label",
+      edge.expanded
+        ? `일직선 ${edge.count}개 접기`
+        : `사이에 숨은 ${edge.count}개 펼치기`
+    );
+    chip.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (this.expandedRuns.has(runKey)) this.expandedRuns.delete(runKey);
+      else this.expandedRuns.add(runKey);
+      this.renderBody();
+    });
+  }
+
   private renderTreeMap(parent: HTMLElement, session: StellaSession): void {
     // \uB300\uCCB4 \uCCAB \uBA54\uC2DC\uC9C0(alternate greetings)\uB294 \uD615\uC81C \uB8E8\uD2B8(parent==null)\uB85C \uC313\uC778\uB2E4.
     // \uB9F5\uC740 meta.rootId \uD558\uB098\uAC00 \uC544\uB2C8\uB77C \uBAA8\uB4E0 \uB8E8\uD2B8\uC5D0\uC11C \uADF8\uB824\uC57C, \uB2E4\uB978 \uCCAB \uBA54\uC2DC\uC9C0\uB85C
@@ -415,20 +501,24 @@ export class BranchSection {
 
     const activePath = pathToLeaf(session, session.meta.activeLeafId);
     const activeIds = new Set(activePath.map((n) => n.id));
-    // 현재 노드 라인을 맵 맨 앞(왼쪽) 열로 고정: 부모 → 활성 경로 자식 매핑.
-    const activeChildOf = new Map<string, string>();
-    for (let i = 0; i < activePath.length - 1; i++) {
-      activeChildOf.set(activePath[i].id, activePath[i + 1].id);
-    }
     // 활성 경로가 속한 루트를 맨 앞으로 (현재 라인이 왼쪽 열에 고정되도록).
     const orderedRootIds =
       this.mapSortMode === "active" && activePath.length > 0
         ? orderActiveRootFirst(rootIds, activePath[0].id)
         : rootIds;
+    // 지도는 "갈라진 자리"만 보여준다 — 일직선으로 이어지는 구간은 한 개의 접힘
+    // 표시(⋯N)로 줄이고, 눌러야 펼친다. 전체 수정 내역은 [활성 경로] 모드 몫.
+    const graph = buildMapGraph(
+      session,
+      orderedRootIds,
+      (node) => this.keepOnMap(session, node),
+      this.expandedRuns
+    );
     const layout = buildTreeMapLayout(
       session,
       orderedRootIds,
-      this.mapSortMode === "active" ? activeChildOf : undefined
+      graph.edgesOf,
+      this.mapSortMode === "active" ? activeIds : undefined
     );
     if (layout.items.length === 0) {
       parent.createDiv({ cls: "ggai-detail-empty", text: "\uD45C\uC2DC\uD560 \uB178\uB4DC\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4." });
@@ -452,7 +542,10 @@ export class BranchSection {
     createdSortBtn.addEventListener("click", () => this.setMapSort("created"));
     sortRow.createSpan({
       cls: "ggai-bt-map-count",
-      text: Object.keys(session.nodes).length + "\uAC1C",
+      text:
+        graph.hiddenTotal > 0
+          ? `\uAC08\uB798 ${layout.items.length} / \uC804\uCCB4 ${Object.keys(session.nodes).length}\uAC1C`
+          : Object.keys(session.nodes).length + "\uAC1C",
     });
 
     const controls = parent.createDiv({ cls: "ggai-bt-map-controls" });
@@ -487,6 +580,12 @@ export class BranchSection {
     legend.createSpan({ cls: "ggai-bt-map-legend-item ggai-bt-map-legend-user", text: "\uC218\uC815" });
     legend.createSpan({ cls: "ggai-bt-map-legend-item ggai-bt-map-legend-regen", text: "\uC7AC\uC0DD\uC131" });
     legend.createSpan({ cls: "ggai-bt-map-legend-item ggai-bt-map-legend-active", text: "\uD604\uC7AC \uACBD\uB85C" });
+    if (graph.hiddenTotal > 0) {
+      legend.createSpan({
+        cls: "ggai-bt-map-legend-item",
+        text: "\u22EFN = \uC811\uD78C \uAD6C\uAC04(\uB20C\uB7EC \uD3BC\uCE58\uAE30)",
+      });
+    }
 
     const viewport = parent.createDiv({ cls: "ggai-bt-map-viewport" });
     const inner = viewport.createDiv({ cls: "ggai-bt-map-inner" });
@@ -508,8 +607,8 @@ export class BranchSection {
 
     const byId = new Map(layout.items.map((item) => [item.node.id, item]));
     for (const item of layout.items) {
-      for (const childId of item.childIds) {
-        const child = byId.get(childId);
+      for (const edge of item.edges) {
+        const child = byId.get(edge.toId);
         if (!child) continue;
         const line = document.createElementNS("http://www.w3.org/2000/svg", "path");
         const x1 = item.x + MAP_NODE_W / 2;
@@ -519,10 +618,13 @@ export class BranchSection {
         const mid = y1 + Math.max(28, (y2 - y1) / 2);
         line.setAttribute("d", `M ${x1} ${y1} C ${x1} ${mid}, ${x2} ${mid}, ${x2} ${y2}`);
         line.classList.add("ggai-bt-map-line");
-        if (activeIds.has(item.node.id) && activeIds.has(childId)) {
-          line.classList.add("is-active");
-        }
+        const onActive = activeIds.has(item.node.id) && activeIds.has(edge.toId);
+        if (onActive) line.classList.add("is-active");
         svg.appendChild(line);
+        // 접힌 구간(⋯N) / 펼친 구간(접기) 표시를 이음선 가운데에 얹는다.
+        if (edge.runKey) {
+          this.renderRunChip(inner, edge, (x1 + x2) / 2, (y1 + y2) / 2, onActive);
+        }
       }
     }
 
@@ -586,6 +688,14 @@ export class BranchSection {
         if (cur instanceof HTMLElement) {
           cur.scrollIntoView({ block: "center", inline: "center" });
         }
+      });
+    } else if (this.mapScroll) {
+      // 첫 진입이 아니면 보던 지도 위치 그대로 — 노드를 옮기거나 카드를 펼쳤다고
+      // 지도가 맨 위(좌상단)로 돌아가지 않는다.
+      const keep = this.mapScroll;
+      this.restoreScroll(viewport, (el) => {
+        el.scrollLeft = keep.left;
+        el.scrollTop = keep.top;
       });
     }
 
@@ -977,13 +1087,14 @@ interface TreeMapItem {
   node: SessionNode;
   x: number;
   y: number;
-  childIds: string[];
+  edges: MapEdge[];
 }
 
 function buildTreeMapLayout(
   session: StellaSession,
   rootIds: string[],
-  activeChildOf?: Map<string, string>
+  edgesOf: Map<string, MapEdge[]>,
+  activeIds?: Set<string>
 ): { items: TreeMapItem[]; width: number; height: number } {
   const items: TreeMapItem[] = [];
   const rows: string[][] = [];
@@ -1002,9 +1113,8 @@ function buildTreeMapLayout(
     if (!rows[depth]) rows[depth] = [];
     rows[depth].push(id);
 
-    const children = orderActiveFirst(getChildren(session, id), activeChildOf?.get(id));
-    for (const child of children) {
-      queue.push({ id: child.id, depth: depth + 1 });
+    for (const edge of orderActiveEdgesFirst(edgesOf.get(id) ?? [], activeIds)) {
+      queue.push({ id: edge.toId, depth: depth + 1 });
     }
   }
 
@@ -1017,12 +1127,11 @@ function buildTreeMapLayout(
       const nodeId = row[column];
       const node = session.nodes[nodeId];
       if (!node) continue;
-      const children = getChildren(session, nodeId);
       items.push({
         node,
         x: column * MAP_COLUMN_W + MAP_PAD,
         y: depth * MAP_Y_GAP + MAP_PAD,
-        childIds: children.map((child) => child.id),
+        edges: edgesOf.get(nodeId) ?? [],
       });
     }
   }
@@ -1055,15 +1164,15 @@ function orderActiveRootFirst(rootIds: string[], activeRootId: string): string[]
   return copy;
 }
 
-/** 활성 경로 자식을 맨 앞으로 — BFS 열 배치에서 현재 라인이 왼쪽 열에 고정된다. */
-function orderActiveFirst(
-  children: SessionNode[],
-  activeChildId: string | undefined
-): SessionNode[] {
-  if (!activeChildId) return children;
-  const idx = children.findIndex((c) => c.id === activeChildId);
-  if (idx <= 0) return children;
-  const copy = children.slice();
+/** 활성 경로로 이어지는 이음선을 맨 앞으로 — 현재 라인이 왼쪽 열에 고정된다. */
+function orderActiveEdgesFirst(
+  edges: MapEdge[],
+  activeIds: Set<string> | undefined
+): MapEdge[] {
+  if (!activeIds) return edges;
+  const idx = edges.findIndex((e) => activeIds.has(e.toId));
+  if (idx <= 0) return edges;
+  const copy = edges.slice();
   const [active] = copy.splice(idx, 1);
   copy.unshift(active);
   return copy;

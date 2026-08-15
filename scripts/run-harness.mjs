@@ -14,6 +14,7 @@ const testNames = [
   "lorebook-template",
   "safe-html",
   "repetition",
+  "branch-map",
 ];
 const testEntries = testNames.map((n) => path.join(root, "tests", `${n}.test.ts`));
 
