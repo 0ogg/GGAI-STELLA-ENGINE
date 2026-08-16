@@ -60,6 +60,16 @@ import type { SessionNodeMetaMap } from "../types/node-meta";
 import { hiddenNodeIds } from "../types/node-meta";
 import { generatorSpanRanges, nodeSpanRanges } from "../util/node-segments";
 import {
+  buildBodyRuns,
+  commonRunPrefix,
+  commonRunSuffix,
+  runStartOffsets,
+  runsTailTextLength,
+  runsTextLength,
+  sameRun,
+  type BodyRun,
+} from "../util/body-runs";
+import {
   computeSpeakerLabelAnchors,
   type SpeakerLabelAnchor,
 } from "../util/speaker-anchors";
@@ -463,6 +473,12 @@ export class SessionView extends ItemView {
   private streamTailEl: HTMLElement | null = null;
   /** 스트리밍 tail 첫 렌더 시 고정 앞부분이 문단을 끝냈는지(=첫 줄 들여쓰기 여부). */
   private streamTailIndentNext = true;
+  /**
+   * 지금 본문 DOM 에 실제로 그려져 있는 렌더 계획. 다음 렌더 때 새 계획과 앞에서부터
+   * 비교해 **바뀐 지점부터 끝까지만** 다시 만든다(전체 재렌더 금지 — renderBodySpans).
+   * 본문 DOM 을 새로 만들거나 세션을 갈아탈 때는 반드시 비운다.
+   */
+  private renderedRuns: BodyRun[] = [];
   private readonly selectionChangeHandler = () => this.onSelectionChange();
   private readonly visibilityHandler = () => {
     if (document.visibilityState === "visible") void this.handleExternalChange();
@@ -863,6 +879,7 @@ export class SessionView extends ItemView {
   private async loadSession(): Promise<void> {
     this.pendingDiff = null;
     this.redoStack = [];
+    this.renderedRuns = [];
     this.clearIdleTimer();
     this.pendingAnchorRestore = null;
     this.restoreTarget = null;
@@ -1052,11 +1069,14 @@ export class SessionView extends ItemView {
 
     if (this.pendingDiff) {
       new Notice("새로 저장된 내용을 반영하며 진행 중이던 편집은 취소되었습니다.");
+      // 버려지는 편집이 DOM 에 남아 있다 = 화면이 렌더 계획과 다르다. 증분 렌더가
+      // 그 편집을 살려 두지 않도록 이번만 전체 렌더로 되돌린다.
+      this.renderedRuns = [];
     }
     this.pendingDiff = null;
     this.clearIdleTimer();
     const shouldRestoreCaret = this.isBodyActive();
-    const caret = shouldRestoreCaret ? this.getCaretOffset() : 0;
+    const caret = shouldRestoreCaret ? (this.getCaretOffset() ?? 0) : 0;
     // 재렌더 전 매핑 기준으로 보던 지점을 잡아 둔다 — 분기 패널에서 노드를 옮겨도
     // (본문 DOM 이 통째로 새로 그려져 scrollTop 이 0이 되어도) 맨 위로 튀지 않는다.
     const keepRaw = this.currentViewRawOffset();
@@ -1301,6 +1321,9 @@ export class SessionView extends ItemView {
     body.setAttr("contenteditable", "plaintext-only");
     body.setAttr("spellcheck", "false");
     this.bodyEl = body;
+    // 새 본문 DOM = 그려진 계획 없음(증분 렌더가 옛 계획을 믿지 않게 비운다).
+    this.renderedRuns = [];
+    // scroll-owner: render() 끝의 restoreTarget/attemptRestore (최초 그리기)
     this.renderBodySpans();
     body.addEventListener("input", () => this.onBodyInput());
     body.addEventListener("blur", () => void this.commitPending());
@@ -1591,64 +1614,140 @@ export class SessionView extends ItemView {
     });
   }
 
+  /**
+   * 본문 렌더 — **바뀐 지점부터 끝까지만** 다시 만든다.
+   *
+   * 렌더 계획(`buildBodyRuns`)을 들고 있다가 새 계획과 앞에서부터 비교해, 같은
+   * 부분의 DOM 은 손도 대지 않는다. 이어쓰기/재생성은 끝만 바뀌므로 화면에 보이는
+   * 앞부분이 그대로 살아 있어 스크롤·선택·이미지 높이가 흔들리지 않는다. 매번
+   * `body.empty()` 로 전부 다시 만들던 방식은 긴 세션에서 (1) 그리는 동안 높이가
+   * 무너져 스크롤이 맨 위로 튀고 (2) 생성이 끝날 때마다 화면이 멎었다.
+   *
+   * 계획 = displaySpans + 숨김 구간의 순수 함수라, 계획이 같으면 DOM 도 같다.
+   * 마크다운 토큰화/들여쓰기 규칙은 `appendMarkdownRun` 이 그대로 담당한다:
+   *  - "\n" 문자는 ggai-para-gap span 으로 감싸 그 줄의 line-height 만 키운다 → 문단 사이 간격.
+   *  - 줄 시작 첫 텍스트 span 에 ggai-para-indent → 첫 줄 들여쓰기.
+   *  - "AI 에게 숨김" 구간은 글자를 두고 클래스만 얹는다.
+   * 어느 것도 textContent 를 바꾸지 않아 offset 매핑은 그대로 유지된다.
+   */
   private renderBodySpans(): void {
     const body = this.bodyEl;
     if (!body) return;
 
-    body.empty();
-    // 전체 재렌더가 스트리밍 tail 컨테이너까지 지웠으니 참조를 놓는다.
+    // 스트리밍 tail 은 계획에 없는 임시 DOM — 계획을 적용하기 전에 걷어낸다.
+    this.streamTailEl?.remove();
     this.streamTailEl = null;
     // 재렌더로 옛 텍스트 노드가 사라졌으니 hover 강조 Range 도 무효 — 정리한다.
     this.clearBodyHighlight();
-    // 보기 스타일(문단 간격/들여쓰기)용 렌더 상태 — 스팬 경계를 넘어 문서 전체에서
-    // 이어진다. 각 줄바꿈("\n")을 문단 경계로 본다:
-    //  - "\n" 문자는 ggai-para-gap span 으로 감싸 그 줄의 line-height 만 키운다 → 문단 사이
-    //    간격. 문단 안 줄바꿈이 없는 산문에서 매 Enter 가 문단 구분이 되도록 매 "\n" 적용.
-    //  - 줄 시작 첫 텍스트 span 에 ggai-para-indent 클래스 → 첫 줄 들여쓰기(빈 span 은
-    //    contenteditable 에서 사라지므로 실제 텍스트 span 에 padding-left 를 준다).
-    // 어느 것도 textContent 를 바꾸지 않아 offset 매핑은 그대로 유지된다.
-    // "AI 에게 숨김" 구간 — 글자는 그대로 두고 클래스만 얹어 흐리게 그린다
-    // (textContent 불변 = 편집 diff/offset 매핑에 영향 없음).
-    const hiddenRanges = this.hiddenDisplayRanges();
-    const isHidden = (at: number) =>
-      hiddenRanges.some((r) => at >= r.from && at < r.to);
 
-    let indentNext = true;
-    let offset = 0;
-    for (const s of this.displaySpans) {
-      if (s.text.length === 0) continue;
-      const base = s.author === "ai" ? "ggai-span-ai" : "ggai-span-user";
-
-      let buf = "";
-      let bufHidden = false;
-      const flush = () => {
-        if (buf.length === 0) return;
-        const cls = bufHidden ? `${base} ggai-span-nosend` : base;
-        this.appendMarkdownRun(body, buf, cls, indentNext);
-        indentNext = false;
-        buf = "";
-      };
-      for (const ch of s.text) {
-        const hidden = hiddenRanges.length > 0 && isHidden(offset);
-        if (ch === "\n") {
-          flush();
-          body.createEl("span", {
-            cls: `ggai-para-gap ${base}${hidden ? " ggai-span-nosend" : ""}`,
-            text: "\n",
-          });
-          indentNext = true;
-        } else {
-          if (buf.length > 0 && hidden !== bufHidden) flush();
-          bufHidden = hidden;
-          buf += ch;
-        }
-        offset += ch.length;
-      }
-      flush();
+    const runs = buildBodyRuns(this.displaySpans, this.hiddenDisplayRanges());
+    // 계획대로 못 고치면(외부 요인으로 DOM 이 계획과 어긋남) 통째로 다시 그린다 —
+    // 화면이 틀리는 것보다 한 번 깜빡이는 편이 낫다.
+    if (!this.patchBodyRuns(this.renderedRuns, runs)) {
+      body.empty();
+      this.appendBodyRuns(body, runs);
     }
-    // 본문을 새로 그렸으니 인라인 위젯(삽화·노트)도 다시 꽂는다.
+    this.renderedRuns = runs;
+    // 본문이 바뀌었으니 인라인 위젯(삽화·노트·이름표)도 다시 배치한다.
     this.renderInlineWidgets();
     this.renderAiStartMarker();
+  }
+
+  private appendBodyRuns(container: HTMLElement, runs: BodyRun[]): void {
+    for (const run of runs) {
+      if (run.kind === "gap") {
+        container.createEl("span", { cls: run.cls, text: run.text });
+      } else {
+        this.appendMarkdownRun(container, run.text, run.cls, run.indent);
+      }
+    }
+  }
+
+  /**
+   * 그려진 계획(prev)을 새 계획(next)으로 고친다 — 실제로 달라진 부분만 손댄다.
+   * 처리했으면 true, 계획과 DOM 이 어긋나 못 고치면 false(호출부가 전체 렌더).
+   *
+   *  - **구조가 같으면**(런 개수 동일: 페르소나 이름 등 매크로 표시값 변경, 숨김
+   *    토글) 달라진 런만 하나씩 갈아 끼운다. `{{user}}` 가 본문 곳곳에 흩어져 있어도
+   *    그 자리들만 바뀌고 나머지 DOM 은 그대로다. **뒤에서 앞으로** 고쳐 앞쪽 offset 이
+   *    밀리지 않게 한다(이름 길이가 달라지면 뒤 offset 이 전부 바뀐다).
+   *  - **구조가 바뀌면**(이어쓰기/재생성/문단 재생성) 앞뒤 공통 부분을 뺀 **가운데
+   *    한 구간만** 교체한다.
+   */
+  private patchBodyRuns(prev: BodyRun[], next: BodyRun[]): boolean {
+    if (prev.length === 0) return false;
+
+    if (prev.length === next.length) {
+      const diffs: number[] = [];
+      for (let i = 0; i < prev.length; i++) {
+        if (!sameRun(prev[i], next[i])) diffs.push(i);
+      }
+      if (diffs.length === 0) return true; // 바뀐 게 없다 — DOM 그대로 둔다.
+      // 흩어진 변경이 너무 많으면 구간 교체가 싸다(자잘한 splice 반복 방지).
+      if (diffs.length <= 64) {
+        const starts = runStartOffsets(prev);
+        for (let k = diffs.length - 1; k >= 0; k--) {
+          const i = diffs[k];
+          const ok = this.spliceBody(
+            starts[i],
+            starts[i] + prev[i].text.length,
+            [next[i]]
+          );
+          if (!ok) return false;
+        }
+        return true;
+      }
+    }
+
+    const head = commonRunPrefix(prev, next);
+    const tail = commonRunSuffix(prev, next, head);
+    if (head === 0 && tail === 0) return false; // 공통 부분 없음 = 전체 렌더와 같다.
+    const from = runsTextLength(next, head);
+    const to =
+      runsTextLength(prev, prev.length) - runsTailTextLength(prev, tail);
+    return this.spliceBody(from, to, next.slice(head, next.length - tail));
+  }
+
+  /**
+   * 표시 offset [from, to) 의 DOM 자식을 새 런들로 갈아 끼운다. 런 경계는 항상 DOM
+   * 자식 경계와 일치해야 하므로, 딱 맞아떨어지지 않으면 false (계획과 DOM 이 어긋난
+   * 상태 = 전체 렌더로 물러설 신호). 글자 0개 위젯이 구간에 걸리면 함께 지워지고
+   * 뒤이은 `renderInlineWidgets` 가 다시 꽂는다.
+   */
+  private spliceBody(from: number, to: number, runs: BodyRun[]): boolean {
+    const body = this.bodyEl;
+    if (!body || from > to) return false;
+    const children = Array.from(body.childNodes);
+    const starts: number[] = [];
+    let acc = 0;
+    for (const child of children) {
+      starts.push(acc);
+      acc += child.textContent?.length ?? 0;
+    }
+    if (to > acc) return false;
+
+    let start = starts.findIndex((s) => s === from);
+    if (start < 0) {
+      if (from !== acc) return false; // 자식 한가운데가 경계 — 어긋났다.
+      start = children.length; // 문서 끝에 붙이기.
+    }
+    let end = start;
+    let covered = 0;
+    while (covered < to - from && end < children.length) {
+      covered += children[end].textContent?.length ?? 0;
+      end++;
+    }
+    if (covered !== to - from) return false;
+
+    const ref = children[end] ?? null;
+    for (let i = end - 1; i >= start; i--) children[i].remove();
+    if (runs.length > 0) {
+      // 가운데 삽입이라 임시 컨테이너에 그린 뒤 통째로 옮긴다.
+      const buf = createDiv();
+      this.appendBodyRuns(buf, runs);
+      while (buf.firstChild) body.insertBefore(buf.firstChild, ref);
+    }
+    return true;
   }
 
   /**
@@ -2020,6 +2119,7 @@ export class SessionView extends ItemView {
     rawOverride?: number | null
   ): void {
     const scroller = this.activeScroller();
+    const beforeTop = scroller?.scrollTop ?? 0;
     const raw =
       rawOverride !== undefined
         ? rawOverride
@@ -2027,11 +2127,23 @@ export class SessionView extends ItemView {
           ? null
           : this.currentViewRawOffset();
     fn();
-    if (raw == null || !scroller) return;
+    if (!scroller) return;
+    // 보던 지점을 못 잡았어도(숨은 패널/매핑 실패/꼬리 따라가기) 재렌더가 떨어뜨린
+    // 스크롤을 그대로 두지 않는다 — 픽셀만이라도 되돌린다. 복원 실패의 폴백은
+    // 언제나 "여기 아니면 맨 끝"이고 맨 위는 금지 (회귀금지: 세션창/스크롤).
+    if (raw == null) {
+      this.rescueDroppedScroll(scroller, beforeTop);
+      return;
+    }
     let expectedTop = -1;
     let firstTry = true;
     const recenter = () => {
-      if (scroller.clientHeight === 0) return;
+      // 레이아웃이 아직 없으면(백그라운드 탭/숨김 패널) 스크롤 대입 자체가 무효라
+      // 맨 위에 방치된다 — 크기가 잡히는 순간 ResizeObserver 가 재시도하게 넘긴다.
+      if (scroller.clientHeight === 0) {
+        if (firstTry && beforeTop > 0) this.restoreTarget = this.lastAnchor ?? "end";
+        return;
+      }
       if (expectedTop >= 0 && Math.abs(scroller.scrollTop - expectedTop) > 4) return;
       // 첫 시도에서 위치를 못 찾으면(분기 이동으로 보던 대목이 이 가지에 없는 경우)
       // 재렌더 직후의 scrollTop=0 에 그대로 머물러 맨 위로 튄다 — 끝(지금 지점)으로
@@ -2048,6 +2160,25 @@ export class SessionView extends ItemView {
         img.addEventListener("error", recenter, { once: true });
       }
     }
+  }
+
+  /**
+   * 재렌더가 스크롤을 맨 위로 떨어뜨렸을 때만 개입해 원래 픽셀로 되돌린다.
+   * 보던 지점(offset) 계산이 실패한 경로의 최후 방어 — 이 경로들의 재렌더는 화면
+   * 위쪽 높이를 바꾸지 않으므로(매크로 표시값/숨김 표시/편집 커밋) 픽셀 유지가 곧
+   * 제자리다. 이미 정상 위치면(스크롤이 안 떨어졌으면) 아무것도 하지 않는다.
+   */
+  private rescueDroppedScroll(scroller: HTMLElement, beforeTop: number): void {
+    if (beforeTop <= 0 || scroller.scrollTop > 0) return;
+    if (scroller.clientHeight === 0) {
+      // 숨김 상태 — 지금 대입해도 무효. 크기가 잡히면 ResizeObserver 가 복원한다.
+      this.restoreTarget = this.lastAnchor ?? "end";
+      return;
+    }
+    scroller.scrollTop = Math.min(
+      beforeTop,
+      Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+    );
   }
 
   private translationRectForRawOffset(raw: number): DOMRect | null {
@@ -2333,7 +2464,8 @@ export class SessionView extends ItemView {
     const fresh = this.pendingDiff;
     if (!fresh) return; // 편집 없음 — 커밋할 게 없다.
 
-    const caret = this.getCaretOffset();
+    // 이 지점은 커서가 본문 안임이 이미 확인된 경로(위 contains 검사).
+    const caret = this.getCaretOffset() ?? 0;
     const end = fresh.from + fresh.inserted.length;
     // 조합 중이거나 편집 없는 순수 커서 이동이면 여기서 끝난다 — 커밋 안 함.
     if (caret < fresh.from || caret > end) {
@@ -3842,6 +3974,9 @@ export class SessionView extends ItemView {
   private renderTranslationBlocks(): void {
     const root = this.translationEl;
     if (!root || !this.session) return;
+    // 문단 구성이 그대로면(자동 번역 완료 등) 패널을 다시 만들지 않고 바뀐 문단의
+    // 글자만 갈아 끼운다 — 아래 전체 재구성은 긴 세션에서 스크롤을 흔든다.
+    if (this.syncTranslationBlocks()) return;
     // 쓰던 자리(커서)를 기억해 두고 다시 그린다 — 백그라운드 저장·자동 번역이 끝나
     // 재렌더가 끼어들면 칸은 그대로인데 커서만 사라져 "치는데 글이 안 써지는" 상태가
     // 됐다(국소 갱신은 포커스를 보존한다 — CLAUDE.md §6).
@@ -3940,6 +4075,67 @@ export class SessionView extends ItemView {
     this.renderAiStartMarkerTranslation();
     scroller.scrollTop = scrollTop;
     this.restoreTranslationCaret(caret);
+  }
+
+  /**
+   * 번역 보기 국소 갱신 — 문단 구성(해시/원문/offset/개수)이 그대로일 때만,
+   * 내용이 실제로 바뀐 문단의 글자만 갈아 끼우고 true 를 돌려준다.
+   *
+   * 자동 번역은 문단이 완료될 때마다 이 경로로 들어온다. 그때마다 패널을 통째로
+   * 다시 만들면(그전 방식) 긴 세션에서 화면이 멎고 스크롤이 튀었다. 구성 자체가
+   * 바뀌었으면(생성/삭제/문단 재생성) false 를 돌려 전체 재구성으로 넘긴다.
+   */
+  private syncTranslationBlocks(): boolean {
+    const editEl = this.translationEditEl;
+    const blocks = this.translationBlocks;
+    if (!editEl || blocks.length === 0) return false;
+    // 양방향 초고 영역의 유무가 바뀌면 구조가 달라진다 — 전체 재구성.
+    if (this.bidirectionalWriting() !== (this.proPendingEl != null)) return false;
+
+    // 문단 구성 비교 — 하나라도 어긋나면 국소 갱신은 안전하지 않다.
+    const paragraphs: { hash: string; source: string; offset: number }[] = [];
+    let docOffset = 0;
+    for (const token of tokenizeParagraphs(this.baselineText)) {
+      if (token.kind === "separator") {
+        docOffset += token.text.length;
+        continue;
+      }
+      paragraphs.push({ hash: token.hash, source: token.source, offset: docOffset });
+      docOffset += token.source.length;
+    }
+    if (paragraphs.length !== blocks.length) return false;
+    for (let i = 0; i < paragraphs.length; i++) {
+      const p = paragraphs[i];
+      const b = blocks[i];
+      if (p.hash !== b.hash || p.offset !== b.offset || p.source !== b.source) {
+        return false;
+      }
+      if (!editEl.contains(b.el)) return false; // DOM 이 계획과 어긋났다.
+    }
+
+    const caret = this.captureTranslationCaret();
+    let changed = false;
+    for (let i = 0; i < blocks.length; i++) {
+      const block = blocks[i];
+      const active = this.translations
+        ? getActiveTranslation(this.translations, block.hash)
+        : null;
+      const translated = !!active && active.text.trim() !== "";
+      const next = applyMacros(
+        translated ? active!.text : block.source,
+        this.displayMacroCtx
+      );
+      const pending =
+        this.bidirectionalWriting() && translated && active!.kind === "user-edit";
+      block.el.toggleClass("ggai-tr-propending-block", pending);
+      if (next === block.baseline) continue;
+      block.el.empty();
+      this.appendMarkdownRun(block.el, next, "", false);
+      block.baseline = next;
+      changed = true;
+    }
+    if (changed) this.restoreTranslationCaret(caret);
+    return true;
   }
 
   /** 재렌더 전 커서 자리 — 초고 안이면 offset, 문단 안이면 문단 키 + offset. */
@@ -4611,6 +4807,7 @@ export class SessionView extends ItemView {
     const scroller = this.activeScroller();
     const keepTop = scroller?.scrollTop ?? 0;
     this.suppressEvents = true;
+    // scroll-owner: 바로 아래 keepTop 픽셀 복원 (재중앙 금지 — 집필 프로 튕김)
     this.renderBodySpans();
     if (scroller) scroller.scrollTop = keepTop;
     this.suppressEvents = false;
@@ -5371,7 +5568,7 @@ export class SessionView extends ItemView {
     if (this.deferWhileComposing("node-meta", () => this.applyNodeMetaToBody())) {
       return;
     }
-    this.preserveReadingPosition(() => this.redrawBodyPreservingCaret());
+    this.redrawBodyPreservingCaret();
   }
 
   /**
@@ -5808,11 +6005,9 @@ export class SessionView extends ItemView {
   private async renderTranslatedSoFar(): Promise<void> {
     if (!this.sessionFile) return;
     this.translations = await this.store.getSessionTranslations(this.sessionFile);
-    if (this.translationViewActive) {
-      const anchor = this.currentAnchor();
-      this.applyDisplayMode();
-      if (anchor) this.restoreToAnchor(anchor);
-    } else if (this.outputMode === "split-h") {
+    // 보기 모드는 그대로다 — 레이아웃을 다시 잡지 않고 블록만 갱신한다(구성이
+    // 같으면 바뀐 문단 글자만 교체되므로 읽던 자리가 아예 움직이지 않는다).
+    if (this.translationViewActive || this.outputMode === "split-h") {
       this.renderTranslationBlocks();
     }
   }
@@ -6371,41 +6566,61 @@ export class SessionView extends ItemView {
    * DOM 재렌더를 건너뛴다(긴 세션에서 무관한 이벤트마다 전체 재렌더하던 비용 제거).
    */
   private redrawBodyIfDisplayChanged(): void {
+    // 보던 지점은 매핑을 갈아치우기 **전에** 잡는다(옛 화면 = 옛 매핑).
+    const keepRaw = this.currentViewRawOffset();
     const before = this.displayText;
     this.refreshDisplayBaseline();
     if (this.displayText === before) return;
-    const hadFocus = document.activeElement === this.bodyEl;
-    const caret = this.getCaretOffset();
-    this.suppressEvents = true;
-    this.renderBodySpans();
-    this.setCaretOffset(caret);
-    if (hadFocus) this.bodyEl?.focus({ preventScroll: true });
-    this.suppressEvents = false;
+    // 표시 텍스트가 실제로 바뀐 경우에만 다시 그린다. 스크롤·커서 보존은 공용
+    // 재렌더 경로가 맡는다 — 여기서 renderBodySpans 를 직접 부르면 그 보존이 빠진다.
+    this.redrawBodyPreservingCaret(keepRaw);
   }
 
-  private redrawBodyPreservingCaret(): void {
-    const hadFocus = document.activeElement === this.bodyEl;
-    const caret = this.getCaretOffset();
-    this.refreshDisplayBaseline();
-    this.suppressEvents = true;
-    this.renderBodySpans();
-    this.setCaretOffset(caret);
-    // body.empty() 로 자식 노드를 전부 갈아치우면 Selection Range 는 새로 잡혀도
-    // contenteditable(plaintext-only) 요소 자체의 DOM 포커스는 브라우저에 따라
-    // 풀릴 수 있다 — 타이핑 중(IDLE_COMMIT_MS 마다) 이 경로를 타면 다음 입력이
-    // 씹히는 "포커스 사라짐" 증상으로 나타난다. 원래 포커스 상태였다면 명시적으로
-    // 되돌려준다.
-    if (hadFocus) this.bodyEl?.focus({ preventScroll: true });
-    this.suppressEvents = false;
+  /**
+   * 본문 전체 재렌더 + 커서/포커스/보던 지점 보존. 세션창의 "다시 그리기"는 전부
+   * 이 경로를 통과해야 한다 — 개별 호출부가 스크롤 복원을 따로 챙기면 새 경로가
+   * 생길 때마다 맨 위로 튀는 회귀가 되살아난다 (회귀금지: 세션창/스크롤).
+   */
+  private redrawBodyPreservingCaret(rawOverride?: number | null): void {
+    const redraw = () => {
+      const hadFocus = document.activeElement === this.bodyEl;
+      // 커서가 본문 밖(툴바 버튼/다른 패널)이면 복원할 커서가 없다 — 0 으로 두면
+      // 긴 세션에서 문서 맨 앞에 커서를 심어 그 뒤 포커스/스크롤이 맨 위로 끌려간다.
+      const caret = this.getCaretOffset();
+      this.refreshDisplayBaseline();
+      this.suppressEvents = true;
+      // scroll-owner: preserveReadingPosition (바로 위 래퍼)
+      this.renderBodySpans();
+      if (caret != null) this.setCaretOffset(caret);
+      // body.empty() 로 자식 노드를 전부 갈아치우면 Selection Range 는 새로 잡혀도
+      // contenteditable(plaintext-only) 요소 자체의 DOM 포커스는 브라우저에 따라
+      // 풀릴 수 있다 — 타이핑 중(IDLE_COMMIT_MS 마다) 이 경로를 타면 다음 입력이
+      // 씹히는 "포커스 사라짐" 증상으로 나타난다. 원래 포커스 상태였다면 명시적으로
+      // 되돌려준다.
+      if (hadFocus) this.bodyEl?.focus({ preventScroll: true });
+      this.suppressEvents = false;
+    };
+    // 편집 중(본문/번역칸 포커스)에는 재중앙하지 않는다 — 브라우저가 커서에 맞춰 둔
+    // 스크롤을 빼앗아 모바일 키보드 위로 튕겨 올린다(회귀금지: 편집 중 개입 금지).
+    // 대신 재렌더가 스크롤을 떨어뜨렸을 때만 원래 픽셀로 되돌린다.
+    if (this.isEditingFocused()) {
+      const scroller = this.activeScroller();
+      const keepTop = scroller?.scrollTop ?? 0;
+      redraw();
+      if (scroller) this.rescueDroppedScroll(scroller, keepTop);
+      return;
+    }
+    this.preserveReadingPosition(redraw, rawOverride);
   }
 
-  private getCaretOffset(): number {
+  /** 본문 안 커서 위치. 커서가 본문 밖이면 null — 0(문서 맨 앞)으로 오해하지 말 것. */
+  private getCaretOffset(): number | null {
     const root = this.bodyEl;
-    if (!root) return 0;
+    if (!root) return null;
     const sel = document.getSelection();
-    if (!sel || sel.rangeCount === 0) return 0;
+    if (!sel || sel.rangeCount === 0) return null;
     const range = sel.getRangeAt(0);
-    if (!root.contains(range.startContainer)) return 0;
+    if (!root.contains(range.startContainer)) return null;
     const pre = range.cloneRange();
     pre.selectNodeContents(root);
     pre.setEnd(range.startContainer, range.startOffset);

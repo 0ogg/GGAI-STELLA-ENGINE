@@ -1226,7 +1226,24 @@ export class ChatSessionView extends ItemView {
     if (this.rewindTargetId) this.applyRewindDim();
     this.updateToolbar();
     if (savedScrollTop == null) this.scrollToBottom();
-    else host.scrollTop = savedScrollTop;
+    else this.restoreScrollTop(host, savedScrollTop);
+  }
+
+  /**
+   * 재렌더 후 스크롤 복원. 화면이 숨어 있거나(백그라운드 탭) 아직 높이가 안 잡힌
+   * 순간에는 대입 자체가 무효라 맨 위에 방치되므로, 값이 실제로 들어갈 때까지
+   * 몇 프레임 재시도한다 (회귀금지: 복원 실패의 폴백은 맨 위 금지).
+   */
+  private restoreScrollTop(host: HTMLElement, top: number): void {
+    if (top <= 0) return;
+    let tries = 0;
+    const apply = () => {
+      host.scrollTop = top;
+      // 값이 들어갔으면 끝. 0 그대로면 아직 높이가 없다는 뜻 — 다음 프레임에 다시.
+      if (host.scrollTop > 0) return;
+      if (++tries < 5) window.requestAnimationFrame(apply);
+    };
+    apply();
   }
 
   /**

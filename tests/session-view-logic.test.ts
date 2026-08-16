@@ -57,6 +57,14 @@ import {
 import { buildSpans, spansToText } from "../src/util/session-text";
 import { generatorSpanRanges } from "../src/util/node-segments";
 import {
+  buildBodyRuns,
+  commonRunPrefix,
+  commonRunSuffix,
+  runStartOffsets,
+  runsTailTextLength,
+  runsTextLength,
+} from "../src/util/body-runs";
+import {
   buildChatLog,
   buildChatMessages,
   CHAT_MESSAGE_SEPARATOR,
@@ -2706,6 +2714,88 @@ const asyncTests: Promise<void>[] = [];
     { nodeId: "leaf", from: 1, to: 3 },
     { nodeId: "n2", from: 3, to: 4 },
   ]);
+}
+
+// 본문 증분 렌더 계획 — 이어쓰기/재생성은 "끝만" 다시 그려야 한다.
+{
+  const spans = [
+    { author: "ai", text: "첫 문단.\n두 번째 문단." },
+    { author: "user", text: "\n내가 쓴 줄." },
+  ];
+  const runs = buildBodyRuns(spans, []);
+  // 계획의 텍스트를 이으면 표시 텍스트와 정확히 같다(offset 매핑 불변식).
+  assert.equal(
+    runs.map((r) => r.text).join(""),
+    spans.map((s) => s.text).join("")
+  );
+  // 줄바꿈은 문단 간격 span 으로 따로 떨어지고, 각 문단 첫 조각만 들여쓰기.
+  assert.deepEqual(
+    runs.map((r) => `${r.kind}:${r.indent ? "i" : "-"}`),
+    ["text:i", "gap:-", "text:i", "gap:-", "text:i"]
+  );
+  assert.ok(runs[0].cls.includes("ggai-span-ai"));
+  assert.ok(runs[4].cls.includes("ggai-span-user"));
+
+  // 이어쓰기 = 끝에 붙기. 앞 런은 하나도 안 바뀌므로 다시 그릴 지점은 맨 끝.
+  const appended = buildBodyRuns(
+    [...spans, { author: "ai", text: "\n이어 쓴 문장." }],
+    []
+  );
+  const keep = commonRunPrefix(runs, appended);
+  assert.equal(keep, runs.length, "이어쓰기는 기존 런을 그대로 유지해야 한다");
+  assert.equal(
+    runsTextLength(appended, keep),
+    spans.map((s) => s.text).join("").length
+  );
+
+  // 재생성 = 마지막 턴만 교체. 그 턴 앞까지는 유지된다.
+  const regen = buildBodyRuns(
+    [spans[0], { author: "user", text: "\n다시 쓴 줄." }],
+    []
+  );
+  const keepRegen = commonRunPrefix(runs, regen);
+  assert.equal(keepRegen, 4, "바뀐 문단 직전까지만 유지");
+  assert.equal(runsTextLength(regen, keepRegen), "첫 문단.\n두 번째 문단.\n".length);
+
+  // 가운데만 바뀌면(문단 재생성) 앞뒤 공통 부분이 모두 살아남는다.
+  const middle = buildBodyRuns(
+    [
+      { author: "ai", text: "첫 문단.\n고쳐 쓴 문단." },
+      { author: "user", text: "\n내가 쓴 줄." },
+    ],
+    []
+  );
+  const mHead = commonRunPrefix(runs, middle);
+  const mTail = commonRunSuffix(runs, middle, mHead);
+  assert.equal(mHead, 2, "앞 문단 + 간격은 그대로");
+  assert.equal(mTail, 2, "뒤 간격 + 마지막 문단도 그대로");
+  assert.equal(runsTailTextLength(runs, mTail), "\n내가 쓴 줄.".length);
+
+  // {{user}} 등 매크로 표시값 변경 = 런 구조는 그대로, 흩어진 몇 개만 다르다.
+  const before = buildBodyRuns(
+    [{ author: "ai", text: "철수야.\n어이 철수.\n딴 얘기." }],
+    []
+  );
+  const after = buildBodyRuns(
+    [{ author: "ai", text: "김철수야.\n어이 김철수.\n딴 얘기." }],
+    []
+  );
+  assert.equal(before.length, after.length, "이름만 바뀌면 런 개수는 같다");
+  const changed = before
+    .map((r, i) => (r.text === after[i].text ? -1 : i))
+    .filter((i) => i >= 0);
+  assert.deepEqual(changed, [0, 2], "이름이 든 문단만 다시 그리면 된다");
+  // 그 자리들의 시작 offset 은 옛 계획 기준으로 잡는다(뒤에서 앞으로 고치는 이유).
+  assert.deepEqual(runStartOffsets(before).slice(0, 3), [0, 4, 5]);
+
+  // 숨김 구간은 글자를 그대로 두고 클래스만 바뀐다 — 텍스트 합은 불변.
+  const hidden = buildBodyRuns(spans, [{ from: 0, to: 4 }]);
+  assert.equal(
+    hidden.map((r) => r.text).join(""),
+    spans.map((s) => s.text).join("")
+  );
+  assert.ok(hidden[0].cls.includes("ggai-span-nosend"));
+  assert.equal(commonRunPrefix(runs, hidden), 0, "숨김이 바뀌면 그 지점부터 다시");
 }
 
 void Promise.all(asyncTests)
