@@ -10,6 +10,7 @@ const architectureEntry = path.join(root, "tests", "architecture-rules.mjs");
 const testNames = [
   "session-view-logic",
   "translate-key-scope",
+  "pending-reflections",
   "variables",
   "lorebook-template",
   "safe-html",

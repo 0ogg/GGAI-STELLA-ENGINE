@@ -121,6 +121,7 @@ import {
   buildAnchorInstruction,
   currentParagraphLength,
   extractAnchorSentence,
+  seamSeparator,
 } from "../src/util/continuation-anchor";
 import {
   buildTranslationRequest,
@@ -2474,13 +2475,32 @@ const asyncTests: Promise<void>[] = [];
 
   // 지시문에는 앵커 문장이 그대로 들어간다.
   assert.ok(buildAnchorInstruction("마지막 문장.").includes("마지막 문장."));
-  // 문단이 이미 길면 "곧 문단을 닫으라"는 지시가 덧붙고, 짧으면 없다.
+  // 문단이 이미 길면 "바로 문단을 나누라"는 지시가 덧붙고, 짧으면 없다.
   assert.ok(
     buildAnchorInstruction("마지막 문장.", 300).includes("already long")
   );
   assert.ok(
     !buildAnchorInstruction("마지막 문장.", 50).includes("already long")
   );
+  // 완결 문장 + 긴 문단 = 즉시 줄바꿈 / 짧은 문단 = 같은 문단 유지.
+  assert.ok(
+    buildAnchorInstruction("마지막 문장.", 300).includes(
+      "break to a new paragraph right away"
+    )
+  );
+  assert.ok(
+    buildAnchorInstruction("마지막 문장.", 50).includes("that same paragraph")
+  );
+  // 문장 중간에서 끊긴 앵커는 "그 문장부터 끝내라 + 줄바꿈 금지"가 명시된다.
+  const midInstr = buildAnchorInstruction("그는 문을 열다 말고", 50);
+  assert.ok(midInstr.includes("cut off in the middle of a sentence"));
+  assert.ok(midInstr.includes("no line break"));
+  // 어느 경우든 "문장만 끝내고 멈추지 말라"가 들어간다.
+  for (const chars of [50, 300]) {
+    for (const s of ["마지막 문장.", "그는 문을 열다 말고"]) {
+      assert.ok(buildAnchorInstruction(s, chars).includes("not the response"));
+    }
+  }
   // 마지막 문단 실질 글자 수 — 마지막 줄바꿈 이후만 센다.
   assert.equal(currentParagraphLength("앞 문단\n가나다 라마"), 5);
   assert.equal(currentParagraphLength("줄바꿈 없는 본문"), 7);
@@ -2534,6 +2554,22 @@ const asyncTests: Promise<void>[] = [];
     halfWidth.slice(anchorSkipFinal(halfWidth, widthAnchor)),
     " 문을 두드렸다."
   );
+  // ── 이음새 공백 — 줄바꿈은 걷어내되 띄어쓰기는 살린다 ──
+  // 본문 꼬리 공백 / 응답 선행 줄바꿈 어느 쪽이든 공백이 있었으면 한 칸 남는다.
+  assert.equal(seamSeparator("그는 천천히", "\n문을 열었다."), " ");
+  assert.equal(seamSeparator("그는 천천히 ", "문을 열었다."), " ");
+  assert.equal(seamSeparator("He walked", "\n\n  into the room"), " ");
+  // 단어 중간에서 끊긴 이음새(양쪽 다 공백 없음)는 그대로 붙인다.
+  assert.equal(seamSeparator("그는 천천", "히 문을 열었다."), "");
+  // 일본어·중국어는 단어 사이 공백이 없으므로 줄바꿈만 걷어낸다.
+  assert.equal(seamSeparator("彼は静かに", "\n扉を開けた。"), "");
+  assert.equal(seamSeparator("他慢慢地", "\n打开了门。"), "");
+  // 앞 글자가 문장부호여도 뒤가 한글/영문이면 띄어쓰기를 남긴다.
+  assert.equal(seamSeparator("그가 말했다,", "\n그리고 웃었다."), " ");
+  // 빈 쪽이 있으면 넣지 않는다.
+  assert.equal(seamSeparator("", "\n문장"), "");
+  assert.equal(seamSeparator("문장 ", ""), "");
+
   // 안전장치 — 실질 내용이 도중에 어긋나면(단어 교체) 잘라내지 않는다(정상 이어쓰기 보존).
   assert.equal(
     anchorSkipFinal("그는 이번엔 뒤를 돌아보았다.", "그는 천천히 문을 열었다."),

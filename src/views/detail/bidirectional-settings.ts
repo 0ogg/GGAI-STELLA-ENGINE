@@ -4,6 +4,10 @@ import { DEFAULT_GLOSSARY_INTERVAL } from "../../services/pro-glossary-service";
 import type { ProActiveSettings } from "../../types/preset";
 import { PRO_STYLE_TAIL_CHARS_DEFAULT } from "../../services/pro-service";
 import { PRO_STYLE_PAIRS_DEFAULT } from "../../util/pro-convert";
+import {
+  discardPendingReflections,
+  summarizePendingReflections,
+} from "../../util/translate-paragraphs";
 import { renderMediaModelPicker, renderMediaPromptPicker } from "./media-prompt-panel";
 import { renderEnableToggle, renderNumberRow } from "./setting-controls";
 
@@ -118,6 +122,8 @@ export function renderBidirectionalConvertSettings(
     },
   });
   if (activeSessionFile) {
+    renderPendingReflectionRow(body, ctx, activeSessionFile);
+
     const scanRow = body.createDiv({ cls: "ggai-media-block" });
     const scanBtn = scanRow.createEl("button", {
       cls: "ggai-preset-btn",
@@ -137,6 +143,72 @@ export function renderBidirectionalConvertSettings(
         });
     });
   }
+}
+
+/**
+ * 반영 대기 현황 + 일괄 취소 — **막혔을 때의 탈출구**.
+ *
+ * 집필 변환이 실패하면 대기함은 재시도를 위해 보존된다(성공해야 비운다). 그래서 그 건이
+ * 끝내 반영될 수 없는 내용이면(잘못 쓴 초고, 원문 쪽에서 이미 다시 쓴 문단) 이어쓰기가
+ * 계속 그 반영부터 시도하다 멈춰 **사용자가 풀 방법이 없었다**. 여기서 대기분을 통째로
+ * 취소하면 원문은 지금 상태 그대로, 내가 쓴 문장도 화면에 그대로 남은 채 잠금만 풀린다.
+ */
+function renderPendingReflectionRow(
+  body: HTMLElement,
+  ctx: SettingsPanelContext,
+  sessionFile: string
+): void {
+  const { plugin } = ctx;
+  const row = body.createDiv({ cls: "ggai-media-block" });
+  const label = row.createDiv({ cls: "ggai-media-label", text: "반영 대기" });
+  const hint = row.createDiv({ cls: "ggai-media-hint", text: "확인 중…" });
+  const btn = row.createEl("button", {
+    cls: "ggai-preset-btn",
+    text: "반영 대기 취소",
+  });
+  btn.disabled = true;
+  // 되돌릴 수 없으므로 두 번 눌러야 실행된다(모달 없이 그 자리에서 확인).
+  let armed = false;
+
+  const disarm = (): void => {
+    armed = false;
+    btn.setText("반영 대기 취소");
+  };
+
+  const refresh = async (): Promise<void> => {
+    const translations = await plugin.store.getSessionTranslations(sessionFile);
+    const { paragraphs, draftChars } = summarizePendingReflections(translations);
+    const empty = paragraphs === 0 && draftChars === 0;
+    hint.setText(
+      empty
+        ? "원문에 반영되지 않고 기다리는 내용이 없습니다."
+        : `수정한 문단 ${paragraphs}개 · 쓰던 초고 ${draftChars}자가 이어쓰기 때 원문에 반영됩니다. ` +
+          "반영이 계속 실패해 이어쓰기가 막히면 취소해서 풀 수 있습니다 " +
+          "(원문은 지금 그대로, 내가 쓴 문장도 번역 화면에 그대로 남습니다)."
+    );
+    btn.disabled = empty;
+    disarm();
+  };
+
+  btn.addEventListener("click", () => {
+    if (!armed) {
+      armed = true;
+      btn.setText("정말 취소할까요? 한 번 더");
+      return;
+    }
+    btn.disabled = true;
+    void (async () => {
+      const translations = await plugin.store.getSessionTranslations(sessionFile);
+      const { paragraphs, draftChars } = discardPendingReflections(translations);
+      await plugin.store.saveSessionTranslations(sessionFile, translations);
+      new Notice(
+        `반영 대기를 취소했습니다 — 문단 ${paragraphs}개 · 초고 ${draftChars}자.`
+      );
+      await refresh();
+    })();
+  });
+
+  void refresh();
 }
 
 async function patchPro(

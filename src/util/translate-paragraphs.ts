@@ -575,6 +575,65 @@ export function clearPendingReflections(
   if (Object.keys(map).length === 0) delete translations.pendingReflections;
 }
 
+/** 반영 대기 현황 — 대기 문단 수 + 대기 초고 글자 수. */
+export interface PendingReflectionSummary {
+  paragraphs: number;
+  draftChars: number;
+}
+
+/**
+ * 지금 "영어판 반영 대기"로 잡히는 문단 키 전부 — 대기함 + 대기함 이전 방식
+ * (active variant 가 `user-edit`)을 한 집합으로. 뷰의 `isProPendingBlock` 과 같은
+ * 판정을 쓰므로, 화면의 대기 표시와 현황/일괄 취소가 항상 같은 대상을 본다.
+ */
+function pendingReflectionHashes(translations: SessionTranslations): Set<string> {
+  const out = new Set<string>();
+  for (const [hash, queued] of Object.entries(translations.pendingReflections ?? {})) {
+    if (queued.ko.trim() !== "") out.add(hash);
+  }
+  for (const [hash, entry] of Object.entries(translations.paragraphs)) {
+    const active = entry.variants[entry.activeVariantId];
+    if (active?.kind === "user-edit" && active.text.trim() !== "") out.add(hash);
+  }
+  return out;
+}
+
+/** 반영 대기 현황 집계 (변경 없음) — 설정 패널 표시용. */
+export function summarizePendingReflections(
+  translations: SessionTranslations
+): PendingReflectionSummary {
+  return {
+    paragraphs: pendingReflectionHashes(translations).size,
+    draftChars: (translations.proDraft ?? "").length,
+  };
+}
+
+/**
+ * 반영 대기를 **전부 취소**한다 — "원문은 지금 이대로 두고, 내가 쓴 문장은 그대로
+ * 읽는다"로 확정하는 것.
+ *
+ * 집필 변환이 실패하면 대기함은 재시도를 위해 보존되는데(성공 시에만 정리), 그 건이
+ * 끝내 반영될 수 없는 상태가 되면(계획이 어긋난 채 굳은 세션, 잘못 쓴 초고, 원문 쪽에서
+ * 이미 다시 쓴 문단) **이어쓰기가 영영 막힌 채 풀 방법이 없었다**. 이 함수가 그 탈출구다 —
+ * AI 를 부르지 않는 순수 변환이라 어떤 실패 상태에서도 성공한다.
+ *
+ * 대기 문단의 수정 variant 는 지우거나 되돌리지 않고 **짝(`authored`)으로 바꾼다**:
+ * 화면에서 내가 쓴 문장이 사라지지 않으면서(저자 원고 유실 금지) 대기 판정에서만 빠진다.
+ */
+export function discardPendingReflections(
+  translations: SessionTranslations
+): PendingReflectionSummary {
+  const summary = summarizePendingReflections(translations);
+  for (const hash of pendingReflectionHashes(translations)) {
+    const entry = findEntry(translations, hash);
+    const active = entry?.variants[entry.activeVariantId];
+    if (active?.kind === "user-edit") active.kind = "authored";
+  }
+  delete translations.pendingReflections;
+  delete translations.proDraft;
+  return summary;
+}
+
 /** active variant 를 지정 variant 로 이동. 대상이 없으면 false. */
 export function setActiveTranslationVariant(
   translations: SessionTranslations,

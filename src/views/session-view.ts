@@ -32,6 +32,7 @@ import {
   anchorEndsParagraph,
   anchorSkipFinal,
   anchorSkipStreaming,
+  seamSeparator,
   trailingWhitespaceRange,
 } from "../util/continuation-anchor";
 import type { PromptPresetParams } from "../types/prompt";
@@ -347,12 +348,20 @@ export class SessionView extends ItemView {
   private translationEditEl: HTMLElement | null = null;
   /** 번역 편집 커밋 디바운스 타이머 (편집 영역 전체 공용). */
   private translationCommitTimer: number | null = null;
+  /** 번역 패널을 다시 만드는 중 — 자기 자신을 재귀 호출하지 않기 위한 표식. */
+  private translationRendering = false;
 
   // ── 집필 프로(PRO) 대기 문단 모델 — proWritingMode() 서브클래스 전용 ──
   /** 번역 뷰 끝의 이어쓰기(초고) 영역 — 아직 영어판에 없는 한국어. */
   private proPendingEl: HTMLElement | null = null;
   /** 이어쓰기 영역 텍스트 (재렌더 생존). */
   private proPendingDraft = "";
+  /**
+   * 대기함(`translations.proDraft`)에 마지막으로 확정된 초고 — 외부에서 대기함이
+   * 바뀌었는지(설정 패널의 '반영 대기 취소') 판별하는 기준선. 뷰가 들고 있는 초고가
+   * 이 값과 같으면 미저장 타이핑이 없다는 뜻이라 외부 값을 그대로 받아들인다.
+   */
+  private proSavedDraft = "";
   /**
    * 지금 화면에 그려져 있는 양방향 상태 — 설정 패널에서 '양방향 번역'을 켜고 끄면
    * kinds=["settings"] 이벤트만 오므로, 이 값과 달라진 순간에 번역 보기를 다시 그려
@@ -923,6 +932,7 @@ export class SessionView extends ItemView {
     this.proPendingDraft = this.bidirectionalWriting()
       ? this.translations.proDraft ?? ""
       : "";
+    this.proSavedDraft = this.translations.proDraft ?? "";
     this.proRenderedBidirectional = this.bidirectionalWriting();
     this.translationViewActive = this.translations.displayMode === "translation";
     this.outputMode = this.session?.meta.translation?.output ?? "replace";
@@ -1171,6 +1181,14 @@ export class SessionView extends ItemView {
       return;
     }
     this.translations = await this.store.getSessionTranslations(this.sessionFile);
+    // 외부에서 대기함이 비워졌으면(설정 패널의 '반영 대기 취소') 뷰가 들고 있는 초고도
+    // 함께 비운다 — 안 그러면 다음 flush 가 초고를 대기함에 다시 써 넣어 취소가 되살아난다.
+    // 미저장 타이핑이 있으면(뷰 초고 ≠ 마지막 확정본) 건드리지 않는다(저자 원고 유실 금지).
+    const fileDraft = this.translations.proDraft ?? "";
+    const adoptDraft =
+      fileDraft !== this.proSavedDraft && this.proPendingDraft === this.proSavedDraft;
+    if (adoptDraft) this.proPendingDraft = fileDraft;
+    this.proSavedDraft = fileDraft;
     const nextActive = this.translations.displayMode === "translation";
     // 보기 상태가 실제로 바뀔 때만 보던 노드를 이어준다 (같은 모드 재렌더는 픽셀 보존).
     const modeChanged = nextActive !== this.translationViewActive;
@@ -1182,6 +1200,9 @@ export class SessionView extends ItemView {
       }
     }
     this.applyDisplayMode();
+    // 초고를 외부 값으로 받아들였으면 화면도 그 값으로 — 국소 갱신(syncTranslationBlocks)은
+    // 문단 글자만 손대므로 초고 영역의 옛 글자가 그대로 남는다.
+    if (adoptDraft) this.renderTranslationBlocks({ force: true });
     if (anchor) this.restoreToAnchor(anchor);
   }
 
@@ -3301,7 +3322,10 @@ export class SessionView extends ItemView {
     // 반복 여부(skip)와 무관 — 반복 없이 이어쓴 응답의 선행 줄바꿈도 같은 기준.
     const collapseSeam = !anchorEndsParagraph(anchor);
     let kept = gen.rawText.slice(skip);
-    if (collapseSeam) kept = kept.replace(/^\s+/, "");
+    // 걷어내는 것은 줄바꿈이지 띄어쓰기가 아니다 — 한국어/영어처럼 띄어쓰기를 쓰는
+    // 글에서 이음새 공백까지 지우면 앞뒤 단어가 들러붙는다("천천히문을").
+    if (collapseSeam)
+      kept = seamSeparator(parentText, kept) + kept.replace(/^\s+/, "");
     gen.accumulatedText = kept;
     const append = node.patches[0];
     if (append.op === "append" && append.spans[0]) {
@@ -3971,12 +3995,99 @@ export class SessionView extends ItemView {
    * 저장된다 (번역 없던 문단을 고치면 첫 variant). 개별 문단 재번역은 문단 재생성
    * 패널(문단 선택 모드 → 재번역 버튼)로 통합됐다. 스크롤 위치 보존.
    */
-  private renderTranslationBlocks(): void {
+  private renderTranslationBlocks(opts?: { force?: boolean }): void {
+    if (this.translationRendering) return;
+    this.translationRendering = true;
+    try {
+      this.rebuildTranslationPanel(opts?.force === true);
+    } finally {
+      this.translationRendering = false;
+    }
+  }
+
+  /**
+   * 번역 계획(`translationBlocks`)이 **지금의 본문·DOM 과 맞는가**.
+   *
+   * 계획은 그릴 때의 `baselineText` 스냅샷이다. 그 뒤 본문이 바뀌면(원문 보기에서
+   * 이어쓰기·편집·삭제, 외부 변경) 계획은 옛 구간을 가리키는데 아무도 무효화하지
+   * 않았다. 어긋난 계획을 그대로 쓰면 두 가지가 터진다:
+   *  ① 위젯(삽화·노트·이름표·AI 마커) 삽입 기준 노드가 편집면의 자식이 아니게 되어
+   *     `insertBefore` 가 예외를 던지고, 그 예외가 렌더를 타고 올라가 **이어쓰기 자체가
+   *     시작되지 못했다**("Failed to execute 'insertBefore'" 토스트).
+   *  ② 집필 변환이 옛 구간으로 op 를 만들어 매번 "그 사이 본문이 바뀌어 반영을
+   *     취소했습니다"에 걸렸다 — 대기함은 성공해야 비므로 영구 고장이 된다.
+   */
+  private translationPlanMatches(): boolean {
+    const editEl = this.translationEditEl;
+    if (!editEl) return false;
+    const blocks = this.translationBlocks;
+    const paragraphs = this.baselineParagraphPlan();
+    if (paragraphs.length !== blocks.length) return false;
+    for (let i = 0; i < paragraphs.length; i++) {
+      const p = paragraphs[i];
+      const b = blocks[i];
+      if (p.hash !== b.hash || p.offset !== b.offset || p.source !== b.source) {
+        return false;
+      }
+      // `contains` 로는 부족하다 — 브라우저가 문단 span 을 다른 span **안으로** 옮기면
+      // 여전히 contains 지만 insertBefore 의 기준 노드로는 쓸 수 없다(예외).
+      if (b.el.parentElement !== editEl) return false;
+    }
+    return true;
+  }
+
+  /** 지금 본문의 문단 구성 (계획 비교용) — 해시/원문/시작 offset. */
+  private baselineParagraphPlan(): {
+    hash: string;
+    source: string;
+    offset: number;
+  }[] {
+    const out: { hash: string; source: string; offset: number }[] = [];
+    let docOffset = 0;
+    // 본문 렌더마다 도는 비교라 재해시를 피한다(캐시는 baselineText 가 바뀔 때만 갱신).
+    for (const token of this.getParagraphTokens()) {
+      if (token.kind === "separator") {
+        docOffset += token.text.length;
+        continue;
+      }
+      out.push({ hash: token.hash, source: token.source, offset: docOffset });
+      docOffset += token.source.length;
+    }
+    return out;
+  }
+
+  /**
+   * 계획이 어긋났으면 번역 패널을 다시 만든다 — **번역 보기가 숨어 있어도** 한다
+   * (원문 보기로 돌아가 이어 쓰는 동안에도 계획은 계속 낡는다).
+   * 계획을 소비하는 경로(위젯 배치 · 집필 변환 수집)는 먼저 이걸 부른다.
+   */
+  private ensureTranslationPlan(): void {
+    if (this.translationRendering || this.generation) return;
+    if (!this.translationEl || !this.session) return;
+    if (this.translationBlocks.length === 0) return;
+    if (isImeComposing()) return; // 조합 중 DOM 재구성 금지 (입력 마비 회귀)
+    if (this.translationPlanMatches()) return;
+    this.renderTranslationBlocks();
+  }
+
+  /**
+   * 번역 편집면에 원자 위젯을 꽂을 기준 노드 — **편집면의 직계 자식일 때만** 유효하다.
+   * 기준이 없으면 null(맨 끝에 붙는다). 계획이 낡아 있어도 예외 대신 위치만 어긋나며,
+   * 그 어긋남은 `ensureTranslationPlan` 의 재구성이 곧 바로잡는다.
+   */
+  private translationInsertRef(block: { el: HTMLElement } | undefined): Node | null {
+    const editEl = this.translationEditEl;
+    if (!editEl || !block) return null;
+    return block.el.parentElement === editEl ? block.el : null;
+  }
+
+  private rebuildTranslationPanel(force: boolean): void {
     const root = this.translationEl;
     if (!root || !this.session) return;
     // 문단 구성이 그대로면(자동 번역 완료 등) 패널을 다시 만들지 않고 바뀐 문단의
     // 글자만 갈아 끼운다 — 아래 전체 재구성은 긴 세션에서 스크롤을 흔든다.
-    if (this.syncTranslationBlocks()) return;
+    // force = 문단 밖(초고 영역)이 바뀌어 국소 갱신으로는 못 따라가는 경우.
+    if (!force && this.syncTranslationBlocks()) return;
     // 쓰던 자리(커서)를 기억해 두고 다시 그린다 — 백그라운드 저장·자동 번역이 끝나
     // 재렌더가 끼어들면 칸은 그대로인데 커서만 사라져 "치는데 글이 안 써지는" 상태가
     // 됐다(국소 갱신은 포커스를 보존한다 — CLAUDE.md §6).
@@ -4086,32 +4197,12 @@ export class SessionView extends ItemView {
    * 바뀌었으면(생성/삭제/문단 재생성) false 를 돌려 전체 재구성으로 넘긴다.
    */
   private syncTranslationBlocks(): boolean {
-    const editEl = this.translationEditEl;
     const blocks = this.translationBlocks;
-    if (!editEl || blocks.length === 0) return false;
+    if (blocks.length === 0) return false;
     // 양방향 초고 영역의 유무가 바뀌면 구조가 달라진다 — 전체 재구성.
     if (this.bidirectionalWriting() !== (this.proPendingEl != null)) return false;
-
-    // 문단 구성 비교 — 하나라도 어긋나면 국소 갱신은 안전하지 않다.
-    const paragraphs: { hash: string; source: string; offset: number }[] = [];
-    let docOffset = 0;
-    for (const token of tokenizeParagraphs(this.baselineText)) {
-      if (token.kind === "separator") {
-        docOffset += token.text.length;
-        continue;
-      }
-      paragraphs.push({ hash: token.hash, source: token.source, offset: docOffset });
-      docOffset += token.source.length;
-    }
-    if (paragraphs.length !== blocks.length) return false;
-    for (let i = 0; i < paragraphs.length; i++) {
-      const p = paragraphs[i];
-      const b = blocks[i];
-      if (p.hash !== b.hash || p.offset !== b.offset || p.source !== b.source) {
-        return false;
-      }
-      if (!editEl.contains(b.el)) return false; // DOM 이 계획과 어긋났다.
-    }
+    // 문단 구성/DOM 이 하나라도 어긋나면 국소 갱신은 안전하지 않다.
+    if (!this.translationPlanMatches()) return false;
 
     const caret = this.captureTranslationCaret();
     let changed = false;
@@ -4256,6 +4347,7 @@ export class SessionView extends ItemView {
         else this.translations.proDraft = draft;
         changed = true;
       }
+      this.proSavedDraft = draft;
     }
     if (changed) {
       void this.saveTranslationsSuppressed();
@@ -4720,6 +4812,9 @@ export class SessionView extends ItemView {
     if (this.generation) return false;
     // DOM 편집을 variant 로 확정해야 수집 재료(active variant)가 최신이 된다.
     this.flushTranslationEdits();
+    // op 의 구간(from/to/expect)은 번역 계획에서 나온다 — 계획이 본문보다 낡아 있으면
+    // 반영이 "그 사이 본문이 바뀌어 취소"로 매번 튕겨 이어쓰기가 영영 막힌다.
+    this.ensureTranslationPlan();
     const { ops, blockEls, tailPrefix } = this.collectProOps();
     if (ops.length === 0) return true;
     const run = this.performProConvert(ops, blockEls, tailPrefix);
@@ -5469,6 +5564,9 @@ export class SessionView extends ItemView {
    * + 익명 발화자 이름표(QR /sendas name=).
    */
   private renderInlineWidgets(): void {
+    // 아래 배치들은 번역 계획(translationBlocks)을 기준 노드로 쓴다 — 낡은 계획이면
+    // 먼저 패널을 다시 만든다(본문만 바뀌고 번역 패널이 그대로였던 구간의 근본 수정).
+    this.ensureTranslationPlan();
     this.renderInlineIllustrations();
     this.renderInlineNotes();
     this.renderSpeakerLabels();
@@ -5543,7 +5641,7 @@ export class SessionView extends ItemView {
     for (const anchor of anchors) {
       const el = createSpeakerLabelEl(anchor.name);
       const block = this.translationBlocks.find((b) => b.offset >= anchor.offset);
-      editEl.insertBefore(el, block?.el ?? null);
+      editEl.insertBefore(el, this.translationInsertRef(block));
       this.speakerLabelEls.push(el);
     }
   }
@@ -5649,7 +5747,7 @@ export class SessionView extends ItemView {
       const block = this.translationBlocks.find(
         (b) => b.offset >= anchor.offset
       );
-      editEl.insertBefore(el, block?.el ?? null);
+      editEl.insertBefore(el, this.translationInsertRef(block));
       this.inlineNoteEls.push(el);
     }
   }
@@ -5804,7 +5902,7 @@ export class SessionView extends ItemView {
     if (rawOffset === null) return;
     const block = this.translationBlocks.find((b) => b.offset >= rawOffset);
     const el = this.createAiStartMarkerEl();
-    editEl.insertBefore(el, block?.el ?? null);
+    editEl.insertBefore(el, this.translationInsertRef(block));
     this.aiStartMarkerTrEl = el;
   }
 
@@ -5853,7 +5951,7 @@ export class SessionView extends ItemView {
       );
       // 번역 블록 재구성으로 위젯이 잠시 분리됐어도 insertBefore 가 새 편집
       // 영역으로 다시 옮겨 붙인다(로드된 <img> 보존).
-      editEl.insertBefore(entry.el, block?.el ?? null);
+      editEl.insertBefore(entry.el, this.translationInsertRef(block));
       this.inlineIllusEls.push(entry.el);
     }
   }

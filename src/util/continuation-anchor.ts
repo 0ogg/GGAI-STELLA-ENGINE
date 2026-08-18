@@ -105,28 +105,49 @@ export function extractAnchorSentence(bodyText: string): string | null {
 /**
  * 앵커 반복 지시문 — 전송본 끝에 user 메시지로 붙는 내용.
  *
- * 앵커는 대개 쓰다 만 문단의 끝인데, 모델에게는 응답 첫 줄이라 새 문단의
- * 시작처럼 보여 한 문단 분량을 통째로 더 쓰는 문제가 있다("이음새 문단 2배").
- * 그래서 앵커가 속한 문단이 이미 길면(paragraphChars ≥ PARAGRAPH_LONG_MIN)
- * "한두 문장 안에 이 문단을 닫고 새 문단으로 넘어가라"는 지시를 덧붙인다.
+ * 모델이 앵커를 오해하는 방식은 두 가지고, 지시문은 둘 다 이름 붙여 막아야 한다.
+ *  1) 앵커를 "완결된 요청"으로 보고 그 문장만 마저 끝내고 응답을 닫는다.
+ *  2) 앵커를 응답 첫 줄 = 새 문단의 시작으로 보고 한 문단 분량을 통째로 더 써서
+ *     이음새 문단이 2배가 된다.
+ *
+ * 그래서 (a) 앵커가 문장 중간에서 끊겼는지(`anchorEndsParagraph`) 와
+ * (b) 앵커가 속한 문단이 이미 긴지(paragraphChars ≥ PARAGRAPH_LONG_MIN) 를
+ * 조합해, **줄바꿈을 지금 하라 / 하지 말라** 를 매번 명시한다. 애매하게 두면
+ * 모델마다 다르게 해석해 위 두 증상이 남는다.
  */
 export function buildAnchorInstruction(
   sentence: string,
   paragraphChars?: number
 ): string {
+  const complete = anchorEndsParagraph(sentence);
   const longParagraph =
     paragraphChars !== undefined && paragraphChars >= PARAGRAPH_LONG_MIN;
-  return (
-    "[Continuation] Below is the last sentence of the story so far. " +
-    "Your response must begin by transcribing this sentence exactly, without changing a single character, " +
-    "then continue the story naturally from that exact point, following the instructions above. " +
-    "This sentence is the tail end of a paragraph already in progress — do not treat it as the opening of a new paragraph." +
-    (longParagraph
-      ? " That paragraph is already long: bring it to a close within a sentence or two, then move on to a new paragraph."
-      : "") +
-    " Output only story prose — no summary, commentary, or greetings.\n" +
-    sentence
+  const parts = [
+    "[Continuation] The line quoted at the bottom of this message is the last line of the story so far, and the story stops there mid-flight. " +
+      "Begin your response by transcribing that line exactly, character for character, then carry on from that exact point, following the instructions above. " +
+      "It is the tail of a paragraph already in progress — not the opening line of a new paragraph, and not something to restate, rephrase, or summarize.",
+  ];
+  if (complete) {
+    parts.push(
+      longParagraph
+        ? "That line ends a sentence, and the paragraph it belongs to is already long enough: transcribe it, then break to a new paragraph right away and write on from there."
+        : "That line ends a sentence, but the paragraph is still short: transcribe it and keep writing inside that same paragraph, starting a new one only where the scene itself calls for it."
+    );
+  } else {
+    parts.push(
+      "That line is cut off in the middle of a sentence: your first task is to finish that very sentence in the same breath — same grammar, same paragraph, no line break between the transcribed text and what you add, and close any quotation or bracket it left open."
+    );
+    parts.push(
+      longParagraph
+        ? "The paragraph it belongs to is already long: land that sentence, then break to a new paragraph and continue there."
+        : "After that sentence, keep writing inside the same paragraph, starting a new one only where the scene itself calls for it."
+    );
+  }
+  parts.push(
+    "Finishing that seam is not the response: continue on to a full passage of the length the instructions above call for. " +
+      "Output only story prose — no summary, commentary, or greetings."
   );
+  return parts.join(" ") + "\n" + sentence;
 }
 
 /**
@@ -481,4 +502,35 @@ function matchAnchorFuzzy(
   }
   if (matchedHard < FUZZY_MIN_HARD) return null;
   return i;
+}
+
+/**
+ * 띄어쓰기를 쓰는 문자 — 라틴/키릴/한글(음절·자모)·숫자.
+ * CJK 표의문자·가나는 단어 사이에 공백을 넣지 않으므로 제외.
+ */
+function isSpacedScriptChar(ch: string): boolean {
+  return /[0-9A-Za-z\u00C0-\u024F\u0400-\u04FF\u1100-\u11FF\uAC00-\uD7A3]/.test(
+    ch
+  );
+}
+
+/**
+ * 이음새 구분자 — 문장 중간 이음새의 공백/줄바꿈을 걷어낼 때, 그 자리에 남겨야
+ * 할 문자를 돌려준다.
+ *
+ * 이음새 줄바꿈은 이어쓰기를 끊으므로 걷어내지만, **공백까지 통째로 없애면
+ * 한국어/영어처럼 띄어쓰기를 쓰는 글에서 앞뒤 단어가 들러붙는다**("천천히문을").
+ * 그래서 이음새에 공백이 하나라도 있었고 양쪽 중 한 글자라도 띄어쓰기를 쓰는
+ * 문자면 공백 하나를 남긴다. 일본어·중국어(공백 없음)나 단어 중간에서 끊긴
+ * 이음새(양쪽 모두 공백이 없던 경우)는 그대로 붙인다.
+ */
+export function seamSeparator(before: string, after: string): "" | " " {
+  const head = before.replace(/\s+$/, "");
+  const tail = after.replace(/^\s+/, "");
+  const hadWhitespace = head.length !== before.length || tail.length !== after.length;
+  if (!hadWhitespace || !head || !tail) return "";
+  return isSpacedScriptChar(head[head.length - 1]) ||
+    isSpacedScriptChar(tail[0])
+    ? " "
+    : "";
 }
