@@ -23,6 +23,7 @@ import type { SessionTranslations } from "../types/media";
 import { createProSettingsPanel } from "../views/detail/panels/pro-panel";
 import { isCancelledError } from "./ai-service";
 import { buildReadingMarkdown } from "../util/export-session";
+import { sendableTextOf } from "../util/ai-body-text";
 import { buildSpans, spansToText } from "../util/session-text";
 import { resolveMediaPrompt } from "../util/default-media-prompts";
 import { composeMediaPrompt } from "../util/media-prompt-body";
@@ -268,6 +269,7 @@ export class ProService {
     if (!session) return fail("세션을 불러올 수 없습니다.");
 
     // 구간 검증 — 범위/겹침/원문 일치(expect). 하나라도 어긋나면 전체 취소.
+    // body-raw: 반영 구간(from/to) 검증은 저장 원문 오프셋 기준이어야 한다.
     const baseline = spansToText(buildSpans(session));
     const sorted = [...ops].sort((a, b) => a.from - b.from);
     let prevEnd = -1;
@@ -490,7 +492,8 @@ export class ProService {
     if (!profile) return fail("집필 변환에 사용할 모델 프로필이 없습니다.");
 
     // 문체/언어 참조 = 지금까지의 챗 로그 꼬리 — 출력 언어는 원장이 정한다 (§1.5).
-    const baseline = spansToText(buildSpans(session));
+    // "AI에게 숨김" 메시지는 제외 (AI 에게 가는 자료라 전송본과 같은 기준).
+    const baseline = await sendableTextOf(this.plugin.store, sessionFile, session);
     const styleTail = sliceStyleTail(
       baseline,
       proSettings.styleTailChars ?? PRO_STYLE_TAIL_CHARS_DEFAULT

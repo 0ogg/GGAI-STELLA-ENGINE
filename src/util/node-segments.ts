@@ -158,6 +158,44 @@ function splitSegments(
   return [left, right];
 }
 
+/**
+ * 경로상 두 노드 사이 구간의 **지금 본문** — `afterNodeId` 다음부터 `throughNodeId`
+ * 까지의 노드가 만든 글을, 나중의 편집·삭제가 모두 반영된 최종 본문에서 잘라 낸다.
+ * `afterNodeId` 를 생략하면 맨 앞부터.
+ *
+ * 요약·로어북 자동 생성처럼 "이 구간에서 새로 진행된 내용"을 재료로 쓰는 쪽이 쓴다.
+ * `buildSpans(session, 경계노드)` 로 **그 시점 본문**을 다시 만들면 뒤에서 지우거나
+ * 고친 대목이 그 시점에는 살아 있어, 요약을 전부 지우고 다시 만들어도 지운 내용이
+ * 계속 되살아난다(제보된 회귀).
+ *
+ * 귀속은 `genNodeId`(그 글을 처음 만든 생성 턴) 기준이라, 나중에 손본 문단도 원래
+ * 자리에 **고친 내용으로** 남는다. `exclude` 는 "AI에게 숨김" 노드 — 통째로 빠진다.
+ */
+export function textBetweenNodes(
+  session: StellaSession,
+  leafId: string,
+  afterNodeId: string | undefined,
+  throughNodeId: string,
+  exclude: ReadonlySet<string> = new Set()
+): string {
+  const path = pathToLeaf(session, leafId);
+  const indexOf = new Map<string, number>();
+  path.forEach((n, i) => indexOf.set(n.id, i));
+  const through = indexOf.get(throughNodeId);
+  if (through === undefined) return "";
+  const after = afterNodeId !== undefined ? indexOf.get(afterNodeId) ?? -1 : -1;
+  if (after >= through) return "";
+
+  let out = "";
+  for (const seg of buildAuthoredSegments(session, leafId)) {
+    if (exclude.has(seg.nodeId)) continue;
+    const i = indexOf.get(seg.genNodeId);
+    if (i === undefined || i <= after || i > through) continue;
+    out += seg.text;
+  }
+  return out;
+}
+
 /** 노드별 구간 범위(최종 본문 기준) — 표시(흐리게)나 이름표 앵커 계산용. */
 export interface NodeSpanRange {
   nodeId: string;

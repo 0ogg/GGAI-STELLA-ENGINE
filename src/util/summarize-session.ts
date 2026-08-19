@@ -25,6 +25,16 @@ export const DEFAULT_SUMMARY_THRESHOLD = 5;
 /** 연속성 참고용으로 요청에 함께 보내는 최근 사건 요약 수. */
 export const RECENT_EVENTS_FOR_CONTEXT = 3;
 
+/**
+ * 원본 그대로 유지할 최근 사건 블록 수 — 그 앞은 자동으로 한 덩어리로 접는다(압축).
+ * 0 이면 개수 기준 압축을 하지 않는다(토큰 상한 초과 시에만 압축).
+ */
+export const DEFAULT_SUMMARY_KEEP_RECENT = 4;
+
+/** 요약 요청에 함께 보내는 "직전 문단" 리드인의 목표/최대 길이(글자). */
+export const SUMMARY_LEAD_IN_MIN_CHARS = 200;
+export const SUMMARY_LEAD_IN_MAX_CHARS = 600;
+
 // ─────────────────────────── 경로 위 앵커 ───────────────────────────
 
 /** 루트→리프 경로 위에 있는 요약 앵커를 경로 순서대로 반환. */
@@ -41,18 +51,40 @@ export function collectAnchorChain(
   return out;
 }
 
+/** 주입 블록 라벨 — 본문(자연어 서술)과 구분되는 메타 정보임을 알린다. */
+export const SUMMARY_PAST_HEADER =
+  "[Story so far - a digest of earlier scenes, already written. Do not repeat it as new narration.]";
+export const SUMMARY_STATE_HEADER = "[Current situation]";
+
+/** 지난 사건 블록 (라벨 + 시간순 나열). 비어 있으면 빈 문자열. */
+function formatPastBlock(events: string[]): string {
+  const list = events.map((e) => e.trim()).filter((e) => e !== "");
+  return list.length === 0 ? "" : `${SUMMARY_PAST_HEADER}\n${list.join("\n\n")}`;
+}
+
+/** 현재 상황 블록 (라벨 + 스냅샷). 비어 있으면 빈 문자열. */
+function formatStateBlock(state: string): string {
+  const s = state.trim();
+  return s === "" ? "" : `${SUMMARY_STATE_HEADER}\n${s}`;
+}
+
+/** 두 블록을 한 덩어리로 (기본 주입 형태). */
+function joinSummaryBlocks(past: string, state: string): string {
+  return [past, state].filter((s) => s !== "").join("\n\n");
+}
+
 /**
  * {{summary}} 로 주입할 합성 텍스트 — 경로 위 앵커들의 사건 요약을 시간순으로
  * 나열하고, 마지막 앵커의 현재 상황 스냅샷을 붙인다. 앵커가 없으면 빈 문자열.
  *
- * JSON 형식으로 감싸는 이유: 본문(자연어 서술)과 구분되는 메타 정보라는 것을
- * 모델이 명확히 인식하도록 하기 위함.
+ * 형식은 JSON 이 아니라 **라벨 붙은 평문**이다. JSON 으로 감싸면 줄바꿈이 이스케이프
+ * 글자로 박히고 따옴표·들여쓰기가 매 턴 같이 실려 토큰만 더 먹는다 — 본문과
+ * 구분되는 메타 정보라는 표시는 대괄호 라벨 한 줄로 충분하다.
  */
 export function composeSummaryContext(anchors: SummaryAnchor[]): string {
   const events = anchors.map((a) => a.events.trim()).filter((e) => e !== "");
   const state = anchors.length > 0 ? anchors[anchors.length - 1].state.trim() : "";
-  if (events.length === 0 && !state) return "";
-  return JSON.stringify({ pastEvents: events, currentState: state }, null, 2);
+  return joinSummaryBlocks(formatPastBlock(events), formatStateBlock(state));
 }
 
 // ─────────────────────────── 압축(컴팩트) 반영 합성 ───────────────────────────
@@ -115,32 +147,19 @@ export function composeInheritedSummary(
   summaries: SessionSummaries,
   leafId: string = session.meta.activeLeafId
 ): { events: string; state: string } {
-  const { compaction, anchors } = collectEffectiveSummary(session, summaries, leafId);
-  const parts: string[] = [];
-  if (compaction && compaction.events.trim() !== "") parts.push(compaction.events.trim());
-  for (const a of anchors) {
-    const e = a.events.trim();
-    if (e !== "") parts.push(e);
-  }
-  const state =
-    anchors.length > 0
-      ? anchors[anchors.length - 1].state.trim()
-      : compaction
-      ? compaction.state.trim()
-      : "";
-  return { events: parts.join("\n\n"), state };
+  const { events, state } = effectiveEventsAndState(session, summaries, leafId);
+  return { events: events.join("\n\n"), state };
 }
 
 /**
- * {{summary}} 주입 텍스트 — 압축 반영 버전. 경로 위 압축본을 앞세우고, 그 이후 앵커의
- * 사건 요약을 이어붙인 뒤, 마지막 상황 스냅샷을 붙인다. composeSummaryContext 와 같은
- * JSON shape 를 낸다 (미리보기=전송본 대전제).
+ * 경로에 적용되는 요약의 원문 조각 — 압축본을 앞세운 사건 블록 목록과 마지막 상황
+ * 스냅샷. 라벨이 붙지 않은 날것이라 상속(다음화/SNS)과 주입 양쪽이 함께 쓴다.
  */
-export function composeSummaryContextForPath(
+function effectiveEventsAndState(
   session: StellaSession,
   summaries: SessionSummaries,
-  leafId: string = session.meta.activeLeafId
-): string {
+  leafId: string
+): { events: string[]; state: string } {
   const { compaction, anchors } = collectEffectiveSummary(session, summaries, leafId);
   const events: string[] = [];
   if (compaction && compaction.events.trim() !== "") events.push(compaction.events.trim());
@@ -154,8 +173,35 @@ export function composeSummaryContextForPath(
       : compaction
       ? compaction.state.trim()
       : "";
-  if (events.length === 0 && !state) return "";
-  return JSON.stringify({ pastEvents: events, currentState: state }, null, 2);
+  return { events, state };
+}
+
+/**
+ * 주입용 두 블록 — 「지난 이야기」와 「현재 상황」을 따로 돌려준다. 나눠 배치
+ * (`splitPlacement`) 는 지난 이야기를 본문 앞(로어북 뒤)에, 현재 상황만 본문 끝
+ * 근처에 넣는다 — 긴 과거 목록이 최근 본문 바로 앞에서 흐름을 희석시키지 않게.
+ */
+export function composeSummaryParts(
+  session: StellaSession,
+  summaries: SessionSummaries,
+  leafId: string = session.meta.activeLeafId
+): { past: string; state: string } {
+  const { events, state } = effectiveEventsAndState(session, summaries, leafId);
+  return { past: formatPastBlock(events), state: formatStateBlock(state) };
+}
+
+/**
+ * {{summary}} 주입 텍스트 — 압축 반영 버전. 경로 위 압축본을 앞세우고, 그 이후 앵커의
+ * 사건 요약을 이어붙인 뒤, 마지막 상황 스냅샷을 붙인다. composeSummaryContext 와 같은
+ * 형식을 낸다 (미리보기=전송본 대전제).
+ */
+export function composeSummaryContextForPath(
+  session: StellaSession,
+  summaries: SessionSummaries,
+  leafId: string = session.meta.activeLeafId
+): string {
+  const { past, state } = composeSummaryParts(session, summaries, leafId);
+  return joinSummaryBlocks(past, state);
 }
 
 /**
@@ -270,6 +316,63 @@ export function extractNewPassage(textAtAnchor: string, textAtLeaf: string): str
   return textAtLeaf.slice(i);
 }
 
+/** 문장 끝으로 인정하는 문장부호 + 뒤따르는 닫는 따옴표/괄호. */
+const SENTENCE_END_RE = /[.!?…‥。！？~—][")'”’』」\]）】]*(?=\s|$)/g;
+/** 꼬리 잘라내기를 포기하는 기준 — 이만큼 버려야 한다면 문장부호를 안 쓰는 글이다. */
+const MAX_FRAGMENT_DROP_CHARS = 400;
+const MAX_FRAGMENT_DROP_RATIO = 0.3;
+
+/**
+ * 패시지 끝의 **미완성 문장 한 조각을 버린다**. 생성은 문장 한복판에서 끊기는 일이
+ * 잦은데, 그 조각을 그대로 요약에 넣으면 모델이 없는 결말을 지어내기 쉽다.
+ *
+ * 버린 조각은 사라지지 않는다 — 다음 구간 요청의 리드인(`leadInContext`)에 그대로
+ * 따라 들어가고, 그 문장의 나머지는 다음 패시지 첫머리에 있다.
+ * 잘라낼 양이 지나치게 많으면(문장부호가 거의 없는 글) 그대로 둔다.
+ */
+export function trimTrailingFragment(passage: string): string {
+  const text = passage.replace(/\s+$/, "");
+  if (text === "") return passage;
+  let cut = -1;
+  SENTENCE_END_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = SENTENCE_END_RE.exec(text)) !== null) cut = m.index + m[0].length;
+  const lastBreak = text.lastIndexOf("\n");
+  if (lastBreak + 1 > cut) cut = lastBreak + 1; // 문단 경계도 완결로 본다
+  if (cut <= 0) return passage;
+  const dropped = text.length - cut;
+  if (dropped === 0) return text;
+  if (dropped > MAX_FRAGMENT_DROP_CHARS || dropped > text.length * MAX_FRAGMENT_DROP_RATIO) {
+    return passage;
+  }
+  return text.slice(0, cut).replace(/\s+$/, "");
+}
+
+/**
+ * 리드인 — 패시지 **바로 앞** 본문의 꼬리 문단(들). 요약 대상이 아니라 "이 대목이
+ * 어디서 이어지는지" 알려주는 연결용이다. 한 문단이 너무 짧으면 목표 길이를 채울
+ * 때까지 앞 문단을 더 붙이고, 최대 길이를 넘으면 뒤쪽만 남긴다.
+ */
+export function leadInContext(
+  previousText: string,
+  minChars: number = SUMMARY_LEAD_IN_MIN_CHARS,
+  maxChars: number = SUMMARY_LEAD_IN_MAX_CHARS
+): string {
+  const parts = previousText
+    .split(/\n+/)
+    .map((t) => t.trim())
+    .filter((t) => t !== "");
+  if (parts.length === 0) return "";
+  const picked: string[] = [];
+  let len = 0;
+  for (let i = parts.length - 1; i >= 0 && len < minChars; i--) {
+    picked.unshift(parts[i]);
+    len += parts[i].length;
+  }
+  const out = picked.join("\n");
+  return out.length > maxChars ? `…${out.slice(out.length - maxChars)}` : out;
+}
+
 // ─────────────────────────── AI 입출력 규약 ───────────────────────────
 
 export interface SummaryRequestPayload {
@@ -277,6 +380,8 @@ export interface SummaryRequestPayload {
   previousState: string;
   /** 연속성 참고용 최근 사건 요약 (오래된 것 → 최근 것). */
   recentEvents: string[];
+  /** 패시지 바로 앞 본문의 꼬리 문단 — 연결 파악용(요약 대상 아님). */
+  precedingContext: string;
   /** 이번에 요약할 새 패시지 원문. */
   passage: string;
 }
@@ -292,10 +397,12 @@ export interface SummaryResult {
  */
 export const SUMMARY_IO_INSTRUCTIONS = [
   "Input is a JSON object:",
-  '{ "previousState": string, "recentEvents": string[], "passage": string }',
+  '{ "previousState": string, "recentEvents": string[], "precedingContext": string, "passage": string }',
   '"passage" is the new story text to summarize. "previousState" is the situation snapshot',
   'from the previous summary (empty on the first run). "recentEvents" are earlier event',
   "digests provided for continuity only — do not repeat them.",
+  '"precedingContext" is the text right before the passage — for continuity only; never summarize it.',
+  "The passage may begin or end in the middle of a scene: do not invent an opening or an ending for it.",
   "Respond with a JSON object only — no markdown fences, no commentary:",
   '{ "events": string | string[], "state": string }',
   '"events" covers only the new passage (a single string or a list of event strings).',
@@ -315,16 +422,23 @@ export interface CompactionResult {
 
 export const COMPACTION_IO_INSTRUCTIONS = [
   "You are compressing older story-summary fragments into a single shorter digest.",
-  'Input is a JSON object: { "events": string[] } — older event digests in chronological order.',
-  "Merge them into ONE concise digest that preserves key plot points, character developments,",
-  "and unresolved threads, dropping redundancy and minor detail. Keep chronological order.",
+  'Input is a JSON object: { "events": string[], "currentState": string } — older event digests in',
+  "chronological order, plus a snapshot of where the story stands right now.",
+  "Merge the digests into ONE concise digest, keeping chronological order.",
+  'Use "currentState" to judge what still matters: keep what a reader needs in order to follow the',
+  "present situation (live threads, standing promises, relationships, who knows what), and compress",
+  "resolved or one-off detail into a single line. Never copy currentState into the output — it is",
+  "context for judging relevance, not material to summarize.",
   "Write in the same language as the input.",
   "Respond with a JSON object only — no markdown fences, no commentary:",
   '{ "events": string }',
 ].join("\n");
 
-export function buildCompactionRequestBody(events: string[]): string {
-  return JSON.stringify({ events });
+export function buildCompactionRequestBody(
+  events: string[],
+  currentState: string
+): string {
+  return JSON.stringify({ events, currentState });
 }
 
 /** 압축 응답 파싱 — events 는 문자열 또는 문자열 배열 허용 (summary 와 동일 관용). */
@@ -344,13 +458,20 @@ export function parseCompactionResponse(text: string): CompactionResult | null {
 }
 
 /**
- * 압축 계획 — 유효 요약(압축본 + 이후 앵커)을 시간순 블록으로 놓고 오래된 상위 절반을
+ * 압축 계획 — 유효 요약(압축본 + 이후 앵커)을 시간순 블록으로 놓고 접을 오래된 블록을
  * 고른다. 블록이 2개 미만이면(접을 게 없으면) null. 항상 최소 1개 블록은 최근분으로 남긴다.
+ *
+ *  - `keepRecent` 지정: 최근 그만큼은 원본 그대로 두고 그 앞을 접는다. 접을 블록이
+ *    1개뿐이면(=한 덩어리를 다시 한 덩어리로) 헛수고이므로 null.
+ *  - 미지정: 오래된 상위 절반 (토큰 상한 초과 시의 공격적 압축).
  */
-export function planCompaction(effective: {
-  compaction: SummaryCompaction | null;
-  anchors: SummaryAnchor[];
-}): { throughNodeId: string; state: string; oldEvents: string[] } | null {
+export function planCompaction(
+  effective: {
+    compaction: SummaryCompaction | null;
+    anchors: SummaryAnchor[];
+  },
+  keepRecent?: number
+): { throughNodeId: string; state: string; oldEvents: string[] } | null {
   const blocks: { events: string; nodeId: string; state: string }[] = [];
   if (effective.compaction) {
     blocks.push({
@@ -364,7 +485,13 @@ export function planCompaction(effective: {
   }
   if (blocks.length < 2) return null;
 
-  let olderCount = Math.ceil(blocks.length / 2);
+  let olderCount: number;
+  if (keepRecent !== undefined && keepRecent > 0) {
+    olderCount = blocks.length - keepRecent;
+    if (olderCount < 2) return null;
+  } else {
+    olderCount = Math.ceil(blocks.length / 2);
+  }
   if (olderCount >= blocks.length) olderCount = blocks.length - 1;
   const older = blocks.slice(0, olderCount);
   const boundary = older[older.length - 1];

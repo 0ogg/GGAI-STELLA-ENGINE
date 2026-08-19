@@ -1,6 +1,6 @@
 import type StellaEnginePlugin from "../main";
 import { scenarioFileOfSessionFile } from "../util/build-session-context";
-import { buildSpans, spansToText } from "../util/session-text";
+import { sendableTextOf } from "../util/ai-body-text";
 import { requestSessionTitle } from "../util/session-title";
 
 /**
@@ -31,7 +31,8 @@ export async function generateSessionTitleNow(
   const scenarioName =
     scenarios.find((i) => i.scenarioFile === scenarioFile)?.scenario.data?.name ?? "(unknown)";
 
-  const text = spansToText(buildSpans(session));
+  // "AI에게 숨김" 노드는 제목 재료에서도 뺀다 (눈감긴 QR 결과가 제목이 되지 않게).
+  const text = await sendableTextOf(plugin.store, sessionFile, session);
   const story = [text.slice(0, 800), text.slice(-1800)].filter(Boolean).join("\n\n");
   if (!story.trim()) {
     return { ok: false, error: "제목을 만들 본문이 없습니다." };

@@ -56,7 +56,9 @@ import {
 import { composeMediaPrompt } from "../util/media-prompt-body";
 import { listPhoneContacts, type PhoneContact } from "../util/phone-contacts";
 import { sawSnsPost } from "../util/phone-knows";
-import { buildSpans, pathToLeaf, spansToText } from "../util/session-text";
+import { hiddenNodesOf, sendableText, sendableTextOf } from "../util/ai-body-text";
+import type { StellaSession } from "../types/session";
+import { pathToLeaf } from "../util/session-text";
 import { composeInheritedSummary } from "../util/summarize-session";
 import { resolveActiveLorebooks } from "../util/resolve-active-lorebooks";
 import { matchLorebookEntries, type MatchedLorebookEntry } from "../util/lorebook-match";
@@ -1153,9 +1155,7 @@ export class PhoneService {
     let scene = sceneText ?? "";
     if (!scene && session) {
       try {
-        scene = spansToText(
-          buildSpans(session, session.meta.activeLeafId)
-        ).slice(-8000);
+        scene = (await sendableTextOf(store, sessionFile, session)).slice(-8000);
       } catch {
         scene = "";
       }
@@ -1213,7 +1213,7 @@ export class PhoneService {
    * 인물이 누구인지 모델이 알아야 스트리머를 제대로 지목한다.
    */
   private async buildStreamDetectReference(
-    session: Parameters<typeof buildSpans>[0],
+    session: StellaSession,
     scene: string,
     personaName: string,
     personaDesc: string,
@@ -1324,8 +1324,8 @@ export class PhoneService {
       const session = await plugin.store.getSession(sessionFile);
       if (!session) return;
       const count = (s: string) => plugin.ai.countTokens(s, profile.id);
-      const body = spansToText(
-        buildSpans(session, session.meta.activeLeafId)
+      const body = (
+        await sendableTextOf(plugin.store, sessionFile, session)
       ).trim();
       const scene = trimToTokens(
         body,
@@ -1476,7 +1476,11 @@ export class PhoneService {
       return;
     }
     const count = (s: string) => plugin.ai.countTokens(s, profile.id);
-    const body = spansToText(buildSpans(session, nodeId)).trim();
+    const body = sendableText(
+      session,
+      nodeId,
+      await hiddenNodesOf(store, sessionFile)
+    ).trim();
     const scene = trimToTokens(body, 1600, count, "tail");
     if (!scene) return;
 
@@ -1730,8 +1734,8 @@ export class PhoneService {
       await this.plugin.flushSessionEdits(sessionFile);
       const session = await this.plugin.store.getSession(sessionFile);
       if (!session) return "";
-      const body = spansToText(
-        buildSpans(session, session.meta.activeLeafId)
+      const body = (
+        await sendableTextOf(this.plugin.store, sessionFile, session)
       ).trim();
       return body.slice(-600);
     } catch {
@@ -4529,7 +4533,7 @@ export class PhoneService {
   private async buildParticipantBlock(opts: {
     scenario: StellaScenario;
     sessionFile: string;
-    session: Parameters<typeof buildSpans>[0];
+    session: StellaSession;
     summaryBudget: number;
     bodyBudget: number;
     includeLore: boolean;
@@ -4578,11 +4582,15 @@ export class PhoneService {
       }
     }
 
-    const full = spansToText(buildSpans(session, session.meta.activeLeafId));
+    // 본문은 전부 "AI에게 숨김"을 뺀 기준으로 다룬다 — full/news 가 서로 다른
+    // 기준이면 배경 계산(full 길이 − news 길이)이 어긋난다.
+    const hidden = await hiddenNodesOf(this.plugin.store, sessionFile);
+    const full = sendableText(session, session.meta.activeLeafId, hidden);
     // 새 진행분 = 북마크 이후. 배경은 그 앞부분만 — 겹쳐 붙이지 않는다.
     const news = newTextSinceMark(
       session,
-      this.plugin.data.snsProgress?.[this.snsProgressKey(sessionFile)]
+      this.plugin.data.snsProgress?.[this.snsProgressKey(sessionFile)],
+      hidden
     ).trim();
     const background = (
       news ? full.slice(0, Math.max(0, full.length - news.length)) : full
@@ -4706,8 +4714,8 @@ export class PhoneService {
         if (!session || !match(session.meta)) continue;
         await this.plugin.flushSessionEdits(sessionFile);
         const fresh = (await this.plugin.store.getSession(sessionFile)) ?? session;
-        const body = spansToText(
-          buildSpans(fresh, fresh.meta.activeLeafId)
+        const body = (
+          await sendableTextOf(this.plugin.store, sessionFile, fresh)
         ).trim();
         const tailTokens = Math.max(
           100,
@@ -5589,15 +5597,16 @@ function parseStreamDetect(
  * 북마크만 남기고 다음 진행분부터 사건이 된다.
  */
 function newTextSinceMark(
-  session: Parameters<typeof buildSpans>[0],
-  markNodeId: string | undefined
+  session: StellaSession,
+  markNodeId: string | undefined,
+  hidden: ReadonlySet<string> = new Set()
 ): string {
   const leafId = session.meta.activeLeafId;
   if (!markNodeId || markNodeId === leafId) return "";
-  const current = spansToText(buildSpans(session, leafId));
+  const current = sendableText(session, leafId, hidden);
   const textAt = (nodeId: string) => {
     try {
-      return spansToText(buildSpans(session, nodeId));
+      return sendableText(session, nodeId, hidden);
     } catch {
       return null;
     }

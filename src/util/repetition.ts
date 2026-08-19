@@ -14,6 +14,7 @@
  */
 
 import type { StellaSession } from "../types/session";
+import { spansExcludingNodes } from "./node-segments";
 import { applyPatch, buildSpans, pathToLeaf, spansLength } from "./session-text";
 
 /** 집계 단위 — `auto` 면 본문 글자 구성으로 정한다. */
@@ -98,16 +99,25 @@ export function normalizeRepetitionSettings(raw: unknown): RepetitionSettings {
  * 스팬의 author 를 그대로 쓰므로, 사용자가 손본 자리는 자동으로 빠진다
  * (사용자 문체 교정은 월권 — 스펙 §2). 조각 사이는 줄바꿈으로 잇는다:
  * 사용자 편집으로 끊긴 두 AI 조각이 붙어 없던 반복이 생기지 않게.
+ *
+ * `hidden` = "AI에게 숨김" 노드(`node-meta.json`). 집계 결과가 전송본에 들어가므로
+ * 숨긴 메시지는 여기서도 빠져야 한다 — 두 시점 모두 같은 기준으로 뺀다.
  */
 export function collectRecentAiText(
   session: StellaSession,
   leafId: string,
-  windowNodes: number
+  windowNodes: number,
+  hidden: ReadonlySet<string> = new Set()
 ): string {
   const path = pathToLeaf(session, leafId);
   if (path.length === 0) return "";
 
-  const spans = buildSpans(session, leafId);
+  const textSpans = (id: string) =>
+    hidden.size > 0
+      ? spansExcludingNodes(session, id, hidden)
+      : buildSpans(session, id);
+
+  const spans = textSpans(leafId);
   const total = spansLength(spans);
   const start = Math.max(0, path.length - Math.max(1, windowNodes));
 
@@ -115,7 +125,7 @@ export function collectRecentAiText(
   // 그 뒤가 최근 진행분이다. (윈도우가 삭제만 했으면 빈 결과 — 정상)
   let from = 0;
   if (start > 0) {
-    from = Math.min(spansLength(buildSpans(session, path[start - 1].id)), total);
+    from = Math.min(spansLength(textSpans(path[start - 1].id)), total);
   }
   const windowSpans =
     from > 0 ? applyPatch(spans, { op: "delete", from: 0, to: from }) : spans;

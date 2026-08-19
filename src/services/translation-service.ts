@@ -183,6 +183,7 @@ export class TranslationService {
       this.plugin.ai.getDefaultGenerationProfile();
     if (!profile) return { ok: false, error: "번역에 사용할 모델 프로필이 없습니다." };
 
+    // body-raw: 번역 대상 = 화면 원문. 숨긴 구간을 빼면 문단 키(오프셋)가 통째로 어긋난다.
     const text = spansToText(buildSpans(session));
     // 활성 설정 로어북 + 시나리오 공유 번역 로어북(시나리오 탭에서 선택, 전 세션 공유).
     const scenarioIds = await getScenarioMediaLorebookIds(

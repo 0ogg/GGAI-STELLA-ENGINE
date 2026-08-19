@@ -108,6 +108,11 @@ import { SidebarView } from "./views/sidebar-view";
 import { openAuthorNoteQuickInput } from "./views/session-command-bar";
 import { NextEpisodeModal } from "./views/next-episode-modal";
 import { generateSessionTitleNow } from "./services/session-title-service";
+import {
+  hiddenNodesOf,
+  sendablePassage,
+  sendableText,
+} from "./util/ai-body-text";
 import { toggleProactiveSetting } from "./views/session-menu";
 import {
   copySession,
@@ -1342,6 +1347,34 @@ export default class StellaEnginePlugin extends Plugin {
         await view.flushPendingEdits();
       }
     }
+  }
+
+  /**
+   * 세션 본문을 **AI 에게 보낼 수 있는 형태**로 돌려준다 (외부 확장 공용 진입점).
+   *
+   * 확장이 가장 자주 필요로 하는 게 본문인데, 스텔라 본문은 노드 패치를 쌓아 만드는
+   * 구조라 밖에서 재구성할 수 없다. 재구성하더라도 "AI에게 숨김" 구간이 딸려 들어간다.
+   * 그래서 창구를 여기 하나 둔다 — 내부도 같은 함수(`util/ai-body-text.ts`)를 쓴다.
+   *
+   *  - 열려 있는 세션의 미저장 편집을 먼저 커밋하므로 방금 친 문단까지 반영된다.
+   *  - `leafId` 를 주면 그 지점까지, 생략하면 현재 활성 지점까지.
+   *  - `afterNodeId` 를 함께 주면 **그 노드 이후 새로 진행된 부분만**(요약·스캔용).
+   *    지금 본문 기준이라 나중에 지우거나 고친 대목은 지워지고 고쳐진 채로 나온다.
+   *
+   * 세션을 못 읽으면 빈 문자열.
+   */
+  async getSessionBodyText(
+    sessionFile: string,
+    opts?: { leafId?: string; afterNodeId?: string }
+  ): Promise<string> {
+    await this.flushSessionEdits(sessionFile).catch(() => undefined);
+    const session = await this.store.getSession(sessionFile).catch(() => null);
+    if (!session) return "";
+    const leafId = opts?.leafId ?? session.meta.activeLeafId;
+    const hidden = await hiddenNodesOf(this.store, sessionFile);
+    return opts?.afterNodeId !== undefined
+      ? sendablePassage(session, leafId, opts.afterNodeId, leafId, hidden)
+      : sendableText(session, leafId, hidden);
   }
 
   /**

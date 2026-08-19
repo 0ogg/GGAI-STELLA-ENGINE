@@ -37,6 +37,7 @@ function createTranslationExtension(): StellaExtension {
       // 생성 시작 지점이 속한 문단부터 (직전 문단 경계로 한 칸 양보).
       const fromOffset = Math.max(0, parentText.length - 1);
       const translations = await plugin.store.getSessionTranslations(sessionFile);
+      // body-raw: 자동 번역 대상 문단 = 화면 원문(문단 키가 오프셋이라 그대로여야 한다).
       const flat = spansToText(buildSpans(session));
       const targets = collectUntranslatedParagraphsFrom(
         flat,

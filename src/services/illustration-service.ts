@@ -73,6 +73,7 @@ export class IllustrationService {
     );
 
     const contextChars = Math.max(0, ill.contextChars ?? DEFAULT_CONTEXT_CHARS);
+    // body-raw: 삽화 프롬프트 재료는 화면에 보이는 그 대목 — 앵커 오프셋과 같은 기준이어야 한다.
     const fullText = spansToText(buildSpans(session, targetNode));
     const context =
       contextChars > 0 ? fullText.slice(-contextChars) : fullText;

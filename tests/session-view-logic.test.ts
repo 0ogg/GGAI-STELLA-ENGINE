@@ -43,6 +43,7 @@ import {
   createEmptySessionTranslations,
   normalizeSessionTranslations,
 } from "../src/types/media";
+import type { SummaryAnchor } from "../src/types/summary";
 import { createEmptySessionSummaries } from "../src/types/summary";
 import {
   collectAnchorChain,
@@ -50,12 +51,17 @@ import {
   countGenerationsSince,
   lastConfirmedGenerationNode,
   extractNewPassage,
+  leadInContext,
   parseSummaryResponse,
+  planCompaction,
   planSummaryBoundaries,
   recordSummaryAnchor,
+  trimTrailingFragment,
+  SUMMARY_PAST_HEADER,
+  SUMMARY_STATE_HEADER,
 } from "../src/util/summarize-session";
 import { buildSpans, spansToText } from "../src/util/session-text";
-import { generatorSpanRanges } from "../src/util/node-segments";
+import { generatorSpanRanges, textBetweenNodes } from "../src/util/node-segments";
 import {
   buildBodyRuns,
   commonRunPrefix,
@@ -2321,16 +2327,57 @@ const asyncTests: Promise<void>[] = [];
     ["b"]
   );
 
-  // {{summary}} 합성 — 사건 요약 시간순 나열 + 마지막 앵커의 현재 상황.
+  // {{summary}} 합성 — 라벨 붙은 평문(JSON 아님): 사건 시간순 + 마지막 현재 상황.
   assert.equal(
     composeSummaryContext(collectAnchorChain(session, summaries, "c")),
-    JSON.stringify({ pastEvents: ["E1", "E2"], currentState: "S2" }, null, 2)
+    `${SUMMARY_PAST_HEADER}\nE1\n\nE2\n\n${SUMMARY_STATE_HEADER}\nS2`
   );
   assert.equal(
     composeSummaryContext(collectAnchorChain(session, summaries, "d")),
-    JSON.stringify({ pastEvents: ["E1"], currentState: "S1" }, null, 2)
+    `${SUMMARY_PAST_HEADER}\nE1\n\n${SUMMARY_STATE_HEADER}\nS1`
   );
   assert.equal(composeSummaryContext([]), "");
+
+  // 패시지 끝의 미완성 문장 한 조각은 버린다 (다음 구간 리드인으로 따라간다).
+  assert.equal(
+    trimTrailingFragment("그는 문을 열었다.\n밖에는 아무도 없었다. 그때 무언가"),
+    "그는 문을 열었다.\n밖에는 아무도 없었다."
+  );
+  // 이미 완결이면 그대로.
+  assert.equal(trimTrailingFragment("끝났다. 정말로 끝났다."), "끝났다. 정말로 끝났다.");
+  // 문장부호가 아예 없으면 손대지 않는다.
+  assert.equal(trimTrailingFragment("문장부호가 없는 한 줄"), "문장부호가 없는 한 줄");
+  // 잘라낼 양이 지나치게 크면(문장부호를 안 쓰는 글) 그대로 둔다.
+  const noPunct = "짧다. " + "부호 없이 계속 이어지는 긴 문장 ".repeat(5);
+  assert.equal(trimTrailingFragment(noPunct), noPunct);
+
+  // 리드인 — 패시지 바로 앞 꼬리 문단(목표 길이를 채울 때까지 앞으로 확장).
+  const prevText = "첫 문단입니다.\n\n두 번째 문단입니다.\n세 번째 문단, 여기가 꼬리입니다.";
+  assert.equal(leadInContext(prevText, 10, 100), "세 번째 문단, 여기가 꼬리입니다.");
+  assert.equal(
+    leadInContext(prevText, 100, 1000),
+    "첫 문단입니다.\n두 번째 문단입니다.\n세 번째 문단, 여기가 꼬리입니다."
+  );
+  assert.equal(leadInContext(""), "");
+
+  // 압축 계획 — 최근 N개 유지 모드. 접을 블록이 1개뿐이면 헛수고이므로 null.
+  const anchorOf = (n: number): SummaryAnchor => ({
+    nodeId: `n${n}`,
+    events: `E${n}`,
+    state: `S${n}`,
+    createdAt: n,
+    updatedAt: n,
+  });
+  assert.equal(
+    planCompaction({ compaction: null, anchors: [1, 2, 3, 4, 5].map(anchorOf) }, 4),
+    null
+  );
+  const six = { compaction: null, anchors: [1, 2, 3, 4, 5, 6].map(anchorOf) };
+  const folded = planCompaction(six, 4);
+  assert.equal(folded?.throughNodeId, "n2");
+  assert.deepEqual(folded?.oldEvents, ["E1", "E2"]);
+  // keepRecent 미지정(토큰 상한 초과)이면 오래된 절반을 접는다.
+  assert.deepEqual(planCompaction(six)?.oldEvents, ["E1", "E2", "E3"]);
 
   // 요약 주기 카운트 — 마지막 앵커 이후의 AI 생성 노드만.
   assert.equal(countGenerationsSince(session, "c"), 3); // 앵커 없음 → a,b,c
@@ -2352,6 +2399,35 @@ const asyncTests: Promise<void>[] = [];
   assert.equal(extractNewPassage("", textAtC), textAtC);
   // 앞부분이 편집으로 바뀌면 바뀐 지점부터 다시 패시지로 잡힌다.
   assert.equal(extractNewPassage("AB.CD", "AB!CD"), "!CD");
+
+  // 구간 재료(요약/로어북 자동 생성)는 **지금 본문** 기준으로 자른다.
+  // 나중에 지운 대목은 재요약해도 되살아나지 않는다(제보된 회귀).
+  const edited: StellaSession = {
+    ...session,
+    meta: { ...session.meta, activeLeafId: "e" },
+    nodes: {
+      ...session.nodes,
+      // c 뒤에 붙은 손편집 — " B." (offset 9~12) 를 지운다.
+      e: {
+        id: "e",
+        parent: "c",
+        kind: "user-edit",
+        patches: [{ op: "delete", from: 9, to: 12 }],
+        createdAt: 6,
+      },
+    },
+  };
+  assert.equal(spansToText(buildSpans(edited, "e")), "Start. A. C.");
+  assert.equal(textBetweenNodes(edited, "e", undefined, "a"), "Start. A.");
+  assert.equal(textBetweenNodes(edited, "e", "a", "b"), ""); // 지운 구간은 재료에서 사라진다
+  assert.equal(textBetweenNodes(edited, "e", "b", "c"), " C.");
+  // "AI에게 숨김" 노드의 구간도 재료에서 빠진다.
+  assert.equal(
+    textBetweenNodes(session, "c", undefined, "c", new Set(["b"])),
+    "Start. A. C."
+  );
+  // 경로에 없는 노드를 경계로 주면 빈 구간 (다른 분기의 경계가 새지 않는다).
+  assert.equal(textBetweenNodes(session, "c", undefined, "d"), "");
 
   // 같은 노드 재기록은 createdAt 유지 + 내용 갱신.
   const updated = recordSummaryAnchor(summaries, {

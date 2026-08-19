@@ -71,6 +71,35 @@ assert.deepEqual(
     `(src/views/session-view.ts:${unowned.join(", ")})`
 );
 
+// AI 에게 가는 본문은 `util/ai-body-text.ts` 한 창구를 거친다. 서비스/확장이 본문을
+// 직접 재구성하면(`buildSpans` 등) "AI에게 숨김" 구간이 그 경로로 되살아나고, 지난 시점
+// 본문을 되감아 만들면 나중에 지운 대목까지 되살아난다 — 요약·로어북 자동 생성·스텔라
+// 폰이 실제로 그렇게 샜다(회귀금지: 노드 부가 정보/숨김). 표시·오프셋 계산처럼 원문이
+// 필요한 자리는 바로 앞 줄(또는 같은 줄)에 `// body-raw: 이유` 주석으로 밝힌다.
+const bodyRawFiles = [
+  ...walk(path.join(root, "src", "services")),
+  ...walk(path.join(root, "src", "extensions")),
+].filter((p) => p.endsWith(".ts"));
+const rawBodyCalls = /\b(?:buildSpans|spansExcludingNodes|buildNodeSegments)\s*\(/;
+const unmarked = [];
+for (const file of bodyRawFiles) {
+  const lines = readFileSync(file, "utf8").split(/\r?\n/);
+  lines.forEach((line, i) => {
+    if (!rawBodyCalls.test(line)) return;
+    if (/\/\/\s*body-raw:/.test(line)) return;
+    if (/^\s*\/\/\s*body-raw:/.test(lines[i - 1] ?? "")) return;
+    unmarked.push(`${path.relative(root, file)}:${i + 1}`);
+  });
+}
+assert.deepEqual(
+  unmarked,
+  [],
+  "서비스/확장이 본문을 직접 재구성하고 있습니다. AI 에게 보낼 본문은 " +
+    "util/ai-body-text.ts (sendableText/sendablePassage/hiddenNodesOf) 를 쓰고, " +
+    "표시·오프셋 용도라면 앞 줄에 `// body-raw: 이유` 를 남기세요:\n" +
+    unmarked.join("\n")
+);
+
 const storeText = readFileSync(path.join(root, "src", "state", "store.ts"), "utf8");
 assert.match(storeText, /async\s+importFile\s*\(/, "Store must expose importFile().");
 assert.match(

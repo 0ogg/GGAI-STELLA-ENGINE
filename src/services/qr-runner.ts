@@ -454,6 +454,7 @@ async function appendSessionMessage(
   if (!session) return null;
 
   const parentId = session.meta.activeLeafId;
+  // body-raw: 앞에 구분자를 넣을지만 본다(본문이 비었는가) — 저장 원문 기준.
   const parentText = spansToText(buildSpans(session, parentId));
   const sep =
     parentText.length === 0

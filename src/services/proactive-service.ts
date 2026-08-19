@@ -498,6 +498,7 @@ export class ProactiveService {
 
     // 일반 ai 노드로 저장 — 챗 뷰의 이어쓰기와 같은 형태 (구분자 + ai span).
     const parentId = session.meta.activeLeafId;
+    // body-raw: 앞에 구분자를 넣을지만 본다(본문이 비었는가) — 저장 원문 기준.
     const parentText = spansToText(buildSpans(session, parentId));
     const sep = parentText.length > 0 ? CHAT_MESSAGE_SEPARATOR : "";
     const node: SessionNode = {

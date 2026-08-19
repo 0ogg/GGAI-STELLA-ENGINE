@@ -2,7 +2,10 @@ import { type EventRef, Notice, setIcon } from "obsidian";
 import type { SettingsPanel, SettingsPanelContext } from "../../../services/settings-panel-registry";
 import type { SummaryActiveSettings } from "../../../types/preset";
 import { getDefaultPrompts } from "../../../util/default-media-prompts";
-import { DEFAULT_SUMMARY_THRESHOLD } from "../../../util/summarize-session";
+import {
+  DEFAULT_SUMMARY_KEEP_RECENT,
+  DEFAULT_SUMMARY_THRESHOLD,
+} from "../../../util/summarize-session";
 import { SummaryManagerModal } from "../../summary-manager-modal";
 import { renderMediaModelPicker, renderMediaPromptPicker } from "../media-prompt-panel";
 import {
@@ -71,6 +74,19 @@ export function createSummarySettingsPanel(): SettingsPanel {
         onChange: (threshold) => void patchSummarize(ctx, { threshold }),
       });
 
+      // 원본 유지 개수 — 최근 이만큼의 사건 조각만 그대로 두고 그 앞은 자동 압축.
+      // 0 = 개수 기준 압축 안 함.
+      renderNumberRow({
+        parent: body,
+        label: "원본 유지 개수(그 앞은 자동 압축, 0=안 함)",
+        value: settings.summarize?.keepRecent ?? DEFAULT_SUMMARY_KEEP_RECENT,
+        fallback: DEFAULT_SUMMARY_KEEP_RECENT,
+        min: 0,
+        step: 1,
+        integer: true,
+        onChange: (keepRecent) => void patchSummarize(ctx, { keepRecent }),
+      });
+
       // 요약 최대 토큰 — 누적 요약이 이 토큰을 넘으면 오래된 상위 절반을 압축.
       // 0 = 압축 안 함.
       renderNumberRow({
@@ -82,6 +98,20 @@ export function createSummarySettingsPanel(): SettingsPanel {
         step: 100,
         integer: true,
         onChange: (maxTokens) => void patchSummarize(ctx, { maxTokens }),
+      });
+
+      // 나눠 배치 — 지난 이야기는 본문 앞, 현재 상황만 본문 끝 근처.
+      renderEnableToggle({
+        parent: body,
+        label: "지난 이야기는 앞쪽에 따로 배치",
+        checked: settings.summarize?.splitPlacement === true,
+        help:
+          "지난 사건 목록은 본문이 시작되기 전(로어북 뒤)에 두고, 현재 상황만 본문 끝 근처에 넣습니다. " +
+          "긴 과거 목록이 가장 최근 문단 바로 앞을 차지하지 않아 최근 흐름이 살아납니다. " +
+          "다만 요약이 갱신될 때마다 프롬프트 앞부분이 바뀌어, 프롬프트 캐시를 쓰는 모델에서는 비용이 조금 오를 수 있습니다. " +
+          "{{summary}} 매크로를 직접 써 둔 경우 그 자리에는 현재 상황만 들어갑니다.",
+        onChange: (splitPlacement) =>
+          void patchSummarize(ctx, { splitPlacement }),
       });
 
       // 수동 요약 / 요약 관리 — 즉시 요약하거나, 사건 조각을 확인·수정·재생성하는

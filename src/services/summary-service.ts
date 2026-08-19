@@ -20,7 +20,7 @@ import type StellaEnginePlugin from "../main";
 import { isCancelledError } from "./ai-service";
 import { resolveMediaPrompt } from "../util/default-media-prompts";
 import { composeMediaPrompt } from "../util/media-prompt-body";
-import { buildSpans, spansToText } from "../util/session-text";
+import { hiddenNodesOf, sendablePassage } from "../util/ai-body-text";
 import {
   buildCompactionRequestBody,
   buildSummaryRequestBody,
@@ -30,9 +30,10 @@ import {
   COMPACTION_IO_INSTRUCTIONS,
   composeSummaryContextForPath,
   countGenerationsSince,
+  DEFAULT_SUMMARY_KEEP_RECENT,
   DEFAULT_SUMMARY_THRESHOLD,
-  extractNewPassage,
   lastConfirmedGenerationNode,
+  leadInContext,
   parseCompactionResponse,
   parseSummaryResponse,
   planCompaction,
@@ -41,6 +42,7 @@ import {
   recordCompaction,
   recordSummaryAnchor,
   SUMMARY_IO_INSTRUCTIONS,
+  trimTrailingFragment,
 } from "../util/summarize-session";
 
 interface GenProfileLite {
@@ -179,6 +181,9 @@ export class SummaryService {
       : planSummaryBoundaries(session, target, last?.nodeId, threshold, budget);
     if (boundaries.length === 0) return skip();
 
+    // "AI에게 숨김" 노드 — 요약 재료에서도 뺀다(전송본과 같은 기준).
+    const hidden = await hiddenNodesOf(this.plugin.store, sessionFile);
+
     // 직전 앵커의 state/최근 events 를 구간을 넘어가며 이어 넘긴다.
     let prevAnchorNodeId = last?.nodeId;
     let runningState = last?.state ?? "";
@@ -200,11 +205,17 @@ export class SummaryService {
           return { ok: false, skipped: false, errors: [], cancelled: true };
         }
         const boundary = boundaries[b];
+        // 구간 재료는 **지금 본문** 기준으로 자른다. 예전처럼 "그 시점 본문"을
+        // 되감아 만들면, 나중에 지우거나 고친 대목이 그 시점에는 살아 있어 요약을
+        // 전부 지우고 다시 만들어도 계속 되살아났다(제보된 회귀).
         const textFrom = prevAnchorNodeId
-          ? spansToText(buildSpans(session, prevAnchorNodeId))
+          ? sendablePassage(session, target, undefined, prevAnchorNodeId, hidden)
           : "";
-        const textTo = spansToText(buildSpans(session, boundary));
-        const passage = extractNewPassage(textFrom, textTo);
+        // 끝의 미완성 문장 한 조각은 요약에 넣지 않는다 — 그 조각은 다음 구간의
+        // 리드인으로 따라가고 나머지 절반은 다음 패시지 첫머리에 있으므로 유실이 아니다.
+        const passage = trimTrailingFragment(
+          sendablePassage(session, target, prevAnchorNodeId, boundary, hidden)
+        );
         if (passage.trim() === "") {
           opts?.onProgress?.(b + 1, total);
           continue;
@@ -213,6 +224,7 @@ export class SummaryService {
         const payload = buildSummaryRequestBody({
           previousState: runningState,
           recentEvents: runningRecent.slice(-RECENT_EVENTS_FOR_CONTEXT),
+          precedingContext: leadInContext(textFrom),
           passage,
         });
         const seg = await this.requestSummary(
@@ -261,10 +273,11 @@ export class SummaryService {
   }
 
   /**
-   * 누적 요약 압축 — 합성된 요약이 사용자 지정 토큰 상한(summarize.maxTokens)을 넘으면
-   * 경로 위 "오래된 상위 절반" 앵커들의 events 를 한 덩어리로 압축한다. 앵커는 지우지
-   * 않고 압축본이 합성 시 덮어쓴다. 한 번 접어도 여전히 상한을 넘으면(상한을 낮춘 경우
-   * 등) 몇 회 반복한다. 실패/취소는 조용히 멈춘다(앞선 압축은 유지).
+   * 누적 요약 압축 — 두 기준 중 하나라도 걸리면 오래된 사건 블록을 한 덩어리로 접는다.
+   *  - 개수(`summarize.keepRecent`, 기본 4): 최근 그만큼만 원본으로 두고 그 앞을 접는다.
+   *  - 토큰(`summarize.maxTokens`, 0=안 함): 상한을 넘으면 오래된 상위 절반을 접는다.
+   * 앵커는 지우지 않고 압축본이 합성 시 덮어쓴다. 한 번 접어도 여전히 넘으면(상한을
+   * 낮춘 경우 등) 몇 회 반복한다. 실패/취소는 조용히 멈춘다(앞선 압축은 유지).
    */
   async compactIfNeeded(sessionFile: string, leafId?: string): Promise<void> {
     if (!this.plugin.ai.isAvailable()) return;
@@ -272,7 +285,9 @@ export class SummaryService {
     if (!session) return;
     const settings = await this.plugin.resolveActiveSettings(sessionFile);
     const maxTokens = settings.summarize?.maxTokens ?? 0;
-    if (!(maxTokens > 0)) return;
+    const keepRecent =
+      settings.summarize?.keepRecent ?? DEFAULT_SUMMARY_KEEP_RECENT;
+    if (!(maxTokens > 0) && !(keepRecent > 0)) return;
 
     const target = leafId ?? session.meta.activeLeafId;
     const profile =
@@ -295,10 +310,18 @@ export class SummaryService {
         const summaries = await this.plugin.store.getSessionSummaries(sessionFile);
         const composed = composeSummaryContextForPath(session, summaries, target);
         if (composed.trim() === "") return;
-        if (this.plugin.ai.countTokens(composed, profile.id) <= maxTokens) return;
+        const overTokens =
+          maxTokens > 0 &&
+          this.plugin.ai.countTokens(composed, profile.id) > maxTokens;
 
         const effective = collectEffectiveSummary(session, summaries, target);
-        const plan = planCompaction(effective);
+        const blockCount =
+          (effective.compaction ? 1 : 0) + effective.anchors.length;
+        const overBlocks = keepRecent > 0 && blockCount > keepRecent;
+        if (!overTokens && !overBlocks) return;
+
+        // 토큰 상한을 넘었으면 공격적으로(오래된 절반), 개수 기준이면 최근 N개만 남긴다.
+        const plan = planCompaction(effective, overTokens ? undefined : keepRecent);
         if (!plan) return; // 더 접을 블록이 없음
         // 경계가 기존 압축본 그대로면(새 앵커를 하나도 흡수 못 함) 더 줄일 수 없다 —
         // 상한이 압축본 하나보다 작은 병적 설정. 헛도는 재요청을 막고 멈춘다.
@@ -309,10 +332,16 @@ export class SummaryService {
           return;
         }
 
+        // 현재 상황 스냅샷을 함께 넘긴다 — 무엇이 아직 살아 있는 실마리인지
+        // 알아야 "사소한 것"을 제대로 골라낼 수 있다.
+        const currentState =
+          effective.anchors.length > 0
+            ? effective.anchors[effective.anchors.length - 1].state
+            : effective.compaction?.state ?? "";
         const seg = await this.requestCompaction(
           profile,
           promptText,
-          buildCompactionRequestBody(plan.oldEvents),
+          buildCompactionRequestBody(plan.oldEvents, currentState),
           ac.signal
         );
         if (!seg.ok) return; // 실패/취소 — 조용히 멈춘다

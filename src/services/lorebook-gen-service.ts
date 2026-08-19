@@ -27,10 +27,10 @@ import {
   renderExistingEntriesText,
 } from "../util/lorebook-auto-gen";
 import { resolveActiveLorebooks } from "../util/resolve-active-lorebooks";
-import { buildSpans, pathToLeaf, spansToText } from "../util/session-text";
+import { hiddenNodesOf, sendablePassage } from "../util/ai-body-text";
+import { pathToLeaf } from "../util/session-text";
 import {
   countGenerationsSince,
-  extractNewPassage,
   lastConfirmedGenerationNode,
 } from "../util/summarize-session";
 import { uuidv4 } from "../util/uuid";
@@ -161,13 +161,11 @@ export class LorebookGenService {
       const ensured = await this.ensureSessionLorebook(sessionFile);
       if (!ensured) return fail("세션 전용 로어북을 만들 수 없습니다.");
 
-      // 새 본문 = 마지막 앵커 시점 본문과 지금 본문의 차이 (자동 요약과 같은 방식).
+      // 새 본문 = 마지막 앵커 이후 진행분 (자동 요약과 같은 창구·같은 기준).
+      // 숨김 노드는 빠지고, 나중에 지우거나 고친 대목은 지금 본문대로 나온다.
+      const hidden = await hiddenNodesOf(this.plugin.store, sessionFile);
       const lastAnchor = this.lastAnchorOnPath(session, target);
-      const textFrom = lastAnchor
-        ? spansToText(buildSpans(session, lastAnchor))
-        : "";
-      const textTo = spansToText(buildSpans(session, target));
-      let passage = extractNewPassage(textFrom, textTo);
+      let passage = sendablePassage(session, target, lastAnchor, target, hidden);
       if (passage.trim() === "") return skip();
       const maxChars = Math.max(
         500,

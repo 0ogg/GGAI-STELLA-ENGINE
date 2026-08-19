@@ -34,18 +34,25 @@ const CACHE_MAX = 8;
 export function registerRepetitionExtension(plugin: StellaEnginePlugin): () => void {
   const offExtension = plugin.extensions.register({
     id: REPETITION_EXTENSION_ID,
-    async contributeContext({ sessionFile, session, leafId }): Promise<ContextContribution[]> {
+    async contributeContext({
+      sessionFile,
+      session,
+      leafId,
+      hiddenNodeIds: hidden,
+    }): Promise<ContextContribution[]> {
       const settings = normalizeRepetitionSettings(plugin.data.repetition);
       // 패널의 켜기/끄기 — 꺼 두면 기여 자체가 없어 전송본이 예전과 byte 단위로 같다.
       if (!settings.enabled) return [];
-      const key = `${sessionFile}|${leafId}|${Object.keys(session.nodes).length}|${JSON.stringify(settings)}`;
+      // 숨김 노드도 키에 넣는다 — 눈감기기/풀기만 해도 집계가 달라진다.
+      const hiddenKey = [...hidden].sort().join(",");
+      const key = `${sessionFile}|${leafId}|${Object.keys(session.nodes).length}|${hiddenKey}|${JSON.stringify(settings)}`;
       let note = cache.get(key);
       if (note == null) {
         const excludes = [
           ...settings.excludes,
           ...(await collectNameExcludes(plugin, sessionFile, session)),
         ];
-        const text = collectRecentAiText(session, leafId, settings.windowNodes);
+        const text = collectRecentAiText(session, leafId, settings.windowNodes, hidden);
         const items = findRepetitions(text, { ...settings, excludes });
         note = composeRepetitionNote(settings.template, formatRepetitionList(items));
         if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value as string);

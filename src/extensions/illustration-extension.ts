@@ -72,6 +72,7 @@ async function freshParagraphsNovel(
   const illustrations = await plugin.store.getSessionIllustrations(sessionFile);
   const anchors = computeIllustrationAnchors(session, illustrations);
   const last = anchors.length > 0 ? anchors[anchors.length - 1].offset : 0;
+  // body-raw: 자동 삽화 트리거 판정 = 화면 문단 수(앵커 오프셋 기준).
   return completedParagraphsAfter(spansToText(buildSpans(session)), last);
 }
 

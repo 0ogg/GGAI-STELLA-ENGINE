@@ -19,7 +19,10 @@ import type {
   StellaExtension,
 } from "../services/extension-registry";
 import { createSummarySettingsPanel } from "../views/detail/panels/summary-panel";
-import { composeSummaryContextForPath } from "../util/summarize-session";
+import {
+  composeSummaryContextForPath,
+  composeSummaryParts,
+} from "../util/summarize-session";
 import { Notice } from "obsidian";
 
 function createSummaryExtension(): StellaExtension {
@@ -34,6 +37,30 @@ function createSummaryExtension(): StellaExtension {
       const summaries = await input.plugin.store.getSessionSummaries(
         input.sessionFile
       );
+
+      // 나눠 배치 — 「지난 이야기」는 배경 지식이라 본문 앞(로어북 뒤)에 두고,
+      // 「현재 상황」만 기존 자리(작가노트 위 / 지정한 {{summary}} 자리)에 남긴다.
+      // 긴 과거 목록이 최근 본문 바로 앞에서 흐름을 희석시키지 않게 하는 배치다.
+      if (input.settings.summarize.splitPlacement === true) {
+        const { past, state } = composeSummaryParts(
+          input.session,
+          summaries,
+          input.leafId
+        );
+        const out: ContextContribution[] = [];
+        if (past) {
+          out.push({
+            slot: "custom",
+            text: past,
+            name: "요약: 지난 이야기",
+            position: "after_char",
+            order: 90,
+          });
+        }
+        if (state) out.push({ slot: "summary", text: state });
+        return out;
+      }
+
       const text = composeSummaryContextForPath(
         input.session,
         summaries,

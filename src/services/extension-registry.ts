@@ -99,6 +99,14 @@ export interface ExtensionContextInput {
   /** 컨텍스트를 만드는 리프(=이어쓰기가 보낼 지점). 재생성이면 **부모 노드**다. */
   leafId: string;
   /**
+   * 이 전송본이 실제로 보낼 본문 — "AI에게 숨김" 구간이 이미 빠진 상태다.
+   * **확장은 본문을 직접 재구성하지 않는다**(`buildSpans` 금지, 하네스가 검사).
+   * 엔진이 보는 것과 확장이 보는 것이 어긋나면 숨긴 내용이 확장 경로로 새 나간다.
+   */
+  bodyText: string;
+  /** 숨김 노드 집합 — 노드 단위로 걸러야 하는 확장용(`util/ai-body-text.ts`와 같은 값). */
+  hiddenNodeIds: ReadonlySet<string>;
+  /**
    * 챗 재생성 전용 — 대화 로그 끝의 assistant 1개를 뺀 시점인가.
    * `leafId` 만으로는 재생성 지점이 완전히 표현되지 않는다(갈아끼울 메시지 뒤에
    * 편집 노드가 붙어 leaf 를 부모로 못 옮기는 경우). **이 생성이 보는 것과 똑같은

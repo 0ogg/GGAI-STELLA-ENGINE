@@ -299,6 +299,10 @@ export async function planSessionRequest(
     sessionFile,
     session,
     leafId,
+    // 확장이 본문을 다시 조립하지 않게 **엔진이 보는 그 본문**을 그대로 넘긴다
+    // (숨김 이미 제외). 확장이 따로 buildSpans 하면 숨긴 내용이 그쪽으로 샌다.
+    bodyText: spansToText(parentSpans),
+    hiddenNodeIds: hiddenIds,
     // 재생성 지점을 그대로 넘긴다 — 1차 호출을 따로 조립하는 확장이 본 생성과
     // 같은 지점을 보게. 빠지면 1차만 한 턴 앞(갈아끼울 응답이 붙은 채)을 본다.
     excludeTailAssistant: opts.excludeTailAssistant === true,

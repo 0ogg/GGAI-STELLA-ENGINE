@@ -86,16 +86,22 @@ export const DEFAULT_MEDIA_PROMPTS: Record<MediaPromptBucket, MediaPromptItem[]>
       title: "Default",
       prompt:
         "You are the story memory keeper for an ongoing fiction/roleplay session.\n" +
-        "From the new passage, produce two things:\n" +
-        "1. events — a compact chronological digest of what happened in this passage: " +
-        "key events, decisions, reveals, and emotional turning points (who felt what, and why it matters). " +
-        "Preserve promises, foreshadowing, and unresolved hooks that could inspire future development. " +
-        "Write 3-8 short lines.\n" +
-        "2. state — an updated snapshot of the current situation, merging the previous state with this passage: " +
-        "time/place, characters present and their condition, relationship dynamics, active goals, " +
-        "tensions, and open threads.\n" +
-        "Write both in the same language as the passage. Be specific with character names. " +
-        "Never invent facts that are not in the passage or the previous summary.\n\n" +
+        "Read the new passage and produce two things.\n\n" +
+        "1. events — what HAPPENED in this passage: key actions, decisions, reveals, and emotional " +
+        "turning points (who did what, and why it matters). Preserve promises, foreshadowing, and " +
+        "unresolved hooks that could inspire future development. Write 3-8 short lines, past tense. " +
+        "Do not describe the standing situation here — that belongs in state.\n\n" +
+        "2. state — what is TRUE NOW, at the end of this passage. Rewrite the previous state, " +
+        "changing only what this passage changed. Keep it under 200 words, on these lines:\n" +
+        "time/place: where and when the story now stands\n" +
+        "present: who is here, and their physical/emotional condition\n" +
+        "relations: how the characters stand toward each other (note what has shifted)\n" +
+        "goals: what each side is trying to do next\n" +
+        "open threads: unresolved hooks — delete any this passage resolved\n" +
+        "No past narration here: if it is over and settled, it belongs only in events.\n\n" +
+        "Write both in the same language as the passage. Name characters instead of using pronouns. " +
+        "The passage may begin or end in the middle of a scene — do not invent an ending for it. " +
+        "Never invent facts that are not in the passage or the previous state.\n\n" +
         "Generation:",
     },
   ],
