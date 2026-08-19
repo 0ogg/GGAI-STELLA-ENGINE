@@ -3140,7 +3140,11 @@ export class SessionView extends ItemView {
             if (!gen) break;
             if (anchorSentence) {
               gen.rawText = (gen.rawText ?? "") + event.delta;
-              const skip = anchorSkipStreaming(gen.rawText, anchorSentence);
+              const skip = anchorSkipStreaming(
+                gen.rawText,
+                anchorSentence,
+                parentText
+              );
               // 판정 전(null)에는 표시를 보류 — 앵커 반복이 화면에 비치지 않는다.
               gen.accumulatedText =
                 skip === null ? "" : gen.rawText.slice(skip);
@@ -3315,7 +3319,7 @@ export class SessionView extends ItemView {
   ): void {
     const gen = this.generation;
     if (!gen || !anchor || gen.rawText === undefined) return;
-    const skip = anchorSkipFinal(gen.rawText, anchor);
+    const skip = anchorSkipFinal(gen.rawText, anchor, parentText);
     // 이음새 공백 정리 — 앵커가 문장/대사 중간이면(anchorEndsParagraph=false) 이
     // 자리의 줄바꿈은 이어쓰기를 끊으므로 걷어낸다. 완결 문장/대사로 끝난 앵커면
     // 새 문단이 올 수 있는 자리이므로 모델이 넣은 줄바꿈을 그대로 보존한다.

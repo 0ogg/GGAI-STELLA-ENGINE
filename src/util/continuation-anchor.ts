@@ -225,9 +225,18 @@ function hasUnclosedOpener(t: string): boolean {
  *  - null: 아직 데이터 부족 — 표시를 보류하고 다음 delta 를 기다린다.
  * 같은 raw 접두사에 대해 항상 같은 결과를 돌려주므로 delta 마다 재호출해도 안전.
  */
-export function anchorSkipStreaming(raw: string, anchor: string): number | null {
+export function anchorSkipStreaming(
+  raw: string,
+  anchor: string,
+  parentText?: string
+): number | null {
+  // 본문 꼬리를 통째로 되받아쓴 경우(앵커보다 훨씬 앞에서부터) 가 가장 긴 중복이다.
+  const overlap = parentText ? tailOverlapSkip(parentText, raw) : 0;
+  if (overlap > 0) return overlap;
   const end = findAnchorEnd(raw, anchor);
   if (end !== null) return end;
+  // 되받아쓰기가 진행 중일 수 있으면(지금까지가 본문 꼬리와 일치) 표시를 보류한다.
+  if (parentText && tailOverlapPending(parentText, raw)) return null;
   if (raw.length < anchor.length + HEAD_SEARCH_WINDOW + 40) return null;
   const fuzzy = fuzzyPrefixSkip(raw, anchor);
   if (fuzzy > 0) return fuzzy;
@@ -239,15 +248,118 @@ export function anchorSkipStreaming(raw: string, anchor: string): number | null 
  * 앵커 전체(엄격) → 앵커 전체(정규화 퍼지) → 부분 반복(앵커 꼬리) 순으로 찾고,
  * 반복이 없으면 0 (그대로 사용).
  */
-export function anchorSkipFinal(raw: string, anchor: string): number {
+export function anchorSkipFinal(
+  raw: string,
+  anchor: string,
+  parentText?: string
+): number {
+  const overlap = parentText ? tailOverlapSkip(parentText, raw) : 0;
   const end = findAnchorEnd(raw, anchor);
-  if (end !== null) return end;
+  if (end !== null) return Math.max(end, overlap);
   const fuzzy = fuzzyPrefixSkip(raw, anchor);
-  if (fuzzy > 0) return fuzzy;
-  return fallbackSkip(raw, anchor);
+  if (fuzzy > 0) return Math.max(fuzzy, overlap);
+  return Math.max(fallbackSkip(raw, anchor), overlap);
 }
 
 // ─────────────────────────── internal ───────────────────────────
+
+/**
+ * 본문 꼬리 되받아쓰기 감지 — 모델이 앵커 한 문장이 아니라 **그보다 훨씬 앞에서부터**
+ * 본문을 다시 옮겨 쓴 경우.
+ *
+ * 앵커가 짧은 조각일 때(문장 중간에서 끊겨 마지막 문장이 "There" 한 단어인 경우 등)
+ * 모델은 지시대로 그 조각만 받아쓰지 않고 그 조각이 속한 문단·대사를 통째로 다시 쓰고
+ * 이어간다. 앵커 기준 매칭(findAnchorEnd/fuzzy/fallback)은 응답 맨 앞에서 앵커를 찾으니
+ * 이 경우 전부 실패해 **문단 하나가 통째로 중복**됐다.
+ *
+ * 그래서 앵커가 아니라 **본문 꼬리 자체**와 응답 앞머리를 맞춰 본다: 본문 끝에서
+ * 거슬러 올라간 어떤 지점부터 끝까지가 응답 앞머리에 그대로 재현됐다면 그만큼 잘라낸다.
+ * 서식·문장부호는 양쪽에서 건너뛰고 실질 글자만 정규화 비교(퍼지 매칭과 같은 규칙).
+ * 우연 일치를 막으려 최소 OVERLAP_MIN_HARD 자 이상 재현됐을 때만 인정한다.
+ */
+const OVERLAP_MIN_HARD = 12;
+/** 겹침 검사 범위 — 본문 꼬리/응답 앞머리에서 이 글자 수까지만 본다. */
+const OVERLAP_WINDOW = 600;
+/** 되받아쓰기가 "진행 중"이라고 볼 최소 실질 글자 수 (스트리밍 표시 보류 판정). */
+const OVERLAP_PENDING_MIN = 6;
+
+interface HardChars {
+  /** 정규화된 실질 글자 (서식·문장부호 제외). */
+  norm: string[];
+  /** 각 실질 글자의 원본 인덱스. */
+  idx: number[];
+  /** 마지막 실질 글자 뒤에 (공백 아닌) 문장부호가 남아 있는가. */
+  softTail: boolean;
+}
+
+/** 문자열에서 실질 글자만 뽑아 정규화 (서식·문장부호는 건너뜀). */
+function hardChars(s: string): HardChars {
+  const norm: string[] = [];
+  const idx: number[] = [];
+  for (let i = 0; i < s.length; i++) {
+    if (isSoft(s[i])) continue;
+    norm.push(normHard(s[i]));
+    idx.push(i);
+  }
+  let softTail = false;
+  for (let i = (idx[idx.length - 1] ?? -1) + 1; i < s.length; i++) {
+    if (!WS.test(s[i])) softTail = true;
+  }
+  return { norm, idx, softTail };
+}
+
+/** p 의 꼬리 len 자가 r 의 앞 len 자와 같은가. */
+function hardTailMatches(p: HardChars, r: HardChars, len: number): boolean {
+  const off = p.norm.length - len;
+  for (let k = 0; k < len; k++) {
+    if (p.norm[off + k] !== r.norm[k]) return false;
+  }
+  return true;
+}
+
+/**
+ * 응답 앞머리가 본문 꼬리를 재현한 만큼의 길이 (없으면 0).
+ * 가장 긴 겹침을 고른다 — 모델이 얼마나 앞에서부터 되받아썼든 그 전부를 걷어낸다.
+ */
+function tailOverlapSkip(parentText: string, raw: string): number {
+  const p = hardChars(parentText.slice(-OVERLAP_WINDOW));
+  const r = hardChars(raw.slice(0, OVERLAP_WINDOW));
+  const max = Math.min(p.norm.length, r.norm.length);
+  for (let len = max; len >= OVERLAP_MIN_HARD; len--) {
+    if (!hardTailMatches(p, r, len)) continue;
+    let end = r.idx[len - 1] + 1;
+    // 본문이 문장부호로 끝났으면 모델이 재현한 꼬리 문장부호도 걷어낸다
+    // (공백은 분리자로 남긴다 — 퍼지 매칭과 같은 규칙).
+    if (p.softTail) {
+      while (end < raw.length && isSoft(raw[end]) && !WS.test(raw[end])) end++;
+    }
+    return end;
+  }
+  return 0;
+}
+
+/**
+ * 스트리밍 중 "되받아쓰기가 아직 진행 중"인가 — 지금까지 도착한 응답 전체가 본문 꼬리의
+ * 어느 지점부터와 일치하면 다음 delta 를 기다린다(중복이 화면에 비치지 않게).
+ */
+function tailOverlapPending(parentText: string, raw: string): boolean {
+  const p = hardChars(parentText.slice(-OVERLAP_WINDOW));
+  const r = hardChars(raw.slice(0, OVERLAP_WINDOW));
+  if (r.norm.length < OVERLAP_PENDING_MIN) return false;
+  // 본문 꼬리에서 r 전체를 아직 다 소화하지 못한(= 겹침이 더 이어질 수 있는) 지점 찾기.
+  for (let start = 0; start + r.norm.length < p.norm.length; start++) {
+    let ok = true;
+    for (let k = 0; k < r.norm.length; k++) {
+      if (p.norm[start + k] !== r.norm[k]) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok && p.norm.length - start >= OVERLAP_MIN_HARD) return true;
+  }
+  return false;
+}
+
 
 /** 각 문장이 시작하는 위치 목록 (0 포함, 오름차순). */
 function sentenceStarts(t: string): number[] {

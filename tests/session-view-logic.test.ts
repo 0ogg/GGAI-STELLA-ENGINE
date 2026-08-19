@@ -2554,6 +2554,29 @@ const asyncTests: Promise<void>[] = [];
     halfWidth.slice(anchorSkipFinal(halfWidth, widthAnchor)),
     " 문을 두드렸다."
   );
+  // ── 본문 꼬리 되받아쓰기 — 모델이 앵커보다 훨씬 앞에서부터 다시 옮겨 쓴 경우 ──
+  // (실사례) 문장 중간에서 끊겨 앵커가 "There" 한 단어인데, 모델이 그 앞 대사·문단을
+  //   통째로 다시 쓰고 이어감 → 앵커 매칭은 전부 실패하고 문단이 중복됐다.
+  const overlapParent = `"'Weird' having been withdrawn," Hazama said.\n"Shut up." She pulled the plate closer. She ate the next piece slowly. There`;
+  const overlapRaw = `"Shut up." She pulled the plate closer. She ate the next piece slowly. There was a discipline in it, the same discipline she had used before.`;
+  assert.equal(
+    overlapRaw.slice(anchorSkipFinal(overlapRaw, "There", overlapParent)),
+    ` was a discipline in it, the same discipline she had used before.`
+  );
+  // 본문을 안 건드린 정상 이어쓰기는 그대로 (겹침 없음).
+  assert.equal(anchorSkipFinal(` was a discipline in it, the same discipline she had used before.`, "There", overlapParent), 0);
+  // 짧은 우연 일치(최소 길이 미만)는 잘라내지 않는다.
+  assert.equal(anchorSkipFinal("The plate sat there.", "There", overlapParent), 0);
+  // 스트리밍: 되받아쓰기가 진행 중이면 표시 보류(null), 다 오면 그만큼 잘라낸다.
+  assert.equal(
+    anchorSkipStreaming(`"Shut up." She pulled the`, "There", overlapParent),
+    null
+  );
+  assert.equal(
+    overlapRaw.slice(anchorSkipStreaming(overlapRaw, "There", overlapParent)!),
+    ` was a discipline in it, the same discipline she had used before.`
+  );
+
   // ── 이음새 공백 — 줄바꿈은 걷어내되 띄어쓰기는 살린다 ──
   // 본문 꼬리 공백 / 응답 선행 줄바꿈 어느 쪽이든 공백이 있었으면 한 칸 남는다.
   assert.equal(seamSeparator("그는 천천히", "\n문을 열었다."), " ");
