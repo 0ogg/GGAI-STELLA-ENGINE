@@ -14,7 +14,7 @@ import {
   setActiveIllustrationVariant,
   toggleIllustrationFavorite,
 } from "../util/illustrations";
-import { pathToLeaf } from "../util/session-text";
+import { computeIllustrationAnchors } from "../util/illustration-anchors";
 import { IllustrationCarousel } from "./illustration-carousel";
 import { IllustrationRegenModal } from "./illustration-regen-modal";
 import { isSessionHostView } from "./session-host";
@@ -139,14 +139,17 @@ export class IllustrationOutputView extends ItemView {
     this.render();
   }
 
-  /** 활성 경로에서 가장 최근(리프에 가까운) 삽화가 있는 노드 id. */
+  /**
+   * 지금 보여줄 삽화 노드 = 활성 경로에서 가장 뒤에 놓이는 삽화.
+   *
+   * **인라인과 같은 기준(앵커)으로 고른다.** 노드 경로만 훑으면 인라인이 자리를
+   * 못 찾아 안 그리는 삽화까지 여기서만 떠서, 같은 삽화가 두 화면에 갈라져 보인다
+   * (2026-08-19 사고 — 회귀금지: 삽화 표시면 일치).
+   */
   private latestNodeId(): string | null {
     if (!this.session || !this.illustrations) return null;
-    const path = pathToLeaf(this.session, this.session.meta.activeLeafId);
-    for (let i = path.length - 1; i >= 0; i--) {
-      if (getActiveIllustration(this.illustrations, path[i].id)) return path[i].id;
-    }
-    return null;
+    const anchors = computeIllustrationAnchors(this.session, this.illustrations);
+    return anchors[anchors.length - 1]?.nodeId ?? null;
   }
 
   private render(): void {

@@ -295,7 +295,7 @@ export async function planSessionRequest(
 
   // 확장 컨텍스트 기여 — 요약 등은 확장이 슬롯을 채운다(요약 사용 off 면 빈 값).
   // 미리보기(dry-run)도 이 경로를 그대로 쓰므로 확장 기여가 함께 보인다.
-  const contributions = await plugin.extensions.collectContext({
+  const extInput = {
     sessionFile,
     session,
     leafId,
@@ -309,7 +309,8 @@ export async function planSessionRequest(
     speakerId: opts.speakerId,
     settings,
     dryRun: opts.dryRun === true,
-  });
+  };
+  const contributions = await plugin.extensions.collectContext(extInput);
   const summaryContext = plugin.extensions.pickSlot(contributions, "summary");
   const phoneContext = plugin.extensions.pickSlot(contributions, "phone");
 
@@ -433,8 +434,7 @@ export async function planSessionRequest(
   // 스텔라 폰 문자 기억 (PH1) — 확장이 채운 phone 슬롯을 가상 로어북 상시
   // 엔트리로 감싸 히스토리 근처(at_depth)에 삽입한다. 그룹 멤버 프로필과 같은
   // 방식이라 미리보기·생성·토큰 예산에 자동으로 동일 반영된다.
-  if (phoneContext) {
-    lorebooks.push({
+  const phoneLorebook: StellaLorebook = {
       meta: defaultLorebookMeta("sillytavern", "스텔라 폰", "stella-phone"),
       entries: [
         {
@@ -450,33 +450,36 @@ export async function planSessionRequest(
           order: 100,
         },
       ],
-    });
-  }
+  };
+  if (phoneContext) lorebooks.push(phoneLorebook);
 
   // 확장 custom 슬롯 — 외부 확장이 배치 규칙과 함께 기여한 텍스트를 폰/그룹
   // 멤버와 같은 가상 로어북 상시 엔트리로 감싸 지정 위치에 삽입한다. 외부
   // 확장의 컨텍스트 삽입 진입점은 이 한 곳뿐(확장별 별도 배선 금지) —
   // 미리보기·생성·토큰 예산이 자동으로 동일 반영된다.
+  const customEntriesOf = (
+    contribs: (CustomContextContribution & { sourceId: string })[]
+  ) =>
+    contribs.map((c, i) => ({
+      ...defaultLorebookEntry("sillytavern"),
+      uid: `ext-${c.sourceId}-${i}`,
+      name: c.name ?? c.sourceId,
+      keys: [] as string[],
+      content: c.text,
+      constant: true,
+      position: c.position ?? "after_char",
+      depth: c.depth ?? 4,
+      role: c.role ?? "system",
+      order: c.order ?? 100,
+    }));
   const customContribs = contributions.filter(
     (c): c is CustomContextContribution & { sourceId: string } => c.slot === "custom"
   );
-  if (customContribs.length) {
-    lorebooks.push({
-      meta: defaultLorebookMeta("sillytavern", "확장 컨텍스트", "stella-extension-context"),
-      entries: customContribs.map((c, i) => ({
-        ...defaultLorebookEntry("sillytavern"),
-        uid: `ext-${c.sourceId}-${i}`,
-        name: c.name ?? c.sourceId,
-        keys: [],
-        content: c.text,
-        constant: true,
-        position: c.position ?? "after_char",
-        depth: c.depth ?? 4,
-        role: c.role ?? "system",
-        order: c.order ?? 100,
-      })),
-    });
-  }
+  const customLorebook: StellaLorebook = {
+    meta: defaultLorebookMeta("sillytavern", "확장 컨텍스트", "stella-extension-context"),
+    entries: customEntriesOf(customContribs),
+  };
+  if (customContribs.length) lorebooks.push(customLorebook);
 
   // QR `/inject` — 빠른 답장이 "다음 생성에 얹어라"로 심은 텍스트. 확장 custom
   // 슬롯과 **같은 기계**(가상 로어북 상시 엔트리)를 쓴다 — QR 전용 삽입 경로를
@@ -666,7 +669,43 @@ export async function planSessionRequest(
     countTokens: (s) => plugin.ai.countTokens(s, profile.id),
   };
 
-  const output = buildContext(v2input);
+  let output = buildContext(v2input);
+
+  // ── 2차 조립 (확장 `reviseContext`) ──
+  // "본문이 예산에 실제로 얼마나 들어갔는가"는 조립해 봐야 안다. 그 값에 기대는
+  // 기여(요약의 '본문에 남아 있는 구간 빼기')만 여기서 한 번 더 받아 재조립한다.
+  // 재조립은 **1회**로 못 박는다 — 요약이 줄면 본문이 더 들어가고, 그러면 또 줄일
+  // 수 있어 끝없이 돈다. 미리보기도 같은 경로라 전송본과 계속 byte 동일하다.
+  if (plugin.extensions.hasContextRevisers) {
+    const visibleBodyChars = output.messages.reduce(
+      (n, m) => (m.contextKind === "history" ? n + m.content.length : n),
+      0
+    );
+    const revised = await plugin.extensions.reviseContext(
+      { ...extInput, visibleBodyChars },
+      contributions
+    );
+    if (revised) {
+      v2input.summary =
+        plugin.extensions.pickSlot(revised, "summary") || undefined;
+      // 가상 로어북 두 개(폰/확장 custom)는 내용만 갈아끼운다. 1차에 비어 있어
+      // 아직 목록에 없던 것이 2차에 생기면 그때 넣는다(반대면 엔트리를 비운다).
+      const revisedPhone = plugin.extensions.pickSlot(revised, "phone");
+      phoneLorebook.entries[0].content = revisedPhone;
+      if (revisedPhone && !lorebooks.includes(phoneLorebook)) {
+        lorebooks.push(phoneLorebook);
+      }
+      const revisedCustom = revised.filter(
+        (c): c is CustomContextContribution & { sourceId: string } =>
+          c.slot === "custom"
+      );
+      customLorebook.entries = customEntriesOf(revisedCustom);
+      if (revisedCustom.length && !lorebooks.includes(customLorebook)) {
+        lorebooks.push(customLorebook);
+      }
+      output = buildContext(v2input);
+    }
+  }
 
   const paramsOverride = paramsToOverride(
     settings.params,

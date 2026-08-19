@@ -124,6 +124,17 @@ export interface ExtensionContextInput {
   dryRun?: boolean;
 }
 
+/**
+ * 2차 기여 입력 — 1차 조립이 끝나 "본문이 실제로 얼마나 들어갔는지"가 정해진 뒤의 값.
+ */
+export interface ExtensionReviseInput extends ExtensionContextInput {
+  /**
+   * 토큰 예산을 지나 전송본에 실제로 들어간 본문 글자 수(본문은 항상 **끝에서부터**
+   * 남는다). `bodyText.length` 와 같으면 본문이 하나도 잘리지 않았다는 뜻이다.
+   */
+  visibleBodyChars: number;
+}
+
 export interface GenerationCompleteInput {
   plugin: StellaEnginePlugin;
   sessionFile: string;
@@ -176,6 +187,18 @@ export interface StellaExtension {
   contributeContext?(
     input: ExtensionContextInput
   ): ContextContribution[] | Promise<ContextContribution[]>;
+  /**
+   * 2차 컨텍스트 기여 (선택) — 1차 조립 결과로 본문이 예산에 얼마나 들어갔는지
+   * 확정된 뒤 **한 번만** 호출된다. 구현한 확장만 다시 돌고, 그 확장의 1차 기여는
+   * 반환값으로 교체된다. `null` 이면 1차 기여를 그대로 쓴다(재조립도 하지 않는다).
+   *
+   * 있는 이유: "본문에 그대로 남아 있는 구간은 요약에서 빼기"처럼 **조립해 보기
+   * 전에는 알 수 없는 값**에 기대는 기여가 있다. 재조립은 1회로 못 박는다 —
+   * 기여가 줄면 본문이 더 들어가고 그러면 또 줄일 수 있어 끝없이 돈다.
+   */
+  reviseContext?(
+    input: ExtensionReviseInput
+  ): Promise<ContextContribution[] | null>;
   /** 생성 완료 직후 자동 실행. 에러는 격리되어 다른 확장/생성 저장을 막지 않는다. */
   onGenerationComplete?(input: GenerationCompleteInput): void | Promise<void>;
   /**
@@ -230,6 +253,55 @@ export class StellaExtensionRegistry {
       } catch (err) {
         console.warn(`[GGAI Stella] 확장 컨텍스트 기여 실패 (${ext.id}):`, err);
       }
+    }
+    return out;
+  }
+
+  /** 2차 기여(`reviseContext`)를 구현한 확장이 하나라도 있는가 — 재조립 판단용. */
+  get hasContextRevisers(): boolean {
+    for (const ext of this.extensions.values()) if (ext.reviseContext) return true;
+    return false;
+  }
+
+  /**
+   * 2차 기여 수집 — 구현한 확장만 다시 부르고, 그 확장의 1차 기여를 교체한 전체
+   * 목록을 돌려준다. 아무도 새 기여를 내지 않으면 `null`(=재조립 불필요).
+   */
+  async reviseContext(
+    input: Omit<ExtensionReviseInput, "plugin">,
+    previous: CollectedContribution[]
+  ): Promise<CollectedContribution[] | null> {
+    const revised = new Map<string, ContextContribution[]>();
+    for (const ext of this.extensions.values()) {
+      if (!ext.reviseContext) continue;
+      try {
+        const parts = await ext.reviseContext({ plugin: this.plugin, ...input });
+        if (parts) revised.set(ext.id, parts);
+      } catch (err) {
+        console.warn(`[GGAI Stella] 확장 2차 기여 실패 (${ext.id}):`, err);
+      }
+    }
+    if (revised.size === 0) return null;
+
+    // 1차 목록의 자리를 지키며 교체한다 (같은 슬롯을 여럿이 채울 때 순서 보존).
+    const out: CollectedContribution[] = [];
+    const emitted = new Set<string>();
+    const push = (id: string, parts: ContextContribution[]) => {
+      for (const p of parts) if (p.text.trim()) out.push({ ...p, sourceId: id });
+    };
+    for (const c of previous) {
+      const parts = revised.get(c.sourceId);
+      if (!parts) {
+        out.push(c);
+        continue;
+      }
+      if (emitted.has(c.sourceId)) continue;
+      emitted.add(c.sourceId);
+      push(c.sourceId, parts);
+    }
+    for (const [id, parts] of revised) {
+      if (emitted.has(id)) continue;
+      push(id, parts);
     }
     return out;
   }

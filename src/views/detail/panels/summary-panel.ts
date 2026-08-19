@@ -114,6 +114,20 @@ export function createSummarySettingsPanel(): SettingsPanel {
           void patchSummarize(ctx, { splitPlacement }),
       });
 
+      // 본문에 그대로 남아 있는 구간은 요약에서 빼기 (중복 전송 방지).
+      renderEnableToggle({
+        parent: body,
+        label: "본문에 남아 있는 구간은 요약에서 빼기",
+        checked: settings.summarize?.skipVisibleBody === true,
+        help:
+          "요약한 대목이 이번에 보내는 본문에도 통째로 들어 있으면, 그 부분의 사건 요약은 빼고 보냅니다. " +
+          "같은 내용을 본문과 요약으로 두 번 보내지 않아 토큰이 절약됩니다. " +
+          "본문이 길어져 앞부분이 잘려 나가면 그 구간의 요약은 다시 들어갑니다. " +
+          "'현재 상황'은 언제나 들어갑니다.",
+        onChange: (skipVisibleBody) =>
+          void patchSummarize(ctx, { skipVisibleBody }),
+      });
+
       // 수동 요약 / 요약 관리 — 즉시 요약하거나, 사건 조각을 확인·수정·재생성하는
       // 관리 창을 연다. 현재 요약 컨텍스트도 관리 창에서 본다 (패널에는 안 그린다).
       // 요약이 진행 중(수동/자동)이면 [지금 요약] 버튼이 [요약 정지]로 바뀐다.

@@ -21,6 +21,7 @@ import {
   mergeLorebookIds,
 } from "../util/media-lorebook";
 import { recordIllustrationVariant } from "../util/illustrations";
+import { resolveIllustrationTargetNode } from "../util/illustration-anchors";
 import { buildSpans, spansToText } from "../util/session-text";
 import { createExtensionRegexApplier } from "../util/session-regex";
 
@@ -47,7 +48,9 @@ export class IllustrationService {
     }
     const session = await this.plugin.store.getSession(sessionFile);
     if (!session) return fail("세션을 불러올 수 없습니다.");
-    const targetNode = nodeId ?? session.meta.activeLeafId;
+    // 대상 노드 생략 = "지금 이 자리". 활성 리프가 글자를 안 남기는 노드(끝을 지우기만
+    // 한 편집)면 본문 끝을 소유한 노드로 옮긴다 — 인라인이 자리를 찾을 수 있게.
+    const targetNode = nodeId ?? resolveIllustrationTargetNode(session);
     if (!session.nodes[targetNode]) return fail("대상 노드를 찾을 수 없습니다.");
 
     const settings = await this.plugin.resolveActiveSettings(sessionFile);

@@ -105,6 +105,11 @@ export interface SummaryActiveSettings {
    * 근처에 넣는다. 생략/false 면 둘을 한 덩어리로 기존 자리에 넣는다.
    */
   splitPlacement?: boolean;
+  /**
+   * 본문에 그대로 남아 있는 구간의 사건 요약은 빼고 보낸다 — 같은 내용을 본문과
+   * 요약으로 두 번 보내지 않는다. 「현재 상황」은 언제나 들어간다. 생략/false 면 전부 보낸다.
+   */
+  skipVisibleBody?: boolean;
 }
 
 /**

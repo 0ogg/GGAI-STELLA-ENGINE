@@ -1983,6 +1983,15 @@ export default class StellaEnginePlugin extends Plugin {
   }
 
   /**
+   * 삽화 출력 뷰를 닫는다 — 출력 위치를 '인라인'으로 되돌리면 호출된다(여는 것과 대칭).
+   * 열어 둔 채로 두면 인라인과 출력창이 같은 삽화를 따로 보여줘 분리된 것처럼 보인다.
+   */
+  closeIllustrationOutput(): void {
+    for (const leaf of this.findLeavesByStateType(VIEW_TYPE_ILLUSTRATION_OUTPUT))
+      leaf.detach();
+  }
+
+  /**
    * 스텔라 폰 열기 — PC·모바일 모두 오버레이(창처럼 뜨고 바깥 클릭/Esc 로 닫힘,
    * 싱글턴). 모바일은 프레임 없이 버튼만 보이는 풀 화면으로 렌더된다.
    */

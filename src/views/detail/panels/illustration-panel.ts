@@ -48,7 +48,9 @@ export function createIllustrationSettingsPanel(): SettingsPanel {
         activeId: resolveIllustrationOutput(settings.illustration?.output),
         onSelect: (output) => {
           void patchIllustration(ctx, { output });
+          // 출력 뷰 ↔ 인라인은 둘 중 하나만 보이는 토글이다 — 여는 것과 대칭으로 닫는다.
           if (output === "panel") void plugin.revealIllustrationOutput();
+          else plugin.closeIllustrationOutput();
         },
       });
 

@@ -16,6 +16,7 @@ import type {
   SummaryAnchor,
   SummaryCompaction,
 } from "../types/summary";
+import { sendablePassage } from "./ai-body-text";
 import { isAINode } from "./session-tree";
 import { applyPatch, pathToLeaf, spansLength } from "./session-text";
 
@@ -187,6 +188,50 @@ export function composeSummaryParts(
   leafId: string = session.meta.activeLeafId
 ): { past: string; state: string } {
   const { events, state } = effectiveEventsAndState(session, summaries, leafId);
+  return { past: formatPastBlock(events), state: formatStateBlock(state) };
+}
+
+/**
+ * 주입용 두 블록 — **전송 본문에 그대로 남아 있는 구간은 빼고** 합성한다.
+ * (`summarize.skipVisibleBody`) 요약이 커버한 대목이 본문으로도 통째로 들어가면
+ * 같은 내용을 두 번 보내는 셈이라, 그 앵커의 사건 요약만 뺀다.
+ *
+ * `visibleFromChar` = 전송 본문에서 실제로 살아남은 구간의 시작 글자 위치(본문은
+ * 늘 끝에서부터 남는다). 앵커의 커버 **시작**이 그보다 뒤면 통째로 보이는 구간이다.
+ * 「현재 상황」과 압축본(맨 앞부터 커버)은 언제나 남긴다.
+ */
+export function composeSummaryPartsExcludingVisible(
+  session: StellaSession,
+  summaries: SessionSummaries,
+  leafId: string,
+  hidden: ReadonlySet<string>,
+  visibleFromChar: number
+): { past: string; state: string } {
+  const { compaction, anchors } = collectEffectiveSummary(session, summaries, leafId);
+  const events: string[] = [];
+  if (compaction && compaction.events.trim() !== "") events.push(compaction.events.trim());
+  for (const a of anchors) {
+    const e = a.events.trim();
+    if (e === "") continue;
+    let start = 0;
+    if (a.fromNodeId) {
+      const len = sendablePassage(session, leafId, undefined, a.fromNodeId, hidden).length;
+      // 구간을 못 찾으면(다른 분기의 앵커 등) 판단하지 않고 남긴다.
+      if (len === 0) {
+        events.push(e);
+        continue;
+      }
+      start = len;
+    }
+    if (start >= visibleFromChar) continue; // 커버 구간이 통째로 본문에 있다
+    events.push(e);
+  }
+  const state =
+    anchors.length > 0
+      ? anchors[anchors.length - 1].state.trim()
+      : compaction
+      ? compaction.state.trim()
+      : "";
   return { past: formatPastBlock(events), state: formatStateBlock(state) };
 }
 

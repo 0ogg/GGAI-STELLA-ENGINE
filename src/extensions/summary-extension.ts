@@ -15,15 +15,43 @@ import type StellaEnginePlugin from "../main";
 import type {
   ContextContribution,
   ExtensionContextInput,
+  ExtensionReviseInput,
   GenerationCompleteInput,
   StellaExtension,
 } from "../services/extension-registry";
 import { createSummarySettingsPanel } from "../views/detail/panels/summary-panel";
 import {
-  composeSummaryContextForPath,
   composeSummaryParts,
+  composeSummaryPartsExcludingVisible,
 } from "../util/summarize-session";
 import { Notice } from "obsidian";
+
+/**
+ * 합성한 두 블록을 기여 형태로 — 나눠 배치면 「지난 이야기」를 확장 custom 슬롯으로
+ * 본문 앞(로어북 뒤)에 보내고 `summary` 슬롯에는 「현재 상황」만 남긴다.
+ * 기본 배치면 둘을 한 덩어리로 `summary` 슬롯에 넣는다(기존 자리 그대로).
+ */
+function summaryContributions(
+  parts: { past: string; state: string },
+  split: boolean
+): ContextContribution[] {
+  if (split) {
+    const out: ContextContribution[] = [];
+    if (parts.past) {
+      out.push({
+        slot: "custom",
+        text: parts.past,
+        name: "요약: 지난 이야기",
+        position: "after_char",
+        order: 90,
+      });
+    }
+    if (parts.state) out.push({ slot: "summary", text: parts.state });
+    return out;
+  }
+  const text = [parts.past, parts.state].filter((t) => t !== "").join("\n\n");
+  return text ? [{ slot: "summary", text }] : [];
+}
 
 function createSummaryExtension(): StellaExtension {
   return {
@@ -38,35 +66,46 @@ function createSummaryExtension(): StellaExtension {
         input.sessionFile
       );
 
-      // 나눠 배치 — 「지난 이야기」는 배경 지식이라 본문 앞(로어북 뒤)에 두고,
-      // 「현재 상황」만 기존 자리(작가노트 위 / 지정한 {{summary}} 자리)에 남긴다.
-      // 긴 과거 목록이 최근 본문 바로 앞에서 흐름을 희석시키지 않게 하는 배치다.
-      if (input.settings.summarize.splitPlacement === true) {
-        const { past, state } = composeSummaryParts(
-          input.session,
-          summaries,
-          input.leafId
-        );
-        const out: ContextContribution[] = [];
-        if (past) {
-          out.push({
-            slot: "custom",
-            text: past,
-            name: "요약: 지난 이야기",
-            position: "after_char",
-            order: 90,
-          });
-        }
-        if (state) out.push({ slot: "summary", text: state });
-        return out;
-      }
+      return summaryContributions(
+        composeSummaryParts(input.session, summaries, input.leafId),
+        input.settings.summarize.splitPlacement === true
+      );
+    },
 
-      const text = composeSummaryContextForPath(
+    /**
+     * 2차 기여 — 본문이 예산에 얼마나 들어갔는지 확정된 뒤, **본문에 그대로 남아
+     * 있는 구간의 사건 요약을 뺀다**(같은 내용을 두 번 보내지 않기). 뺄 게 없으면
+     * null 을 돌려 재조립을 시키지 않는다.
+     */
+    async reviseContext(
+      input: ExtensionReviseInput
+    ): Promise<ContextContribution[] | null> {
+      const summarize = input.settings.summarize;
+      if (summarize?.enabled !== true) return null;
+      if (summarize.skipVisibleBody !== true) return null;
+
+      // 살아남은 본문 구간의 시작 위치. 여유(10%)를 둬 경계에 걸친 앵커는 남긴다 —
+      // 글자 수는 근사치라, 덜 빼는 쪽으로 틀리는 게 맞다.
+      const visibleFromChar = Math.max(
+        0,
+        input.bodyText.length - Math.floor(input.visibleBodyChars * 0.9)
+      );
+      const summaries = await input.plugin.store.getSessionSummaries(
+        input.sessionFile
+      );
+      const full = composeSummaryParts(input.session, summaries, input.leafId);
+      const trimmed = composeSummaryPartsExcludingVisible(
         input.session,
         summaries,
-        input.leafId
+        input.leafId,
+        input.hiddenNodeIds,
+        visibleFromChar
       );
-      return text ? [{ slot: "summary", text }] : [];
+      if (trimmed.past === full.past) return null; // 뺄 게 없다 → 재조립 안 함
+      return summaryContributions(
+        trimmed,
+        summarize.splitPlacement === true
+      );
     },
 
     async onGenerationComplete(input: GenerationCompleteInput): Promise<void> {

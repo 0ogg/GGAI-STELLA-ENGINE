@@ -10,13 +10,16 @@
  *  - 문단 중간(또는 본문 끝 미완 꼬리)에서 끝났으면 → 그 문단 앞
  *    (= "마지막으로 끝난 문단 뒤, 미완 문단 앞").
  * 결과 offset 은 항상 문단 시작(또는 0/본문 끝)이라 문단 토큰/스팬 경계와 일치한다.
- * 노드의 기여 텍스트가 편집으로 전부 사라졌으면 앵커가 없다(인라인 미표시, 갤러리엔 유지).
+ * 노드가 글자를 썼다가 편집으로 전부 사라졌으면 앵커가 없다(인라인 미표시, 갤러리엔 유지).
+ * 반대로 애초에 자기 글자가 없는 노드(끝을 지우기만 한 편집)에 붙은 삽화는 그 편집이
+ * 일어난 지점에 그린다 — 숨기면 출력 뷰에만 뜨는 분리가 나기 때문.
  */
 
 import type { SessionIllustrations } from "../types/media";
 import type { StellaSession } from "../types/session";
 import { getActiveIllustration } from "./illustrations";
 import { buildNodeSegments } from "./node-segments";
+import { nodeOwnText, pathToLeaf } from "./session-text";
 
 export interface IllustrationAnchor {
   nodeId: string;
@@ -45,6 +48,21 @@ export function computeIllustrationAnchors(
     text += seg.text;
     lastEnd.set(seg.nodeId, text.length);
   }
+  // **자기 글자를 애초에 쓴 적이 없는 노드**(끝을 지우기만 한 편집 등)에 붙은 삽화도
+  // 자리를 준다 — 그건 "지워진 대목의 삽화"가 아니라 "지우기라는 동작에 잘못 매달린
+  // 삽화"라, 숨기면 출력 뷰에만 뜨는 분리가 난다(2026-08-19 사고). 자리는 경로에서
+  // 그 노드보다 앞선 노드들이 소유한 구간의 끝 중 가장 뒤 = 그 편집이 일어난 지점.
+  // 글자를 썼다가 나중 편집에 전부 지워진 노드는 그대로 미표시(갤러리엔 유지).
+  let reached = 0;
+  for (const node of pathToLeaf(session, leafId)) {
+    const own = lastEnd.get(node.id);
+    if (own !== undefined) {
+      reached = Math.max(reached, own);
+      continue;
+    }
+    if (nodeOwnText(node)) continue;
+    if (getActiveIllustration(illustrations, node.id)) lastEnd.set(node.id, reached);
+  }
   const anchors: IllustrationAnchor[] = [];
   for (const [nodeId, end] of lastEnd) {
     if (!getActiveIllustration(illustrations, nodeId)) continue;
@@ -53,6 +71,23 @@ export function computeIllustrationAnchors(
   // 같은 offset 은 문서 순서(안정 정렬 + Map 삽입 순서 = 마지막 기여 순) 유지.
   anchors.sort((a, b) => a.offset - b.offset);
   return anchors;
+}
+
+/**
+ * 삽화를 붙일 노드 — 기본은 활성 리프.
+ *
+ * 다만 활성 리프가 지금 본문에 자기 글자를 하나도 안 남기는 노드(끝을 지우기만 한
+ * 편집 등)이면, 본문 끝을 소유한 노드로 대체한다. 삽화는 "본문의 이 대목"에 붙는
+ * 것이지 "지우기라는 동작"에 붙는 게 아니고, 그런 노드에 붙으면 인라인이 자리를
+ * 못 찾아 출력 뷰에만 뜨는 분리가 난다(실제 사고: 끝을 지운 직후 삽화 생성).
+ */
+export function resolveIllustrationTargetNode(
+  session: StellaSession,
+  leafId: string = session.meta.activeLeafId
+): string {
+  const segments = buildNodeSegments(session, leafId);
+  if (segments.some((s) => s.nodeId === leafId)) return leafId;
+  return segments[segments.length - 1]?.nodeId ?? leafId;
 }
 
 /** 노드 기여 끝(end, exclusive) → 앵커 규칙 적용한 문단 경계 offset. */
