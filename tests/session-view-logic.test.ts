@@ -57,6 +57,7 @@ import {
   planSummaryBoundaries,
   recordSummaryAnchor,
   trimTrailingFragment,
+  composeSummaryPartsExcludingVisible,
   SUMMARY_PAST_HEADER,
   SUMMARY_STATE_HEADER,
 } from "../src/util/summarize-session";
@@ -2338,6 +2339,28 @@ const asyncTests: Promise<void>[] = [];
   );
   assert.equal(composeSummaryContext([]), "");
 
+  // 본문에 그대로 남아 있는 구간 빼기 — 본문 "Start. A. B. C." (앵커 b=0~12, c=12~15).
+  const noHidden = new Set<string>();
+  // 본문이 통째로 전송됨(0번째 글자부터 보임) → 사건 요약은 전부 빠지고 현재 상황만.
+  assert.equal(
+    composeSummaryPartsExcludingVisible(session, summaries, "c", noHidden, 0).past,
+    ""
+  );
+  assert.equal(
+    composeSummaryPartsExcludingVisible(session, summaries, "c", noHidden, 0).state,
+    `${SUMMARY_STATE_HEADER}\nS2`
+  );
+  // 12번째 글자부터만 보임 → c 구간(12~)은 본문에 있으니 빠지고 b 구간은 남는다.
+  assert.equal(
+    composeSummaryPartsExcludingVisible(session, summaries, "c", noHidden, 12).past,
+    `${SUMMARY_PAST_HEADER}\nE1`
+  );
+  // 13번째부터 보임 → c 구간은 앞부분이 잘려 나갔으므로 요약을 그대로 넣는다.
+  assert.equal(
+    composeSummaryPartsExcludingVisible(session, summaries, "c", noHidden, 13).past,
+    `${SUMMARY_PAST_HEADER}\nE1\n\nE2`
+  );
+
   // 패시지 끝의 미완성 문장 한 조각은 버린다 (다음 구간 리드인으로 따라간다).
   assert.equal(
     trimTrailingFragment("그는 문을 열었다.\n밖에는 아무도 없었다. 그때 무언가"),
@@ -2428,6 +2451,28 @@ const asyncTests: Promise<void>[] = [];
   );
   // 경로에 없는 노드를 경계로 주면 빈 구간 (다른 분기의 경계가 새지 않는다).
   assert.equal(textBetweenNodes(session, "c", undefined, "d"), "");
+
+  // 손편집으로 **고친** 대목도 원래 구간에 고친 내용으로 들어간다
+  // (user-edit 은 덮기 전 주인을 물려받는다 — 제보: "수정한 부분이 요약에 그대로").
+  const rewritten: StellaSession = {
+    ...session,
+    meta: { ...session.meta, activeLeafId: "f" },
+    nodes: {
+      ...session.nodes,
+      // " B." (offset 9~12) 를 " B2." 로 교체.
+      f: {
+        id: "f",
+        parent: "c",
+        kind: "user-edit",
+        patches: [
+          { op: "replace", from: 9, to: 12, spans: [{ author: "user", text: " B2." }] },
+        ],
+        createdAt: 7,
+      },
+    },
+  };
+  assert.equal(textBetweenNodes(rewritten, "f", "a", "b"), " B2.");
+  assert.equal(textBetweenNodes(rewritten, "f", "b", "c"), " C.");
 
   // 같은 노드 재기록은 createdAt 유지 + 내용 갱신.
   const updated = recordSummaryAnchor(summaries, {
