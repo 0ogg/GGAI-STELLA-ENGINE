@@ -1493,7 +1493,7 @@ class PhoneController extends Component {
       empty.createDiv({ text: "연락처가 비어 있습니다." });
       empty.createDiv({
         cls: "ggai-phone-empty-sub",
-        text: `세션을 함께 한 캐릭터를 [연락처 등록]으로 초대하면 여기에 나타나고, 등록한 캐릭터하고만 문자를 주고받습니다.`,
+        text: `이 계정으로 한 번이라도 같이 플레이한 캐릭터를 [연락처 등록]으로 초대하면 여기에 나타나고, 등록한 캐릭터하고만 문자를 주고받습니다. 찾는 캐릭터가 없으면 폰 위쪽에서 계정을 바꿔 보세요.`,
       });
       return;
     }

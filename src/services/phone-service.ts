@@ -314,7 +314,7 @@ export class PhoneService {
     personaFile: string,
     personaId: string
   ): Promise<PhoneContact[]> {
-    const all = await listPhoneContacts(this.plugin.store, personaFile);
+    const all = await listPhoneContacts(this.plugin.store, personaFile, personaId);
     const data = await this.plugin.store.getPhoneMessages(personaId);
     const registered = effectiveRegisteredIds(data);
     return all.filter((c) => registered.has(c.scenarioId));
@@ -325,7 +325,7 @@ export class PhoneService {
     personaFile: string,
     personaId: string
   ): Promise<PhoneContact[]> {
-    const all = await listPhoneContacts(this.plugin.store, personaFile);
+    const all = await listPhoneContacts(this.plugin.store, personaFile, personaId);
     const data = await this.plugin.store.getPhoneMessages(personaId);
     const registered = effectiveRegisteredIds(data);
     return all.filter((c) => !registered.has(c.scenarioId));

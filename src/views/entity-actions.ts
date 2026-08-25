@@ -23,6 +23,7 @@ import {
 } from "../import/parse-sillytavern-chat";
 import { buildChatImportSession } from "../util/build-chat-import";
 import type { SessionSeed } from "../util/new-session";
+import { rememberSessionPersona } from "../util/session-persona";
 import {
   buildChatEpisodeTailNodes,
   buildEpisodeTailNodes,
@@ -135,6 +136,7 @@ export async function createAndOpenSession(
     // 새 세션은 시작 시점의 활성 페르소나를 기억한다(없으면 기본 페르소나로 resolve).
     const activePersona = await plugin.resolveActiveUserProfile();
     result.session.meta.personaFile = activePersona.userFile;
+    rememberSessionPersona(result.session.meta, activePersona.profile.id);
     if (opts?.memory) result.session.meta.memory = opts.memory;
     if (opts?.authorNote) result.session.meta.authorNote = opts.authorNote;
     await plugin.store.saveSession(result.sessionFile, result.session);
@@ -406,6 +408,7 @@ export async function startNextEpisode(
       : undefined;
     ns.meta.variables = prev.meta.variables ? { ...prev.meta.variables } : undefined;
     ns.meta.personaFile = prev.meta.personaFile;
+    ns.meta.personaIds = prev.meta.personaIds ? [...prev.meta.personaIds] : undefined;
     ns.meta.enabledAgents = prev.meta.enabledAgents
       ? [...prev.meta.enabledAgents]
       : undefined;
@@ -909,6 +912,7 @@ export async function openGroupCreator(
       created.session.meta.groupId = group.group.id;
       const activePersona = await plugin.resolveActiveUserProfile();
       created.session.meta.personaFile = activePersona.userFile;
+      rememberSessionPersona(created.session.meta, activePersona.profile.id);
       await plugin.store.saveSession(created.sessionFile, created.session);
       await openSessionByPath(plugin, created.sessionFile);
       new Notice(`그룹 세션 생성: ${result.groupName}`);
@@ -1425,7 +1429,7 @@ async function performStChatImport(
       "",
       plugin.data.current,
       choice.mode,
-      { ...built, personaFile: persona.userFile }
+      { ...built, personaFile: persona.userFile, personaIds: [persona.profile.id] }
     );
 
     await openSessionByPath(plugin, result.sessionFile);

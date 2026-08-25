@@ -80,6 +80,7 @@ import { MODEL_KIND_DEFAULTS } from "./util/model-kind-policy";
 import type { SessionScrollAnchor } from "./util/session-anchor";
 import { clampSessionViewStyle, type SessionViewStyle } from "./util/view-style";
 import { ensureBaseFolders } from "./util/ensure-folders";
+import { rememberSessionPersona } from "./util/session-persona";
 import {
   buildDefaultIllustrationRegexScript,
   DEFAULT_ILLUSTRATION_REGEX_ID,
@@ -1298,10 +1299,16 @@ export default class StellaEnginePlugin extends Plugin {
     if (!sessionFile) return;
     try {
       const session = await this.store.getSession(sessionFile);
-      if (session && session.meta.personaFile !== userFile) {
+      if (!session) return;
+      // 이력은 추가만 — 도중에 페르소나를 바꿔도 옛 페르소나의 폰에서 이 캐릭터가
+      // 사라지지 않게 한다 (연락처 후보는 이력을 본다).
+      const profile = await this.store.getUserProfile(userFile);
+      let dirty = profile ? rememberSessionPersona(session.meta, profile.id) : false;
+      if (session.meta.personaFile !== userFile) {
         session.meta.personaFile = userFile;
-        await this.store.saveSession(sessionFile, session);
+        dirty = true;
       }
+      if (dirty) await this.store.saveSession(sessionFile, session);
     } catch (err) {
       console.warn("[GGAI Stella] 세션 페르소나 기억 실패:", err);
     }

@@ -13,6 +13,8 @@ export interface SessionPrefill {
   rootId: string;
   activeLeafId: string;
   personaFile?: string;
+  /** 함께한 페르소나 이력(추가만) — 폰 연락처 후보 판정이 본다. */
+  personaIds?: string[];
 }
 
 /**
@@ -45,6 +47,7 @@ export async function createNewSession(
     session.meta.rootId = prefill.rootId;
     session.meta.activeLeafId = prefill.activeLeafId;
     if (prefill.personaFile) session.meta.personaFile = prefill.personaFile;
+    if (prefill.personaIds?.length) session.meta.personaIds = [...prefill.personaIds];
   }
   const sessionFile = `${folder}/session.json`;
   await vault.create(sessionFile, JSON.stringify(session, null, 2));

@@ -30,9 +30,13 @@ export class PhoneContactModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.createEl("h3", { text: "연락처" });
+    // 규칙을 화면에 적어 둔다 — 목록에 없는 이유를 유저가 추측하지 않도록.
+    const loginName =
+      (await this.plugin.store.getUserProfile(this.personaFile).catch(() => null))
+        ?.name?.trim() || "이 계정";
     contentEl.createDiv({
       cls: "ggai-phone-contact-modal-sub",
-      text: "세션을 함께 한 캐릭터입니다. 체크한 캐릭터만 문자를 주고받습니다.",
+      text: `${loginName}(으)로 한 번이라도 같이 플레이한 캐릭터입니다. 체크한 캐릭터만 문자를 주고받습니다.`,
     });
 
     const [registered, candidates] = await Promise.all([
@@ -44,7 +48,7 @@ export class PhoneContactModal extends Modal {
     if (all.length === 0) {
       contentEl.createDiv({
         cls: "ggai-phone-contact-modal-empty",
-        text: "아직 후보가 없습니다 — 이 페르소나로 세션을 먼저 플레이해 보세요.",
+        text: `아직 후보가 없습니다 — ${loginName}(으)로 세션을 먼저 플레이하거나, 폰 위쪽에서 계정을 바꿔 보세요.`,
       });
       return;
     }

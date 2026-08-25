@@ -141,6 +141,13 @@ export interface SessionMeta {
    * 바꾸면 마지막 선택으로 덮어쓴다. 세션을 열면 이 페르소나로 활성 전환된다(전용 시나리오보다 우선).
    */
   personaFile?: string;
+  /**
+   * 이 세션을 함께 플레이한 페르소나 id 전부(중복 없음, 추가만 — 지우지 않는다).
+   * `personaFile` 은 "지금 이 세션의 페르소나" 하나뿐이라 도중에 바꾸면 옛 페르소나
+   * 기록이 사라졌다. 스텔라 폰 연락처 후보처럼 "한 번이라도 같이 했는가"를 묻는 쪽은
+   * 이 목록을 본다. 경로가 아니라 id 라서 페르소나 파일 이름이 바뀌어도 살아남는다.
+   */
+  personaIds?: string[];
   /** 시리즈(다음화) 연결 — 없으면 단독 세션. */
   series?: SessionSeriesLink;
   mode: SessionMode;
