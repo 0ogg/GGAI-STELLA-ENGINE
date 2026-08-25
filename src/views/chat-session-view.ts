@@ -67,6 +67,7 @@ import { readScenarioRegexScripts } from "../util/regex-scripts";
 import { listParagraphRanges } from "../util/paragraph-regen";
 import { attachLongPress } from "../util/long-press";
 import { PressMenuController } from "../util/press-menu";
+import { attachTapToEdit } from "../util/tap-to-edit";
 import {
   openExtensionActionsMenu,
   renderHeaderCommandBar,
@@ -1150,6 +1151,15 @@ export class ChatSessionView extends ItemView {
       });
       if (anonName) nameEl.addClass("is-anon-speaker");
       else if (speaker) nameEl.addClass(`is-speaker-${speaker.colorIndex % 6}`);
+      // 아바타·이름줄 꾹/우클릭 = 같은 메시지 메뉴 (글자가 없는 자리라 OS 선택과
+      // 겹치지 않는다 — 말풍선이 글자로 꽉 차 있어도 메뉴를 부를 곳이 있다).
+      for (const handle of [avatar, nameEl]) {
+        this.pressMenu.attachContextMenu(
+          handle,
+          (e) => this.openMessageMenu(index, e.clientX, e.clientY),
+          (x, y) => this.openMessageMenu(index, x, y)
+        );
+      }
       // AI 에 안 가는 메시지 표시 — ST 의 "눈감기기"와 같은 자리.
       if (hidden) {
         const mark = nameEl.createSpan({ cls: "ggai-chat-nosend-mark" });
@@ -1159,10 +1169,13 @@ export class ChatSessionView extends ItemView {
       const bubble = stack.createDiv({ cls: "ggai-chat-bubble" });
       bubble.dataset.index = String(index);
       // 말풍선 우클릭(모바일: 꾹) = 메시지 메뉴. 끝 메시지가 아니어도 지울 수 있다.
+      // 모바일에서 글자 위 꾹은 OS 몫 — 단어 선택 → 사전(조회)/웹 검색이 살아야
+      // 한다. 그래서 메뉴는 여백·아바타·이름줄에서 부른다(아래).
       this.pressMenu.attachContextMenu(
         bubble,
         (e) => this.openMessageMenu(index, e.clientX, e.clientY),
-        (x, y) => this.openMessageMenu(index, x, y)
+        (x, y) => this.openMessageMenu(index, x, y),
+        { yieldToTextSelection: true }
       );
 
       const generatingThis =
@@ -2488,6 +2501,8 @@ export class ChatSessionView extends ItemView {
         }
       })();
     });
+    // 모바일 — 스크롤 끝에서 편집이 열리지 않도록 제자리 탭에만 반응하게 잠근다.
+    attachTapToEdit(bubble);
   }
 
   // ── 번역 보기 직접 편집 (문단별 user-edit variant — 본문 불변) ────────
@@ -2546,6 +2561,7 @@ export class ChatSessionView extends ItemView {
     bubble.addEventListener("blur", () => {
       void this.endTranslationBubbleEdit(bubble);
     });
+    attachTapToEdit(bubble);
   }
 
   /** 편집 진입 — 표시본을 "문단 스팬 + 원자 구분자" raw 구조로 스왑. */

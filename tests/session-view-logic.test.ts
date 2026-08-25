@@ -31,6 +31,7 @@ import {
   parseLorebookSelectionResponse,
 } from "../src/util/lorebook-ai-select";
 import { paramsToOverride } from "../src/util/generation-params";
+import { planStreamTail } from "../src/util/stream-tail";
 import { buildSummaryPrompt } from "../src/util/generate-summary";
 import { applyMacros } from "../src/util/macros";
 import { normalizeMessagesForChat } from "../src/util/normalize-messages";
@@ -1816,10 +1817,50 @@ const asyncTests: Promise<void>[] = [];
   assert.ok(regenCtx.includes("[Story so far]"));
   assert.ok(regenCtx.includes("[Preceding paragraphs]"));
   assert.ok(regenCtx.includes("[Following paragraphs]"));
-  // 참고 블록은 대상 passage/지침 앞에 놓인다. 맥락 없으면 기존 동작(지침만).
-  const regenBody = buildParagraphRegenBody("Gen:", "타겟", { context: regenCtx });
+  // 배치: 참고 블록 → 지침(+추가 지시) → 대상 passage(구분자, 맨 마지막).
+  const regenBody = buildParagraphRegenBody("고쳐 써", "타겟", {
+    context: regenCtx,
+    feedback: "더 짧게",
+  });
   assert.ok(regenBody.startsWith(regenCtx));
-  assert.equal(buildParagraphRegenBody("Gen:", "타겟"), "타겟\n\nGen:");
+  assert.ok(regenBody.endsWith("<<<\n타겟\n>>>"));
+  // 추가 지시는 대상 바로 앞 (예전엔 프롬프트 꼬리 뒤 = 생성 유도 문구 뒤로 밀렸다).
+  assert.ok(
+    regenBody.indexOf("Additional instruction: 더 짧게") <
+      regenBody.indexOf(`<<<\n타겟`)
+  );
+  assert.equal(
+    buildParagraphRegenBody("고쳐 써", "타겟"),
+    "── Instructions ──\n고쳐 써\n\n" +
+      "── Passage to rewrite (rewrite exactly this, nothing else) ──\n<<<\n타겟\n>>>"
+  );
+  // {{main}} 을 쓴 프롬프트는 사용자가 정한 위치를 존중하되 대상은 늘 구분자로 감싼다
+  // (생성 유도 문구가 대상 뒤에 남아야 한다 — 기본 프롬프트 형태).
+  assert.equal(
+    buildParagraphRegenBody("{{main}}\n\n고쳐 쓴 대목:", "타겟", { feedback: "짧게" }),
+    "Additional instruction: 짧게\n\n<<<\n타겟\n>>>\n\n고쳐 쓴 대목:"
+  );
+  // {{lorebook}} 슬롯은 참고 자료 자리 — 세션 맥락도 거기 합류한다(번역과 같은 규약).
+  const macroBody = buildParagraphRegenBody(
+    "# 참고\n{{lorebook}}\n\n# 대목\n{{main}}\n\n고쳐 쓴 대목:",
+    "타겟",
+    { lorebook: "설정", context: regenCtx }
+  );
+  assert.ok(macroBody.startsWith("# 참고\n설정\n\n"));
+  assert.ok(macroBody.indexOf(regenCtx) < macroBody.indexOf("# 대목"));
+  assert.ok(macroBody.endsWith("<<<\n타겟\n>>>\n\n고쳐 쓴 대목:"));
+  // 로어북 — {{lorebook}} 이 있으면 그 자리, 없으면 라벨 붙은 참고 블록으로 맨 앞에.
+  assert.equal(
+    buildParagraphRegenBody("용어: {{lorebook}}", "타겟", { lorebook: "설정" }),
+    "── Instructions ──\n용어: 설정\n\n" +
+      "── Passage to rewrite (rewrite exactly this, nothing else) ──\n<<<\n타겟\n>>>"
+  );
+  const loreBody = buildParagraphRegenBody("고쳐 써", "타겟", {
+    lorebook: "설정",
+    context: regenCtx,
+  });
+  assert.ok(loreBody.startsWith("── Glossary / world info (reference only) ──"));
+  assert.ok(loreBody.indexOf("설정") < loreBody.indexOf(regenCtx));
 
   // 자동 번역 경계 — fromOffset 이후에 끝나는 미번역 문단만 (과거 본문 제외).
   // text = 'AA.\n\n"BB."\nCC.\n\n"BB."' 에서 CC. 는 offset 11~14.
@@ -4848,4 +4889,70 @@ function makeFakePng(): Uint8Array {
     ...chunk("IHDR", [0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0]),
     ...chunk("IEND", []),
   ]);
+}
+
+// ── 스트리밍 tail: 매 조각마다 "쓰고 있는 한 줄"만 다시 그린다 — stream-tail.ts ──
+//
+// 회귀 대상: 조각이 올 때마다 tail 전체를 지웠다 다시 만들던 방식.
+// 비용이 생성 길이의 제곱으로 늘고, 지운 순간 높이가 0 이 되어 스크롤이 튀었다.
+{
+  // 스트리밍을 그대로 재생하며, 실제 렌더가 하는 것과 같은 순서로 조각을 굳힌다.
+  const replay = (chunks: string[]) => {
+    let prev = "";
+    let committed = 0;
+    let frozen = ""; // 굳혀 그린 것 (다시 안 건드림)
+    let open = ""; // 지금 쓰고 있는 줄 (매번 다시 그림)
+    let resets = 0;
+    let redrawn = 0; // 다시 그린 총 글자 수 = 실제 DOM 작업량
+    let text = "";
+    for (const chunk of chunks) {
+      text = text.startsWith(prev) || prev === "" ? text + chunk : chunk;
+      const plan = planStreamTail(prev, committed, text);
+      if (plan.reset) {
+        resets++;
+        frozen = "";
+        committed = 0;
+      }
+      if (plan.commitTo > plan.commitFrom) {
+        frozen += text.slice(plan.commitFrom, plan.commitTo);
+        committed = plan.commitTo;
+      }
+      open = text.slice(plan.openFrom);
+      redrawn += open.length;
+      prev = text;
+    }
+    return { shown: frozen + open, resets, redrawn, committed };
+  };
+
+  // 화면에 보이는 결과는 옛 방식(매번 전문 재생성)과 글자 단위로 같아야 한다.
+  const story = "그는 고개를 들었다.\n*무언가 잘못됐다.*\n아무도 답하지 않았다.";
+  const chunks = story.match(/.{1,3}/gs) ?? [];
+  const run = replay(chunks);
+  assert.equal(run.shown, story, "덧붙이기만 해도 표시 결과는 전문과 같다");
+  assert.equal(run.resets, 0, "뒤에 붙기만 하면 통째로 다시 그리지 않는다");
+
+  // 비용: 다시 그리는 양이 "지금 쓰는 줄" 길이로 묶여, 생성이 길어져도 안 터진다.
+  const longest = Math.max(...story.split("\n").map((l) => l.length));
+  assert.ok(
+    run.redrawn <= chunks.length * (longest + 1),
+    "다시 그리는 양은 줄 길이에 묶인다 (제곱으로 늘지 않는다)"
+  );
+
+  // 줄바꿈이 지나간 줄은 굳는다 — 그 뒤로는 그 구간을 건드리지 않는다.
+  assert.equal(
+    run.committed,
+    story.lastIndexOf("\n") + 1,
+    "마지막 줄바꿈까지가 굳은 구간"
+  );
+
+  // 되받아쓰기 앵커 판정으로 표시량이 되돌아가면(생성 초반) 그때만 처음부터 다시.
+  const shrink = planStreamTail("앞 문장을 받아썼다. 이어서", 0, "이어서");
+  assert.equal(shrink.reset, true, "앞이 달라지면 굳힌 것을 버린다");
+  assert.equal(shrink.commitFrom, 0);
+
+  // 한 줄 안에서 글자만 늘어나는 동안은 굳힐 것이 없다(닫는 `**` 를 기다리는 구간).
+  const midLine = planStreamTail("**굵게", 0, "**굵게 되는");
+  assert.equal(midLine.reset, false);
+  assert.equal(midLine.commitTo, midLine.commitFrom, "줄이 안 끝나면 굳히지 않는다");
+  assert.equal(midLine.openFrom, 0, "그 줄 전체를 다시 그려 표시가 제때 바뀐다");
 }

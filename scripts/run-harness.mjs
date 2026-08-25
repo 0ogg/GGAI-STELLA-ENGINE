@@ -17,6 +17,8 @@ const testNames = [
   "repetition",
   "branch-map",
   "illustration-anchors",
+  "card-instructions",
+  "qr-jjangdol",
 ];
 const testEntries = testNames.map((n) => path.join(root, "tests", `${n}.test.ts`));
 

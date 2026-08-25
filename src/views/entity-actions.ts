@@ -480,7 +480,7 @@ export async function copyScenarioWithPrompt(
  * 내보낸 파일을 **기기에 다운로드**한다(vault 안이 아니라 OS 다운로드 폴더 —
  * 실리태번 등 외부 앱으로 바로 옮길 수 있게). 모든 익스포트가 이 함수를 쓴다.
  */
-function downloadExport(
+export function downloadExport(
   filename: string,
   data: string | Uint8Array,
   mime: string

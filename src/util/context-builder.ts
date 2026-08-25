@@ -27,6 +27,16 @@ import {
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 1024;
 
+/** ST 캐릭터 카드의 깊이 프롬프트(`extensions.depth_prompt`). */
+export interface CardDepthPrompt {
+  prompt?: string;
+  depth?: number;
+  role?: string;
+}
+
+/** ST 기본값 — 카드 깊이 프롬프트는 대화 끝에서 4번째 자리에 system 으로. */
+const CARD_DEPTH_PROMPT_DEFAULT_DEPTH = 4;
+
 export type ChatMessage = {
   role: "system" | "user" | "assistant";
   content: string;
@@ -62,7 +72,8 @@ export interface ContextBuilderInputV2 {
     first_message?: string;
     system_prompt?: string;
     post_history_instructions?: string;
-    depth_prompt?: string;
+    /** ST 카드 깊이 프롬프트 — 문자열 또는 `{prompt, depth, role}`. */
+    depth_prompt?: string | CardDepthPrompt;
     creator_notes?: string;
     character_version?: string;
   };
@@ -179,13 +190,42 @@ export function buildContext(
   // 매크로는 실제로 확장되는 **모든** 자리(프롬프트 항목·마커 가공 템플릿·세션 메모·
   // 작가노트·매칭된 로어북·본문)에서 찾는다. 프롬프트 항목만 보면 나머지 자리에 쓴
   // 매크로가 "옮기기"가 아니라 "한 번 더 삽입"이 되어 같은 내용이 두 번 들어간다.
-  const macroTexts = macroPlacementTexts(
-    input,
-    matched.map((m) => m.entry)
-  );
+  const matchedEntries = matched.map((m) => m.entry);
+
+  // 카드에 박힌 지침 3종 — 매크로로 자리를 지정했으면 그 자리를 존중하고,
+  // 지정이 없으면 ST 기본 자리에 자동으로 넣는다 (페르소나/요약과 같은 규칙).
+  //  - 시스템 프롬프트      → 메인 프롬프트(main) 자리를 카드 내용으로 대체
+  //  - 포스트 히스토리 지시문 → jailbreak 자리(대화 기록 뒤)를 카드 내용으로 대체
+  //  - 깊이 프롬프트        → 대화 기록의 depth 자리에 주입 (ST 기본 depth 4 / system)
+  // 프리셋에 해당 항목이 아예 없을 때만 폴백 위치로 넣는다. 항목이 있는데 꺼져 있으면
+  // = 사용자가 일부러 끈 것이므로 넣지 않는다 (로어북 폴백과 같은 판단).
+  const cardPrompt = (input.scenario.system_prompt ?? "").trim()
+    ? (input.scenario.system_prompt as string)
+    : "";
+  const cardInstruction = (input.scenario.post_history_instructions ?? "").trim()
+    ? (input.scenario.post_history_instructions as string)
+    : "";
+  const cardDepth = normalizeCardDepthPrompt(input.scenario.depth_prompt);
+  const presetHasItem = (identifier: string) =>
+    input.preset.prompts.some((item) => item.identifier === identifier);
+
+  // 자리 지정 매크로 탐색 — 내용이 카드 지침으로 **대체될** 항목은 후보에서 뺀다.
+  // 대체되면 거기 쓰여 있던 매크로도 함께 사라지므로, 그걸 "자리 지정"으로 세면
+  // 자동 삽입까지 막혀 내용이 통째로 증발한다. 그래서 대체가 확정된 순서대로
+  // (시스템 프롬프트 → 지시문 → 깊이/요약) 후보를 좁혀가며 판정한다.
+  const replaced = new Set<string>();
+  const poolUses = (re: RegExp) =>
+    macroPlacementTexts(input, matchedEntries, replaced).some((t) => re.test(t));
+  const autoCardPrompt = !!cardPrompt && !poolUses(CHAR_PROMPT_MACRO_RE);
+  if (autoCardPrompt) replaced.add("main");
+  const autoCardInstruction =
+    !!cardInstruction && !poolUses(CHAR_INSTRUCTION_MACRO_RE);
+  if (autoCardInstruction) replaced.add("jailbreak");
+  const cardDepthExplicit = poolUses(CHAR_DEPTH_PROMPT_MACRO_RE);
+
+  // 요약 자리 — chatSummary 마커가 켜져 있거나 {{summary}} 가 쓰이면 그 자리를 존중.
   const summaryExplicit =
-    activeMarkers.has("chatSummary") ||
-    macroTexts.some((t) => SUMMARY_MACRO_RE.test(t));
+    activeMarkers.has("chatSummary") || poolUses(SUMMARY_MACRO_RE);
 
   // ── 3. 매크로 컨텍스트 ───────────────────────────────────────────
   const wiBefore = renderLorebookEntries(lorebookByPos.before_char);
@@ -196,6 +236,7 @@ export function buildContext(
   ]);
   const dialogueExamples = formatDialogueExamples(input.scenario.mes_example ?? "");
   const lastMessage = lastNonEmptyMessage(input.sessionLog);
+  const lastCharMessage = lastNonEmptyMessage(input.sessionLog, "assistant");
   const choices = resolveChoiceMacros(input.preset.choices ?? [], input.choiceValues);
   const shouldAutoInsertPersona = !presetUsesPersonaMacro(input.preset);
   let autoPersonaInserted = false;
@@ -221,10 +262,11 @@ export function buildContext(
     summary: input.summary,
     charPrompt: input.scenario.system_prompt,
     charInstruction: input.scenario.post_history_instructions,
-    charDepthPrompt: input.scenario.depth_prompt,
+    charDepthPrompt: cardDepth.text,
     charCreatorNotes: input.scenario.creator_notes,
     charVersion: input.scenario.character_version,
     lastMessage,
+    lastCharMessage,
     idleDuration: input.idleDuration,
     variables: input.variables,
     choices,
@@ -423,7 +465,14 @@ export function buildContext(
         const inserted = pushPersonaMessage(fixedMessages, input.persona?.description ?? "", macroCtx);
         autoPersonaInserted = autoPersonaInserted || inserted;
       }
-      const content = applyMacros(item.content, macroCtx);
+      // 카드 지침 대체 — ST 의 Prefer Char. Prompt / Prefer Char. Instructions 와 같다.
+      let itemContent = item.content;
+      if (autoCardPrompt && item.identifier === "main") {
+        itemContent = cardPrompt;
+      } else if (autoCardInstruction && item.identifier === "jailbreak") {
+        itemContent = cardInstruction;
+      }
+      const content = applyMacros(itemContent, macroCtx);
       if (!content.trim()) {
         trace.push({ id: item.id, identifier: item.identifier, included: false, reason: "empty" });
         continue;
@@ -458,6 +507,35 @@ export function buildContext(
       source: { type: "fallback", label: "Lorebook fallback" },
       contextKind: "prompt",
     });
+  }
+
+  // 카드 지침 폴백 — 프리셋에 그 자리(main/jailbreak)가 아예 없는 세트용.
+  // 시스템 프롬프트는 맨 앞, 포스트 히스토리 지시문은 대화 기록 뒤(= 맨 끝).
+  if (autoCardPrompt && !presetHasItem("main")) {
+    const content = applyMacros(cardPrompt, macroCtx);
+    if (content.trim()) {
+      fixedMessages.unshift({
+        role: "system",
+        content,
+        source: { type: "scenario", label: "Scenario: system prompt" },
+        contextKind: "prompt",
+      });
+    }
+  }
+  let trailingCardInstruction: ChatMessage | null = null;
+  if (autoCardInstruction && !presetHasItem("jailbreak")) {
+    const content = applyMacros(cardInstruction, macroCtx);
+    if (content.trim()) {
+      trailingCardInstruction = {
+        role: "system",
+        content,
+        source: { type: "scenario", label: "Scenario: post-history instructions" },
+        contextKind: "prompt",
+      };
+      // chatHistory 마커가 있으면 그 뒤 = 배열 끝. 없으면 본문을 끝에 붙이므로
+      // 최종 조립에서 본문 다음에 넣는다 (지시문은 언제나 기록 뒤여야 한다).
+      if (chatHistoryIdx !== -1) fixedMessages.push(trailingCardInstruction);
+    }
   }
 
   // ── 5. chatHistory 확장 ──────────────────────────────────────────
@@ -516,6 +594,20 @@ export function buildContext(
       }))
       .filter((m) => m.content.trim());
     if (msgs.length > 0) chatHistory.splice(pos, 0, ...msgs);
+  }
+
+  // 5a'. 카드 깊이 프롬프트 — 자리 지정 매크로가 없을 때만 depth 자리에 주입.
+  if (cardDepth.text.trim() && !cardDepthExplicit) {
+    const content = applyMacros(cardDepth.text, macroCtx);
+    if (content.trim()) {
+      const pos = Math.max(0, chatHistory.length - cardDepth.depth);
+      chatHistory.splice(pos, 0, {
+        role: cardDepth.role,
+        content,
+        contextKind: "injection",
+        source: { type: "scenario", label: "Scenario: depth prompt" },
+      });
+    }
   }
 
   // 5b. ABSOLUTE text 항목 — depth 내림차순, 같은 depth 에서 injectionOrder 오름차순
@@ -734,6 +826,7 @@ export function buildContext(
   // chatHistory marker 없으면 끝에 붙임
   if (chatHistoryIdx === -1) {
     finalMessages.push(...includedHistory);
+    if (trailingCardInstruction) finalMessages.push(trailingCardInstruction);
   }
   const tokensUsed = totalMessageTokens(finalMessages, count);
 
@@ -854,9 +947,12 @@ function formatDialogueExamples(text: string): string {
 }
 
 function lastNonEmptyMessage(
-  log: { role: "user" | "assistant"; content: string }[]
+  log: { role: "user" | "assistant"; content: string }[],
+  /** 지정하면 그 역할의 마지막 발화만 — `{{lastCharMessage}}` 용. */
+  role?: "user" | "assistant"
 ): string {
   for (let i = log.length - 1; i >= 0; i--) {
+    if (role && log[i].role !== role) continue;
     const content = log[i].content;
     if (content.trim()) return content;
   }
@@ -894,16 +990,60 @@ function pushPersonaMessage(
 const SUMMARY_MACRO_RE = /\{\{\s*summary\s*\}\}/i;
 
 /**
+ * 카드 지침 3종의 "자리 지정" 매크로. 하나라도 쓰였으면 그 자리를 존중하고
+ * 자동 삽입하지 않는다 (요약/페르소나와 같은 규칙).
+ * 시스템 프롬프트는 `{{charPrompt}}` 와 `{{system}}` 둘 다 같은 값을 가리킨다.
+ */
+const CHAR_PROMPT_MACRO_RE = /\{\{\s*(?:charPrompt|system)\s*\}\}/i;
+const CHAR_INSTRUCTION_MACRO_RE = /\{\{\s*charInstruction\s*\}\}/i;
+const CHAR_DEPTH_PROMPT_MACRO_RE = /\{\{\s*charDepthPrompt\s*\}\}/i;
+
+/** 카드 깊이 프롬프트의 문자열만 — 매크로 표시용(뷰에서도 같은 해석을 쓴다). */
+export function cardDepthPromptText(
+  value: string | CardDepthPrompt | undefined
+): string {
+  return normalizeCardDepthPrompt(value).text;
+}
+
+/**
+ * 카드 깊이 프롬프트 정규화. ST 는 `{prompt, depth, role}` 객체로 저장하지만
+ * 문자열로 들고 있는 카드도 있어 둘 다 받는다.
+ */
+function normalizeCardDepthPrompt(
+  value: string | CardDepthPrompt | undefined
+): { text: string; depth: number; role: "system" | "user" | "assistant" } {
+  const fallback = {
+    text: "",
+    depth: CARD_DEPTH_PROMPT_DEFAULT_DEPTH,
+    role: "system" as const,
+  };
+  if (!value) return fallback;
+  if (typeof value === "string") return { ...fallback, text: value };
+  const role = value.role;
+  return {
+    text: typeof value.prompt === "string" ? value.prompt : "",
+    depth:
+      typeof value.depth === "number" && Number.isFinite(value.depth)
+        ? Math.max(0, Math.floor(value.depth))
+        : CARD_DEPTH_PROMPT_DEFAULT_DEPTH,
+    role: role === "user" || role === "assistant" ? role : "system",
+  };
+}
+
+/**
  * 자리 지정 매크로({{summary}})가 실제로 확장되는 자리의 원문 전부.
  * 프롬프트 항목만 보면 나머지 자리에 쓴 매크로가 배치가 아니라 "한 번 더 삽입"이 된다.
  */
 function macroPlacementTexts(
   input: ContextBuilderInputV2,
-  matchedEntries: StellaLorebookEntry[]
+  matchedEntries: StellaLorebookEntry[],
+  /** 내용이 카드 지침으로 대체될 항목 — 거기 쓰인 매크로는 사라지므로 세지 않는다. */
+  replacedIdentifiers?: ReadonlySet<string>
 ): string[] {
   const texts: string[] = [];
   for (const item of input.preset.prompts) {
     if (!item.enabled) continue;
+    if (replacedIdentifiers?.has(item.identifier)) continue;
     if (item.kind === "text") texts.push(item.content);
     else if (item.wrap) texts.push(item.wrap);
   }

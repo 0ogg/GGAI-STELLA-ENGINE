@@ -33,6 +33,8 @@ export interface MacroContext {
   charCreatorNotes?: string;
   charVersion?: string;
   lastMessage?: string;
+  /** ST `{{lastCharMessage}}` — 마지막 **캐릭터(AI)** 발화. */
+  lastCharMessage?: string;
   /** 마지막 노드 이후 경과 표현 (예: "3 hours") — ST {{idle_duration}} 호환. */
   idleDuration?: string;
   variables?: Record<string, string>;
@@ -78,6 +80,7 @@ const SUPPORTED_MACROS: ReadonlyArray<keyof MacroContext> = [
   "charCreatorNotes",
   "charVersion",
   "lastMessage",
+  "lastCharMessage",
   "idleDuration",
 ];
 const SUPPORTED_SET = new Set<string>(SUPPORTED_MACROS);
@@ -98,6 +101,7 @@ const MACRO_ALIASES: ReadonlyMap<string, keyof MacroContext> = new Map([
   ["charcreatornotes", "charCreatorNotes"],
   ["charversion", "charVersion"],
   ["lastmessage", "lastMessage"],
+  ["lastcharmessage", "lastCharMessage"],
   ["idle_duration", "idleDuration"],
 ]);
 
@@ -112,6 +116,12 @@ function resolveMacro(match: string, key: string, ctx: MacroContext): string {
 
   if (k.startsWith("random::")) {
     return weightedRandom(k.slice("random::".length).split("::"));
+  }
+
+  // ST 원본의 기본형 — `{{random:a,b,c}}` 쉼표 목록. 항목에 쉼표가 들어가야 하면
+  // `::` 형식을 쓴다(위). 숫자 범위 `random:1:6` 은 앞에서 이미 걸러졌다.
+  if (/^random:/i.test(k)) {
+    return weightedRandom(k.slice("random:".length).split(","));
   }
 
   const choiceMatch = k.match(/^choice:(.+)$/);

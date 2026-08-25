@@ -14,7 +14,7 @@
  * AI 호출은 전부 `plugin.ai` 경유, 저장은 전부 `plugin.store` 경유 (CLAUDE.md 6·7).
  */
 
-import { Notice } from "obsidian";
+import { Notice, Platform } from "obsidian";
 import type StellaEnginePlugin from "../main";
 import type { SessionNode, StellaSession } from "../types/session";
 import { planSessionRequest } from "../util/build-session-context";
@@ -27,11 +27,17 @@ import {
   parseMessageIndices,
   parseQrLabels,
   parseQrScript,
+  isQrFlagOn,
   runQrRegex,
+  runQrRegexReplace,
+  unescapeQrBraces,
   unquoteQrBody,
   type QrCommand,
 } from "../util/qr-script";
+import { buildChatLog } from "../util/chat-messages";
+import { nodeOwnText, pathToLeaf } from "../util/session-text";
 import { buildSpans, spansToText } from "../util/session-text";
+import { downloadExport } from "../views/entity-actions";
 import {
   diffVariables,
   GLOBAL_VAR_PREFIX,
@@ -39,6 +45,7 @@ import {
 } from "../util/variables";
 import { uuidv4 } from "../util/uuid";
 import { ChoiceModal, PromptModal } from "../views/modals";
+import { detectFormat, type ImportFormat } from "../import/detect";
 import { flushQrInjections, setQrInjection } from "./qr-injections";
 
 /** 실행 호스트 — 커맨드가 아닌 텍스트를 세션에 넣는 방법(뷰마다 다르다). */
@@ -275,6 +282,23 @@ async function runCommand(state: QrRunState, cmd: QrCommand): Promise<string> {
       return runQrRegex(find, body(), cmd.named.first !== undefined);
     }
 
+    case "re-replace": {
+      // 정규식 치환 — 내보낼 텍스트를 다듬는 용도(토큰 → 매크로 등).
+      const find = cmd.named.find === undefined ? "" : expand(state, cmd.named.find);
+      const replace =
+        cmd.named.replace === undefined
+          ? ""
+          : unquoteQrBody(expand(state, cmd.named.replace));
+      return runQrRegexReplace(find, replace, body());
+    }
+
+    case "send":
+      // ST `/send` = 유저 발화를 대화에 남기기만 한다(생성 없음).
+      return await runSend(state, unquoteQrBody(body()));
+
+    case "download":
+      return await runDownload(state, arg("name"), arg("ext"), body());
+
     case "inject":
       return runInject(state, cmd, arg, body());
 
@@ -398,8 +422,10 @@ function runInject(
     position: pos === "chat" ? "at_depth" : "after_char",
     depth: Number.isFinite(depthArg) ? Math.max(0, depthArg) : 0,
     role: roleArg === "user" || roleArg === "assistant" ? roleArg : "system",
-    // ST 기본은 지속. `ephemeral=true` 면 다음 생성 한 번 뒤 사라진다.
-    ephemeral: /^(true|1)$/i.test(arg("ephemeral").trim()),
+    // ST 기본은 지속. `ephemeral` 이 켜져 있으면 다음 생성 한 번 뒤 사라진다.
+    // 실물 QR 은 `ephemeral=on` 으로 적는다 — `true|1` 만 보면 **영구 주입**이 되어
+    // 버튼을 한 번 누른 뒤 모든 생성에 그 지시가 계속 따라붙는다(세션 오염).
+    ephemeral: isQrFlagOn(cmd.named.ephemeral, arg("ephemeral")),
   });
   return text;
 }
@@ -416,6 +442,171 @@ function runInject(
  *    **본문에 `이름:` 접두어를 박지 않는다** — 본문은 문자 오프셋 기준이라 접두어가
  *    편집/번역/삽화 앵커를 전부 밀어낸다.
  */
+/**
+ * `/send <내용>` — 유저 발화로 대화에 남긴다. **생성은 하지 않는다**(ST 동작 그대로).
+ * `/sendas` 의 유저 판이라 같은 append 경로를 쓰고 author/kind 만 다르다.
+ */
+async function runSend(state: QrRunState, text: string): Promise<string> {
+  const file = state.host.sessionFile();
+  if (!file || !text.trim()) return text;
+  await appendSessionMessage(state, file, text, "user");
+  return text;
+}
+
+/** 임포트 형식 → 사용자에게 보일 이름. */
+const IMPORT_FORMAT_LABELS: Partial<Record<ImportFormat, string>> = {
+  "charactercard-v3": "캐릭터 카드",
+  "charactercard-v2": "캐릭터 카드",
+  "charactercard-v1": "캐릭터 카드",
+  charx: "캐릭터 카드(CHARX)",
+  "sillytavern-worldinfo": "로어북",
+  "novelai-lorebook": "로어북",
+  "sillytavern-prompt-preset": "프롬프트 세트",
+  "sillytavern-quick-reply": "빠른 답장 세트",
+  "sillytavern-regex": "정규식 스크립트",
+  "novelai-scenario": "시나리오",
+  "novelai-story": "세션",
+};
+
+/**
+ * `/download name=<파일명> ext=<확장자>` — 앞 커맨드가 넘긴 텍스트를 파일로 만든다.
+ *
+ * **저장은 언제나 볼트 안**(`GGAI/DOWNLOADS/`)이다 — 브라우저 다운로드는 모바일
+ * 옵시디언에서 막히지만 볼트 파일은 어느 기기에서나 열고 옮길 수 있다. 저장한 뒤
+ * 내용이 우리가 아는 형식이면(캐릭터 카드/로어북/프롬프트 세트 등) 그 자리에서
+ * **바로 임포트**할지 물어본다 — 카드를 뽑아 놓고 다시 가져오기를 찾아 헤매지 않게.
+ * 데스크톱에서는 OS 다운로드 폴더로 보내는 선택지도 함께 준다(외부 앱으로 옮기기).
+ */
+async function runDownload(
+  state: QrRunState,
+  name: string,
+  ext: string,
+  text: string
+): Promise<string> {
+  if (!text.trim()) {
+    new Notice("내보낼 내용이 없습니다.");
+    return text;
+  }
+  // 파일명에 경로 구분자가 섞이면 저장이 실패한다 — 이름만 남긴다.
+  const base =
+    unquoteQrBody(name).trim().replace(/[\\\/:*?"<>|]/g, "_") || "download";
+  const suffix = unquoteQrBody(ext).trim().replace(/^\./, "") || "txt";
+  const filename = `${base}.${suffix}`;
+
+  let path: string;
+  try {
+    path = await state.plugin.store.saveDownloadFile(base, suffix, text);
+  } catch (err) {
+    new Notice(
+      `저장 실패: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return text;
+  }
+
+  const format = detectDownloadFormat(text);
+  const label = format ? IMPORT_FORMAT_LABELS[format] : undefined;
+  const buttons: { text: string; value: string; cta?: boolean }[] = [];
+  if (label) buttons.push({ text: `${label}로 가져오기`, value: "import", cta: true });
+  // 파일을 **밖으로** 빼는 길은 기기마다 다르다 — 플랫폼으로 단정하지 않고 실제로
+  // 쓸 수 있는 수단만 띄운다. 데스크톱은 OS 다운로드 폴더, 모바일은 공유 시트.
+  // 둘 다 없어도 볼트 파일은 이미 저장돼 있으므로 파일을 잃지 않는다.
+  if (!Platform.isMobile) {
+    buttons.push({ text: "다운로드 폴더로 보내기", value: "download" });
+  } else if (canShareFile()) {
+    buttons.push({ text: "다른 앱으로 보내기", value: "share" });
+  }
+  if (buttons.length === 0) {
+    new Notice(`저장했습니다: ${path}`);
+    return text;
+  }
+
+  const choice = await new Promise<string | null>((resolve) => {
+    new ChoiceModal(
+      state.plugin.app,
+      "내보내기 완료",
+      `볼트에 저장했습니다: ${path}` +
+        (label ? ` · ${label} 형식이라 바로 가져올 수 있습니다.` : ""),
+      buttons,
+      resolve
+    ).open();
+  });
+
+  if (choice === "import") {
+    const result = await state.plugin.store.importFile(
+      new TextEncoder().encode(text),
+      filename
+    );
+    new Notice(
+      result.kind === "error"
+        ? `가져오기 실패: ${result.error}`
+        : `가져왔습니다: ${filename}`
+    );
+  } else if (choice === "download") {
+    downloadExport(filename, text, mimeOfExt(suffix));
+  } else if (choice === "share") {
+    await shareFile(filename, text, mimeOfExt(suffix), path);
+  } else {
+    new Notice(`저장했습니다: ${path}`);
+  }
+  return text;
+}
+
+function mimeOfExt(ext: string): string {
+  return ext.toLowerCase() === "json" ? "application/json" : "text/plain";
+}
+
+/**
+ * 모바일 공유 시트를 쓸 수 있는가 — **플랫폼이 아니라 기능으로** 판단한다.
+ * 옵시디언 모바일은 웹뷰라 브라우저 다운로드(`<a download>`)가 통하지 않는 대신
+ * 공유 시트가 열리는 경우가 있고, 버전/OS 마다 다르다. 있으면 쓰고 없으면 안 띄운다.
+ */
+function canShareFile(): boolean {
+  const nav = navigator as Navigator & {
+    canShare?: (data: unknown) => boolean;
+  };
+  return typeof nav.share === "function";
+}
+
+/**
+ * 만든 파일을 다른 앱으로 보낸다(모바일 공유 시트). 파일 공유가 막혀 있으면 텍스트
+ * 공유로 내려앉고, 그마저 안 되면 볼트 경로를 안내한다 — 어느 경우에도 파일은
+ * 이미 볼트에 저장돼 있다.
+ */
+async function shareFile(
+  filename: string,
+  text: string,
+  mime: string,
+  path: string
+): Promise<void> {
+  const nav = navigator as Navigator & {
+    canShare?: (data: unknown) => boolean;
+    share?: (data: unknown) => Promise<void>;
+  };
+  try {
+    const file = new File([text], filename, { type: mime });
+    if (nav.canShare?.({ files: [file] })) {
+      await nav.share?.({ files: [file], title: filename });
+      return;
+    }
+    await nav.share?.({ title: filename, text });
+  } catch (err) {
+    // 사용자가 공유 시트를 닫은 것도 여기로 온다 — 실패로 떠들지 않는다.
+    new Notice(`볼트에 저장돼 있습니다: ${path}`);
+  }
+}
+
+/** 내용이 우리가 아는 임포트 형식인가 — JSON 이 아니거나 모르는 형식이면 null. */
+function detectDownloadFormat(text: string): ImportFormat | null {
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const format = detectFormat(data);
+  return format === "unknown" ? null : format;
+}
+
 async function runSendAs(
   state: QrRunState,
   name: string,
@@ -446,7 +637,9 @@ async function runSendAs(
 async function appendSessionMessage(
   state: QrRunState,
   file: string,
-  text: string
+  text: string,
+  /** 누구의 발화로 남길지. 기본은 AI(`/sendas` `/comment`), `/send` 만 유저다. */
+  author: "ai" | "user" = "ai"
 ): Promise<StellaSession | null> {
   const plugin = state.plugin;
   await plugin.flushSessionEdits(file);
@@ -465,8 +658,8 @@ async function appendSessionMessage(
   const node: SessionNode = {
     id: uuidv4(),
     parent: parentId,
-    kind: "ai-continue",
-    patches: [{ op: "append", spans: [{ author: "ai", text: sep + text }] }],
+    kind: author === "user" ? "user-write" : "ai-continue",
+    patches: [{ op: "append", spans: [{ author, text: sep + text }] }],
     createdAt: Date.now(),
   };
   session.nodes[node.id] = node;
@@ -696,7 +889,10 @@ function expand(state: QrRunState, text: string): string {
     pipe: state.pipe,
     groupnotmuted: state.macro.char ?? "",
   };
-  const out = applyMacros(text, { ...state.macro, variables });
+  // 매크로 치환 **뒤에** 브레이스 이스케이프를 푼다 — `\{\{user\}\}` 는 "매크로로
+  // 풀지 말고 글자 그대로"라는 뜻이라, 파싱에서 미리 풀면 여기서 진짜 이름으로 바뀐다
+  // (카드 내보내기가 매크로 대신 페르소나 이름이 박힌 파일을 만든다).
+  const out = unescapeQrBraces(applyMacros(text, { ...state.macro, variables }));
   for (const [k, v] of Object.entries(variables)) {
     if (RUNTIME_MACRO_KEYS.has(k)) continue;
     // 전역 값은 세션 변수로 되돌려 쓰지 않는다 — 넣는 순간 `global::x` 라는 이름의
@@ -721,6 +917,14 @@ async function buildQrMacroContext(
     persona: user?.description ?? "",
   };
   if (!sessionFile) return ctx;
+  // `{{lastMessage}}` / `{{lastCharMessage}}` — 실물 QR 이 "짱돌이가 방금 뽑아준 것"을
+  // 그대로 집어 다음 커맨드로 넘길 때 쓴다(카드 JSON 내보내기).
+  const session = await plugin.store.getSession(sessionFile).catch(() => null);
+  if (session) {
+    const { last, lastChar } = lastMessagesOf(session);
+    ctx.lastMessage = last;
+    ctx.lastCharMessage = lastChar;
+  }
   const scenarioFile = scenarioFileOfSessionFile(sessionFile);
   if (!scenarioFile) return ctx;
   const scenarios = await plugin.store.getScenarios().catch(() => []);
@@ -733,6 +937,37 @@ async function buildQrMacroContext(
     ctx.scenario = data.scenario ?? "";
   }
   return ctx;
+}
+
+/**
+ * 활성 경로의 마지막 발화 / 마지막 **캐릭터(AI)** 발화.
+ * 챗은 말풍선 단위, 소설은 노드가 스스로 붙인 글 단위다(노드 = 한 번의 생성).
+ */
+function lastMessagesOf(session: StellaSession): {
+  last: string;
+  lastChar: string;
+} {
+  if (session.meta.mode === "chat") {
+    const log = buildChatLog(session);
+    const lastChar = [...log].reverse().find((m) => m.role === "assistant");
+    return {
+      last: log[log.length - 1]?.content ?? "",
+      lastChar: lastChar?.content ?? "",
+    };
+  }
+  const path = pathToLeaf(session, session.meta.activeLeafId);
+  let last = "";
+  let lastChar = "";
+  for (let i = path.length - 1; i >= 0; i--) {
+    const text = nodeOwnText(path[i]).trim();
+    if (!text) continue;
+    if (!last) last = text;
+    if (!lastChar && path[i].kind !== "user-write" && path[i].kind !== "user-edit") {
+      lastChar = text;
+    }
+    if (last && lastChar) break;
+  }
+  return { last, lastChar };
 }
 
 /** GGAI/SCENARIOS/X/SESSIONS/Y/session.json → GGAI/SCENARIOS/X/scenario.json */

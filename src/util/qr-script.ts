@@ -264,9 +264,20 @@ function extractClosures(text: string): { body: string; closures: string[] } {
   return { body, closures };
 }
 
-/** ST 이스케이프 해제 — `\|` `\{` `\}` 만. 그 외 백슬래시는 본문 글자다. */
+/**
+ * ST 이스케이프 해제 — **파싱 단계**용. 여기서 푸는 것은 `\|` 하나뿐이다.
+ * `\{` `\}` 는 "매크로로 풀지 말고 글자 그대로"라는 뜻이라 파싱에서 풀면 안 된다 —
+ * 파싱에서 풀어 버리면 뒤이은 매크로 치환이 `{{user}}` 를 진짜 이름으로 바꿔, 카드
+ * 내보내기가 매크로 대신 페르소나 이름이 박힌 파일을 만든다. 브레이스 해제는
+ * 매크로 치환을 **끝낸 뒤** `unescapeQrBraces` 가 맡는다.
+ */
 export function unescapeQr(text: string): string {
-  return text.replace(/\\([|{}])/g, "$1");
+  return text.replace(/\\(\|)/g, "$1");
+}
+
+/** 매크로 치환을 끝낸 뒤 푸는 브레이스 이스케이프 — `\{` `\}`. */
+export function unescapeQrBraces(text: string): string {
+  return text.replace(/\\([{}])/g, "$1");
 }
 
 /**
@@ -377,6 +388,49 @@ export function runQrRegex(
     if (first) break;
   }
   return out.filter((v) => v).join("\n");
+}
+
+/**
+ * ST 스타일 on/off 인자. `ephemeral=on` `ephemeral=true` `ephemeral=1` 은 물론
+ * 값 없이 이름만 적은 플래그(`ephemeral`)도 켬으로 본다. `off/false/0/no` 만 끔.
+ * 인자 자체가 없으면 끔(ST 기본 = 지속 주입).
+ */
+export function isQrFlagOn(
+  rawValue: string | undefined,
+  expanded: string
+): boolean {
+  if (rawValue === undefined) return false;
+  const v = (expanded ?? "").trim().toLowerCase();
+  if (v === "") return true;
+  return !/^(off|false|0|no)$/.test(v);
+}
+
+/**
+ * `/re-replace find="/pattern/flags" replace="..."` 의 치환 (ST 정규식 확장 호환).
+ * `find` 해석은 `runQrRegex` 와 같다(슬래시 감싼 형태 + 플래그, 없으면 문자열 그대로).
+ * 패턴이 깨졌으면 입력을 그대로 돌려준다 — 스크립트가 죽는 것보다 원문 통과가 낫다.
+ *
+ * `replace` 안의 `\{` `\}` 는 escape 를 푼다: 실물 QR 이 `\{\{user\}\}` 로 적어
+ * "매크로로 풀리지 말고 글자 그대로 넣어라"를 표현한다(카드 JSON 내보내기).
+ */
+export function runQrRegexReplace(
+  find: string,
+  replace: string,
+  input: string
+): string {
+  const raw = (find ?? "").trim();
+  if (!raw) return input ?? "";
+  const m = /^\/([\s\S]*)\/([a-z]*)$/i.exec(raw);
+  const source = m ? m[1] : raw;
+  let flags = m ? m[2] : "";
+  if (!flags.includes("g")) flags += "g";
+  let re: RegExp;
+  try {
+    re = new RegExp(source, flags);
+  } catch {
+    return input ?? "";
+  }
+  return (input ?? "").replace(re, replace ?? "");
 }
 
 /**

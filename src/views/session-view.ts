@@ -23,6 +23,7 @@ import {
   type MacroRender,
 } from "../util/macros";
 import { planSessionRequest } from "../util/build-session-context";
+import { cardDepthPromptText } from "../util/context-builder";
 import { applyRawRegexToGeneration } from "../util/session-regex";
 import {
   isDefaultDatedSessionName,
@@ -99,6 +100,11 @@ import {
 } from "../util/session-anchor";
 import { attachLongPress } from "../util/long-press";
 import {
+  attachTapToEdit,
+  beginEdit,
+  setEditAllowed,
+} from "../util/tap-to-edit";
+import {
   openExtensionActionsMenu,
   renderHeaderCommandBar,
 } from "./session-command-bar";
@@ -133,6 +139,7 @@ import {
   spansLength,
   spansToText,
 } from "../util/session-text";
+import { planStreamTail } from "../util/stream-tail";
 import {
   getChildren,
   getDeepestLatestDescendant,
@@ -476,12 +483,23 @@ export class SessionView extends ItemView {
   private preparing = false;
   /**
    * 생성(스트리밍) 중 새로 도착한 생성 텍스트만 담는 전용 컨테이너.
-   * 고정된 앞부분은 그대로 두고 이 컨테이너만 다시 그려, 세션이 길어도 매 delta 마다
+   * 고정된 앞부분은 그대로 두고 이 컨테이너에만 **덧붙여**, 세션이 길어도 매 delta 마다
    * 전체 문서를 재구성/재도색하지 않는다. 전체 렌더(renderBodySpans) 시 함께 지워지므로
    * 그 시점에 null 로 되돌린다. */
   private streamTailEl: HTMLElement | null = null;
-  /** 스트리밍 tail 첫 렌더 시 고정 앞부분이 문단을 끝냈는지(=첫 줄 들여쓰기 여부). */
+  /** 다음에 그릴 조각이 줄 첫머리인지(=첫 줄 들여쓰기 여부). 줄을 굳힐 때마다 갱신. */
   private streamTailIndentNext = true;
+  /** 직전 호출에서 그린 tail 전문 — 이번 텍스트가 이것의 뒤에 붙기만 했는지 판정한다. */
+  private streamTailText = "";
+  /** 이미 굳혀 그린(다시 안 건드리는) tail 앞부분 길이. 항상 "
+" 직후 경계다. */
+  private streamTailCommitted = 0;
+  /** 아직 줄바꿈이 안 온 마지막 한 줄 — 이 줄만 매 delta 다시 그린다. */
+  private streamTailOpenEl: HTMLElement | null = null;
+  /** 한 프레임에 한 번만 그리기 위한 예약 핸들 (토큰마다 그리지 않는다). */
+  private streamPaintRaf: number | null = null;
+  /** 예약된 프레임에서 그릴 최신 tail 텍스트 (중간 값들은 건너뛴다). */
+  private streamPaintText: string | null = null;
   /**
    * 지금 본문 DOM 에 실제로 그려져 있는 렌더 계획. 다음 렌더 때 새 계획과 앞에서부터
    * 비교해 **바뀐 지점부터 끝까지만** 다시 만든다(전체 재렌더 금지 — renderBodySpans).
@@ -866,6 +884,7 @@ export class SessionView extends ItemView {
     this.resizeObserver = null;
     this.viewStylePopover?.close();
     this.viewStylePopover = null;
+    this.cancelStreamPaint();
     if (this.anchorCaptureRaf != null) {
       window.cancelAnimationFrame(this.anchorCaptureRaf);
       this.anchorCaptureRaf = null;
@@ -987,7 +1006,8 @@ export class SessionView extends ItemView {
       summary: summaryContext || undefined,
       charPrompt: (scenario as any)?.system_prompt,
       charInstruction: (scenario as any)?.post_history_instructions,
-      charDepthPrompt: (scenario as any)?.extensions?.depth_prompt,
+      // 카드 깊이 프롬프트는 ST 에서 `{prompt, depth, role}` 객체다 — 문자열만 꺼낸다.
+      charDepthPrompt: cardDepthPromptText((scenario as any)?.extensions?.depth_prompt),
       charCreatorNotes: (scenario as any)?.creator_notes,
       charVersion: (scenario as any)?.character_version,
     };
@@ -1101,7 +1121,7 @@ export class SessionView extends ItemView {
       // renderBodySpans 의 body.empty() 로 contenteditable DOM 포커스가 풀린다 —
       // caret(Selection) 만 복원하면 다음 입력이 씹히므로 포커스도 되돌린다
       // (redrawBodyPreservingCaret 과 동일).
-      this.bodyEl?.focus({ preventScroll: true });
+      if (this.bodyEl) beginEdit(this.bodyEl);
     }
     this.suppressEvents = false;
     this.updateToolbar();
@@ -1346,6 +1366,8 @@ export class SessionView extends ItemView {
     this.renderedRuns = [];
     // scroll-owner: render() 끝의 restoreTarget/attemptRestore (최초 그리기)
     this.renderBodySpans();
+    // 모바일 — 스크롤 끝에서 편집이 열리지 않도록 제자리 탭에만 반응하게 잠근다.
+    attachTapToEdit(body);
     body.addEventListener("input", () => this.onBodyInput());
     body.addEventListener("blur", () => void this.commitPending());
     body.addEventListener("keydown", (e) => this.onKeydown(e));
@@ -1656,6 +1678,8 @@ export class SessionView extends ItemView {
     if (!body) return;
 
     // 스트리밍 tail 은 계획에 없는 임시 DOM — 계획을 적용하기 전에 걷어낸다.
+    // 예약된 갱신도 함께 취소한다(이 렌더가 이미 최신을 그렸으므로 낡은 값이다).
+    this.cancelStreamPaint();
     this.streamTailEl?.remove();
     this.streamTailEl = null;
     // 재렌더로 옛 텍스트 노드가 사라졌으니 hover 강조 Range 도 무효 — 정리한다.
@@ -1773,36 +1797,129 @@ export class SessionView extends ItemView {
 
   /**
    * 생성(스트리밍) 전용 경량 렌더. 고정된 앞부분(renderBodySpans 로 이미 그려짐)은
-   * 건드리지 않고, 본문 끝에 append 되는 생성 텍스트만 전용 컨테이너에 다시 그린다.
-   * 세션 전체 길이와 무관하게 생성 텍스트 길이에만 비례하므로 긴 세션에서도 멈추지 않는다.
-   * 앵커 스킵으로 표시량이 되돌아가는 경우도 매번 tail 전체를 다시 그려 정확히 반영한다.
+   * 건드리지 않고, 본문 끝에 append 되는 생성 텍스트만 전용 컨테이너에 그린다.
+   *
+   * **매 delta 마다 하는 일이 "지금 쓰고 있는 한 줄"로 고정된다.** 줄바꿈이 지나간
+   * 줄은 굳혀서 다시 건드리지 않고, 새 글자는 뒤에 덧붙이기만 한다. 옛 방식은 매
+   * delta 마다 tail 전체를 지웠다 다시 만들어 (1) 비용이 생성 길이의 제곱으로 늘고
+   * (2) 지운 순간 tail 높이가 0으로 무너져 브라우저가 스크롤 위치를 강제로 끌어올렸다
+   * (생성 중 화면이 위로 딸려 올라가던 원인). 덧붙이기만 하면 둘 다 사라진다.
+   *
+   * 되받아쓰기 앵커 판정이 표시량을 되돌리는 경우(생성 초반 몇십 자)만 예외로 통째로
+   * 다시 그린다 — 그 구간은 글이 짧아 비용이 없다.
+   *
    * baselineText/offset 매핑 등 전체 상태는 생성 종료 시 rebuildBaselineAndRender 가 한 번 맞춘다.
    */
   private renderStreamingTail(tailText: string): void {
     const body = this.bodyEl;
     if (!body) return;
     if (!this.streamTailEl || this.streamTailEl.parentElement !== body) {
-      // 경계 들여쓰기 상태 = 고정 앞부분이 문단을 끝냈는지(빈 본문/줄바꿈 끝이면 들여쓰기).
-      this.streamTailIndentNext =
-        this.displayText.length === 0 || this.displayText.endsWith("\n");
       this.streamTailEl = body.createEl("span", { cls: "ggai-stream-tail" });
+      this.resetStreamTail();
     }
     const container = this.streamTailEl;
-    container.empty();
+    const plan = planStreamTail(
+      this.streamTailText,
+      this.streamTailCommitted,
+      tailText
+    );
+    // 앵커 판정으로 표시량이 줄거나 앞이 달라졌을 때만 처음부터 다시 그린다.
+    if (plan.reset) {
+      container.empty();
+      this.resetStreamTail();
+    }
+    this.streamTailText = tailText;
+
     const cls = "ggai-span-ai";
-    let indentNext = this.streamTailIndentNext;
+    // 완성된 줄(마지막 "\n" 까지)은 굳힌다. 그 뒤 남은 한 줄만 매번 다시 그린다
+    // (`**굵게**` 처럼 닫는 표시가 와야 모양이 정해지는 것이 이 줄 안에서 해결된다).
+    if (plan.commitTo > plan.commitFrom) {
+      // 열려 있던 줄의 내용이 이번에 굳는 구간에 포함된다 — 중복되지 않게 걷어낸다.
+      this.streamTailOpenEl?.remove();
+      this.streamTailOpenEl = null;
+      this.commitStreamTailLines(
+        container,
+        tailText.slice(plan.commitFrom, plan.commitTo),
+        cls
+      );
+      this.streamTailCommitted = plan.commitTo;
+    }
+
+    const openText = tailText.slice(plan.openFrom);
+    if (!this.streamTailOpenEl) {
+      this.streamTailOpenEl = container.createEl("span");
+    }
+    this.streamTailOpenEl.empty();
+    if (openText.length > 0) {
+      this.appendMarkdownRun(
+        this.streamTailOpenEl,
+        openText,
+        cls,
+        this.streamTailIndentNext
+      );
+    }
+  }
+
+  /**
+   * 스트리밍 화면 갱신 예약 — **토큰마다가 아니라 한 프레임에 한 번만** 그린다.
+   * 프로바이더는 초당 수십 개의 조각을 보내는데 화면은 초당 60번밖에 못 바꾼다.
+   * 조각마다 그리면 그 사이 화면 크기를 즉시 물어보게 되어(scrollTailIfFollowing),
+   * 브라우저가 모아 처리하려던 레이아웃을 매번 강제로 끊어 쓰게 된다.
+   * 중간 값은 버리고 마지막 값만 그리므로 보이는 결과는 같다.
+   */
+  private scheduleStreamPaint(tailText: string): void {
+    this.streamPaintText = tailText;
+    if (this.streamPaintRaf != null) return;
+    this.streamPaintRaf = window.requestAnimationFrame(() => {
+      this.streamPaintRaf = null;
+      const text = this.streamPaintText;
+      this.streamPaintText = null;
+      if (text == null || !this.generation) return;
+      this.renderStreamingTail(text);
+      this.scrollTailIfFollowing();
+    });
+  }
+
+  /** 예약된 스트리밍 갱신 취소 — 전체 렌더가 이미 맞춘 뒤엔 낡은 값이라 그리면 안 된다. */
+  private cancelStreamPaint(): void {
+    if (this.streamPaintRaf != null) {
+      window.cancelAnimationFrame(this.streamPaintRaf);
+    }
+    this.streamPaintRaf = null;
+    this.streamPaintText = null;
+  }
+
+  /** 스트리밍 tail 진행 상태 초기화 (컨테이너를 새로 만들거나 비운 직후). */
+  private resetStreamTail(): void {
+    this.streamTailText = "";
+    this.streamTailCommitted = 0;
+    this.streamTailOpenEl = null;
+    // 경계 들여쓰기 상태 = 고정 앞부분이 문단을 끝냈는지(빈 본문/줄바꿈 끝이면 들여쓰기).
+    this.streamTailIndentNext =
+      this.displayText.length === 0 || this.displayText.endsWith("\n");
+  }
+
+  /**
+   * 완성된 줄들을 tail 끝에 굳혀 붙인다 (`text` 는 항상 "\n" 으로 끝난다).
+   * 줄바꿈 gap span·들여쓰기 규칙은 renderBodySpans(appendBodyRuns) 와 동일하다.
+   */
+  private commitStreamTailLines(
+    container: HTMLElement,
+    text: string,
+    cls: string
+  ): void {
     let buf = "";
     const flush = () => {
       if (buf.length === 0) return;
-      this.appendMarkdownRun(container, buf, cls, indentNext);
-      indentNext = false;
+      this.appendMarkdownRun(container, buf, cls, this.streamTailIndentNext);
+      this.streamTailIndentNext = false;
       buf = "";
     };
-    for (const ch of tailText) {
+    for (const ch of text) {
       if (ch === "\n") {
         flush();
         container.createEl("span", { cls: `ggai-para-gap ${cls}`, text: "\n" });
-        indentNext = true;
+        this.streamTailIndentNext = true;
       } else {
         buf += ch;
       }
@@ -3155,9 +3272,9 @@ export class SessionView extends ItemView {
             if (append.op === "append" && append.spans[0]) {
               append.spans[0].text = gen.accumulatedText;
             }
-            // 전체 재구성 대신 새로 도착한 생성 텍스트만 다시 그린다(긴 세션 프리즈 방지).
-            this.renderStreamingTail(gen.accumulatedText);
-            this.scrollTailIfFollowing();
+            // 전체 재구성 대신 새로 도착한 생성 텍스트만 덧붙인다(긴 세션 프리즈 방지).
+            // 실제 그리기는 다음 프레임에 한 번 — 조각마다 그리지 않는다.
+            this.scheduleStreamPaint(gen.accumulatedText);
           } else if (event.type === "done") {
             usage = event.response.usage;
             if (this.generation) this.generation.lastRaw = event.response.raw;
@@ -3221,6 +3338,8 @@ export class SessionView extends ItemView {
         }
       }
     } finally {
+      // 예약돼 있던 프레임 갱신은 여기서 버린다 — 아래 전체 렌더가 최종본을 그린다.
+      this.cancelStreamPaint();
       // 중단/오류로 스트림이 끊긴 경우에도 앵커 반복 제거를 확정 (재호출 안전).
       this.finalizeAnchorStrip(
         payload.kind === "chat" ? payload.anchor : undefined,
@@ -3412,10 +3531,9 @@ export class SessionView extends ItemView {
 
   private setBodyEditable(editable: boolean): void {
     if (!this.bodyEl) return;
-    this.bodyEl.setAttr(
-      "contenteditable",
-      editable ? "plaintext-only" : "false"
-    );
+    // 모바일 탭 게이트가 contenteditable 을 소유하므로 직접 setAttr 하지 않는다 —
+    // "허용"은 곧 열림이 아니라 탭을 기다리는 상태다.
+    setEditAllowed(this.bodyEl, editable);
   }
 
   /** 최신 지점으로 이동 — activeLeaf 를 이 분기의 가장 최근 leaf 로 옮긴다. */
@@ -4115,6 +4233,7 @@ export class SessionView extends ItemView {
     editEl.setAttr("contenteditable", "plaintext-only");
     editEl.setAttr("spellcheck", "false");
     this.translationEditEl = editEl;
+    attachTapToEdit(editEl); // 본문과 같은 모바일 탭 게이트
     editEl.addEventListener("input", () => {
       this.restoreMissingProPending();
       this.scheduleTranslationCommit();
@@ -4263,7 +4382,7 @@ export class SessionView extends ItemView {
   private restoreTranslationCaret(caret: TranslationCaret): void {
     if (!caret) return;
     if (caret.focused) {
-      this.translationEditEl?.focus({ preventScroll: true });
+      if (this.translationEditEl) beginEdit(this.translationEditEl);
     }
     if ("draft" in caret) {
       this.setCaretInProPending(caret.draft);
@@ -6699,7 +6818,7 @@ export class SessionView extends ItemView {
       // 풀릴 수 있다 — 타이핑 중(IDLE_COMMIT_MS 마다) 이 경로를 타면 다음 입력이
       // 씹히는 "포커스 사라짐" 증상으로 나타난다. 원래 포커스 상태였다면 명시적으로
       // 되돌려준다.
-      if (hadFocus) this.bodyEl?.focus({ preventScroll: true });
+      if (hadFocus && this.bodyEl) beginEdit(this.bodyEl);
       this.suppressEvents = false;
     };
     // 편집 중(본문/번역칸 포커스)에는 재중앙하지 않는다 — 브라우저가 커서에 맞춰 둔

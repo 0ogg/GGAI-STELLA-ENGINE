@@ -18,6 +18,8 @@ import {
   PARAGRAPH_REGEN_IO_INSTRUCTIONS,
 } from "../util/paragraph-regen";
 import { composeSummaryContextForPath } from "../util/summarize-session";
+import { scenarioFileOfSessionFile } from "../util/build-session-context";
+import { resolveActiveLorebooks } from "../util/resolve-active-lorebooks";
 
 export interface ParagraphRegenResult {
   ok: boolean;
@@ -95,9 +97,37 @@ export class ParagraphRegenService {
         summary
       );
     }
+    // 로어북 — 이어쓰기와 같은 활성 로어북에서, 대상 문단(+앞뒤 맥락)에 매칭된 항목만.
+    // 로어북 허브 경유 — AI 선별 "다른 확장에도 적용"이 켜져 있으면 자동 반영.
+    let lorebookText = "";
+    if (sessionFile) {
+      const session = await this.plugin.store.getSession(sessionFile);
+      const scenarioFile = scenarioFileOfSessionFile(sessionFile);
+      const scenarios = await this.plugin.store.getScenarios();
+      const scenario =
+        scenarios.find((i) => i.scenarioFile === scenarioFile)?.scenario ?? null;
+      const books = await resolveActiveLorebooks(
+        this.plugin.store,
+        scenario,
+        session
+      );
+      lorebookText = await this.plugin.lorebookPlus.buildTaskLorebookText({
+        sessionFile,
+        books,
+        scanText: [
+          ...(opts.context?.before ?? []),
+          opts.source,
+          ...(opts.context?.after ?? []),
+        ].join("\n\n"),
+        taskPrompt: instruction,
+        taskLabel: "문단 재생성",
+      });
+    }
+
     const body = buildParagraphRegenBody(instruction, opts.source, {
       feedback: opts.feedback,
       context: contextBlock || undefined,
+      lorebook: lorebookText || undefined,
     });
     try {
       let text: string;

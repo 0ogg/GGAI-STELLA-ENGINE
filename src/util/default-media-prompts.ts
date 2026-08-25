@@ -58,25 +58,34 @@ export const DEFAULT_MEDIA_PROMPTS: Record<MediaPromptBucket, MediaPromptItem[]>
       id: "builtin:paragraphRegen:1",
       title: "한영 번역",
       prompt:
-        "You are a professional literary translator and bilingual prose editor working on an English-language novel.\n" +
-        "The passage is written mostly in English, but the author has inserted Korean text — notes, phrases, or whole sentences — marking what they want written or changed at those points.\n" +
-        "Rewrite the ENTIRE passage as polished, natural English narrative prose:\n" +
-        "- Render every Korean insertion into English and weave it seamlessly into the surrounding sentences.\n" +
-        "- Match the tone, register, tense, and narrative voice of the surrounding English. It must read as native English fiction, never as a literal or word-for-word translation.\n" +
-        "- Preserve the original meaning, plot progression, and nuance. Do not add new events, drop details, or reinterpret intent.\n" +
-        "Output the finished English passage only.\n\n" +
-        "Generation:",
+        "# 참고 자료 (고쳐 쓸 대상 아님 — 용어·설정 참고용)\n" +
+        "{{lorebook}}\n\n" +
+        "# 지침\n" +
+        "You are a bilingual prose editor working on an English-language novel.\n" +
+        "The passage is mostly English, but the author has inserted Korean text — notes, phrases, or whole sentences — marking what they want written or changed there.\n" +
+        "Render every Korean insertion into English and weave it into the surrounding sentences, following the author's intent rather than translating literally.\n" +
+        "Leave the existing English as it is unless a Korean note asks for a change.\n" +
+        "Match the tone, register, tense, and voice of the surrounding English shown in the story context. It must read as native English fiction.\n" +
+        "Keep names and terminology exactly as the reference material spells them.\n\n" +
+        "# 고쳐 쓸 대목\n" +
+        "{{main}}\n\n" +
+        "고쳐 쓴 대목:\n",
     },
     {
       id: "builtin:paragraphRegen:2",
       title: "다시 쓰기",
       prompt:
+        "# 참고 자료 (고쳐 쓸 대상 아님 — 용어·설정 참고용)\n" +
+        "{{lorebook}}\n\n" +
+        "# 지침\n" +
         "You are a skilled novelist and prose editor.\n" +
-        "Rewrite the given passage to improve its flow, imagery, and character voice.\n" +
-        "Keep every story fact, event, and the meaning of dialogue unchanged.\n" +
-        "Write in the same language, tense, and narrative point of view as the original.\n" +
-        "Do not introduce new plot events.\n\n" +
-        "Generation:",
+        "Rewrite the passage to improve its rhythm, imagery, and character voice.\n" +
+        "Keep every story fact, event, and the meaning of each line of dialogue unchanged.\n" +
+        "Match the tense, narrative point of view, and prose style of the surrounding paragraphs shown in the story context.\n" +
+        "Keep names and terminology exactly as the reference material spells them.\n\n" +
+        "# 고쳐 쓸 대목\n" +
+        "{{main}}\n\n" +
+        "고쳐 쓴 대목:\n",
     },
   ],
 

@@ -2305,6 +2305,36 @@ export class StellaStore extends Events {
    * 실제 포맷 판별/쓰기 파이프라인은 import/ 아래 순수한 하위 함수가 맡고,
    * Store 는 쓰기 이후 캐시 무효화와 이벤트 전파를 책임진다.
    */
+  /**
+   * QR `/download` 가 만든 파일을 **볼트 안**에 저장한다 (`GGAI/DOWNLOADS/`).
+   *
+   * 브라우저 다운로드는 모바일 옵시디언 웹뷰에서 막히므로, 저장은 언제나 볼트가
+   * 기본이다 — 볼트에 있으면 어느 기기에서든 열고 옮길 수 있고, 그 파일을 그대로
+   * 임포트에 넘길 수도 있다. 폴더는 처음 쓸 때 만든다(안 쓰는 볼트에 빈 폴더를
+   * 만들지 않는다).
+   *
+   * 같은 이름이 있으면 덮어쓰지 않고 ` (2)` 를 붙인다 — 내보낸 결과물은 사용자가
+   * 아직 확인하지 않은 산출물이라 조용히 사라지면 안 된다.
+   *
+   * @returns 저장한 볼트 경로.
+   */
+  async saveDownloadFile(
+    baseName: string,
+    ext: string,
+    text: string
+  ): Promise<string> {
+    const folder = `${BASE_FOLDER}/DOWNLOADS`;
+    await this.ensureFolderPath(folder);
+    const safeBase = baseName.trim() || "download";
+    const suffix = ext.trim() || "txt";
+    let path = normalizePath(`${folder}/${safeBase}.${suffix}`);
+    for (let n = 2; await this.vault.adapter.exists(path); n++) {
+      path = normalizePath(`${folder}/${safeBase} (${n}).${suffix}`);
+    }
+    await this.vault.create(path, text);
+    return path;
+  }
+
   async importFile(bytes: Uint8Array, filename: string): Promise<ImportResult> {
     const result = await importVaultFile(bytes, filename, this.vault);
     this.afterImport(result);

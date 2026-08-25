@@ -501,6 +501,10 @@
   min-height: 100%;
   outline: none;
   caret-color: var(--text-normal);
+  /* 모바일 탭 게이트로 편집이 잠긴 동안에도 글자 선택이 되어야 한다
+     (옵시디언 앱 기본 user-select:none 상속 방지, iOS 는 -webkit- 필요). */
+  user-select: text;
+  -webkit-user-select: text;
 }
 .ggai-session-translation-body {
   color: var(--text-normal);
@@ -7258,7 +7262,10 @@ body.is-mobile .ggai-dash-page {
   white-space: pre-wrap;
   word-break: break-word;
   line-height: var(--line-height-normal);
+  /* 모바일 탭 게이트로 편집이 잠긴 동안에도 단어 선택이 되어야 한다
+     (iOS 는 -webkit- 접두사가 있어야 먹는다). */
   user-select: text;
+  -webkit-user-select: text;
 }
 .ggai-chat-msg.is-assistant .ggai-chat-bubble {
   background: var(--background-secondary);
