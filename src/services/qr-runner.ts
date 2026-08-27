@@ -7,7 +7,9 @@
  * 상태:
  *  - 세션 변수는 `session.meta.variables`(변수 확장이 켜져 있으면 가지별 되짚기 기록),
  *    전역 변수는 `plugin.variables` — 매크로 맵에는 `global::` 접두로 얹힌다.
- *  - `{{pipe}}` 는 직전 커맨드의 결과. `||` 로 끊긴 자리에서 비워진다.
+ *  - `{{pipe}}` 는 직전 커맨드의 결과. **`||` 로도 지워지지 않는다**(ST 원본) —
+ *    `||` 가 막는 것은 "맨 인자를 안 적었을 때 자동으로 끼워 넣기"뿐이고,
+ *    `{{pipe}}` 를 손으로 적으면 값은 그대로 읽힌다.
  *  - **본문(맨 인자)이 없는 커맨드는 `{{pipe}}` 를 본문으로 받는다** (ST 암묵적 파이프).
  *    `/gen … | /sendas name="{{char}}"` 처럼 결과를 그대로 넘기는 관용구가 이것에 기댄다.
  *
@@ -78,6 +80,11 @@ interface QrRunState {
   globals: Record<string, string>;
   macro: MacroContext;
   pipe: string;
+  /**
+   * 직전 커맨드가 `||` 로 끝났는가 = **맨 인자 자동 주입만** 막는다.
+   * `state.pipe` 자체는 건드리지 않는다 — 손으로 적은 `{{pipe}}` 는 계속 읽혀야 한다.
+   */
+  implicitPipe: boolean;
   aborted: boolean;
   skipped: Set<string>;
   /** 변수를 실제로 건드렸는가 — 안 건드렸으면 세션을 저장하지 않는다. */
@@ -117,6 +124,7 @@ export async function runQuickReplyScript(
     globals: plugin.variables.getGlobals(),
     macro: await buildQrMacroContext(plugin, sessionFile),
     pipe: "",
+    implicitPipe: true,
     aborted: false,
     skipped: new Set(),
     varsDirty: false,
@@ -164,7 +172,11 @@ async function runPipeline(
   for (const cmd of commands) {
     if (state.aborted) break;
     last = await runCommand(state, cmd);
-    state.pipe = cmd.breaksPipe ? "" : last;
+    // `||` 는 파이프 **값**을 지우지 않는다 — 자동 주입만 끈다(ST 원본).
+    // 값까지 비우면 `/input … || /setvar key=x {{pipe}}` 같은 흔한 관용구에서
+    // 입력값이 통째로 증발한다.
+    state.pipe = last;
+    state.implicitPipe = !cmd.breaksPipe;
   }
   return last;
 }
@@ -180,8 +192,14 @@ async function runCommand(state: QrRunState, cmd: QrCommand): Promise<string> {
    * 관용구가 빈 값으로 조용히 통과해 결과가 증발한다.
    * 적혀 있는데 매크로가 빈 값으로 풀린 경우(`{{pipe}}` 를 손으로 쓴 경우 포함)는
    * 그대로 빈 값이다 — "안 적음"과 "비어 있음"을 뭉개지 않는다.
+   * 앞 커맨드가 `||` 로 끝났으면 이 자동 주입만 꺼진다(값은 `{{pipe}}` 로 여전히 읽힌다).
    */
-  const body = () => (cmd.body.trim() === "" ? state.pipe : expand(state, cmd.body));
+  const body = () =>
+    cmd.body.trim() === ""
+      ? state.implicitPipe
+        ? state.pipe
+        : ""
+      : expand(state, cmd.body);
   /**
    * 암묵적 파이프를 **적용하지 않는** 맨 인자 — 인자가 "내용"이 아니라 **대상 지정**인
    * 커맨드용(`/hide 2-5`, `/trigger 캐릭터명`, `/flushvar 이름`, `/flushinject id`,

@@ -4525,7 +4525,8 @@ function regexScript(overrides: Partial<RegexScript>): RegexScript {
   // /setvar — key 는 이름붙은 인자, 값은 매크로 원문 그대로(치환은 실행 시점).
   assert.deepEqual(cmds[1].named, { key: "소재" });
   assert.equal(cmds[1].body, "{{pipe}}");
-  assert.equal(cmds[1].breaksPipe, true); // `||` — 파이프 끊김
+  // `||` = 맨 인자 자동 주입만 끊는다(값은 `{{pipe}}` 로 계속 읽힌다 — ST 원본).
+  assert.equal(cmds[1].breaksPipe, true);
 
   // /if — 이름붙은 인자 3개 + 클로저 1개. 클로저 안의 `|` 는 최상위 분리 대상이 아니다.
   assert.deepEqual(cmds[2].named, {
