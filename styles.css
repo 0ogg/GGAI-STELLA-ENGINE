@@ -6302,6 +6302,9 @@ body.is-mobile .ggai-session-toolbar {
   gap: 8px;
   margin-bottom: 10px;
 }
+.ggai-dash-session-bar .ggai-dash-seg {
+  margin-left: auto;
+}
 .ggai-dash-session-bar .ggai-btn.is-active {
   border-color: var(--text-accent);
   color: var(--text-accent);
@@ -6411,6 +6414,23 @@ body.is-mobile .ggai-session-toolbar {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 세션 종류(소설/채팅) 표시. */
+.ggai-mode-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 0.7em;
+  border: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  vertical-align: middle;
+  flex: none;
+}
+.ggai-mode-badge.is-chat {
+  border-color: var(--text-accent);
+  color: var(--text-accent);
+}
+
 .ggai-series-badge {
   display: inline-block;
   margin-left: 6px;
@@ -7130,6 +7150,25 @@ body.is-mobile .ggai-dash-user-edit {
   gap: 8px;
   border-top: 1px solid var(--background-modifier-border);
   padding-top: 12px;
+}
+.ggai-dash-seg {
+  display: inline-flex;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  overflow: hidden;
+}
+.ggai-dash-seg-btn {
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  padding: 3px 10px;
+  font-size: 0.8em;
+  cursor: pointer;
+}
+.ggai-dash-seg-btn.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
 }
 .ggai-dash-select-controls {
   margin-left: auto;

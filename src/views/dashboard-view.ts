@@ -38,9 +38,11 @@ import {
   collectScenarioTags,
   compareBy,
   getFavorite,
+  matchesSessionMode,
   pickRecommendedScenarios,
   scenarioTags,
   sessionMetaLabel,
+  sessionModeLabel,
   sessionRecentTime,
   type SortKey,
 } from "../util/scenario-list-helpers";
@@ -216,6 +218,7 @@ export class DashboardView extends ItemView {
   /** 시나리오 상세(세션 관리) 페이지가 열려 있으면 그 시나리오 폴더. */
   private detailFolder: string | null = null;
   private detailSessions: SessionListItem[] = [];
+  private sessionModeFilter: "all" | "novel" | "chat" = "all";
   private detailListEl: HTMLElement | null = null;
   /** 세션 일괄 삭제용 선택 집합 (상세 페이지). */
   private sessionSelection = new Set<string>();
@@ -1894,6 +1897,14 @@ export class DashboardView extends ItemView {
       this.sessionSeriesView = !this.sessionSeriesView;
       this.renderSessionTab();
     });
+    this.renderModeSeg(
+      bar,
+      this.allSessions.map((it) => it.session),
+      () => {
+        this.sessionDisplayLimit = SESSION_TAB_PAGE;
+        this.renderSessionTab();
+      }
+    );
 
     if (this.allSessions.length === 0) {
       this.renderEmpty(
@@ -1904,17 +1915,30 @@ export class DashboardView extends ItemView {
     }
 
     const activeFile = this.plugin.getActiveOrLastSessionFile();
+    const filtered = this.allSessions.filter((it) =>
+      matchesSessionMode(it.session, this.sessionModeFilter)
+    );
     if (this.sessionSeriesView) {
-      this.renderSeriesGrouped(body, activeFile);
+      this.renderSeriesGrouped(body, filtered, activeFile);
+      return;
+    }
+
+    if (filtered.length === 0) {
+      this.renderEmpty(
+        body,
+        this.sessionModeFilter === "chat"
+          ? "채팅 세션이 없습니다."
+          : "소설 세션이 없습니다."
+      );
       return;
     }
 
     const list = body.createDiv({ cls: "ggai-dash-session-cards" });
-    const shown = this.allSessions.slice(0, this.sessionDisplayLimit);
+    const shown = filtered.slice(0, this.sessionDisplayLimit);
     for (const { session, scenario } of shown) {
       this.renderSessionCard(list, session, scenario, activeFile);
     }
-    const remaining = this.allSessions.length - shown.length;
+    const remaining = filtered.length - shown.length;
     if (remaining > 0) {
       const more = body.createEl("button", {
         cls: "ggai-dash-more-btn ggai-dash-session-more",
@@ -1931,7 +1955,11 @@ export class DashboardView extends ItemView {
    * 시리즈 보기 — 다음화로 연결된 세션들을 시리즈(series.id) 단위로 묶어 화 순서대로
    * 보여준다. 이미 로드된 allSessions 를 그룹핑만 해서 재사용(세션 카드도 그대로 재사용).
    */
-  private renderSeriesGrouped(body: HTMLElement, activeFile: string | null): void {
+  private renderSeriesGrouped(
+    body: HTMLElement,
+    sessions: Array<{ session: SessionListItem; scenario: ScenarioListItem }>,
+    activeFile: string | null
+  ): void {
     const groups = new Map<
       string,
       {
@@ -1940,7 +1968,7 @@ export class DashboardView extends ItemView {
         items: Array<{ session: SessionListItem; scenario: ScenarioListItem }>;
       }
     >();
-    for (const it of this.allSessions) {
+    for (const it of sessions) {
       const s = it.session.session.meta.series;
       if (!s) continue;
       let g = groups.get(s.id);
@@ -2013,6 +2041,7 @@ export class DashboardView extends ItemView {
     nameEl.createSpan({
       text: session.session.meta.name || session.folderName,
     });
+    this.appendModeBadge(nameEl, session);
     this.appendSeriesBadge(nameEl, session);
     this.appendUnreadBadge(nameEl, session.sessionFile);
     const time = formatRelativeTime(sessionRecentTime(session));
@@ -2069,6 +2098,16 @@ export class DashboardView extends ItemView {
   }
 
   /** 시리즈 세션이면 이름 옆에 "N화" 배지 — 목록만 봐도 시리즈임을 알 수 있게. */
+  /** 소설/채팅 표시 — 목록에서 세션 종류를 한눈에 구분하려고 이름 옆에 붙인다. */
+  private appendModeBadge(parent: HTMLElement, s: SessionListItem): void {
+    const label = sessionModeLabel(s);
+    const badge = parent.createSpan({
+      cls: "ggai-mode-badge",
+      text: label,
+    });
+    badge.toggleClass("is-chat", label === "채팅");
+  }
+
   private appendSeriesBadge(parent: HTMLElement, s: SessionListItem): void {
     const series = s.session.meta.series;
     if (!series) return;
@@ -2755,6 +2794,48 @@ export class DashboardView extends ItemView {
 
   private detailSelectHeadEl: HTMLElement | null = null;
 
+  /** 소설/채팅 필터 버튼 — 시나리오 상세와 세션 탭이 같은 필터 상태를 공유한다. */
+  private renderModeSeg(
+    host: HTMLElement,
+    sessions: SessionListItem[],
+    onChange: () => void
+  ): void {
+    host.querySelector(".ggai-dash-seg")?.remove();
+    if (sessions.length === 0) return;
+
+    const seg = host.createDiv({ cls: "ggai-dash-seg" });
+    const options: Array<{ value: "all" | "novel" | "chat"; label: string }> = [
+      { value: "all", label: "전체" },
+      { value: "novel", label: "소설" },
+      { value: "chat", label: "채팅" },
+    ];
+    for (const opt of options) {
+      const count = sessions.filter((s) =>
+        matchesSessionMode(s, opt.value)
+      ).length;
+      const btn = seg.createEl("button", {
+        cls: "ggai-dash-seg-btn",
+        text: `${opt.label} ${count}`,
+      });
+      btn.toggleClass("is-active", this.sessionModeFilter === opt.value);
+      btn.addEventListener("click", () => {
+        if (this.sessionModeFilter === opt.value) return;
+        this.sessionModeFilter = opt.value;
+        onChange();
+      });
+    }
+  }
+
+  private renderModeFilter(): void {
+    const head = this.detailSelectHeadEl;
+    if (!head) return;
+    this.renderModeSeg(head, this.detailSessions, () => {
+      // 숨겨진 세션이 선택에 남아 함께 지워지지 않게 선택을 비운다.
+      this.sessionSelection.clear();
+      this.renderDetailSessions();
+    });
+  }
+
   private renderSelectControls(item: ScenarioListItem): void {
     const head = this.detailSelectHeadEl;
     if (!head) return;
@@ -2843,6 +2924,7 @@ export class DashboardView extends ItemView {
     list.empty();
 
     const item = this.scenarios.find((s) => s.folder === this.detailFolder);
+    this.renderModeFilter();
     if (item) this.renderSelectControls(item);
 
     if (this.detailSessions.length === 0) {
@@ -2852,8 +2934,18 @@ export class DashboardView extends ItemView {
 
     const activeFile = this.plugin.getActiveOrLastSessionFile();
     const sorted = this.detailSessions
-      .slice()
+      .filter((s) => matchesSessionMode(s, this.sessionModeFilter))
       .sort((a, b) => sessionRecentTime(b) - sessionRecentTime(a));
+
+    if (sorted.length === 0) {
+      this.renderEmpty(
+        list,
+        this.sessionModeFilter === "chat"
+          ? "채팅 세션이 없습니다."
+          : "소설 세션이 없습니다."
+      );
+      return;
+    }
 
     for (const s of sorted) {
       const row = list.createDiv({ cls: "ggai-dash-session-row" });
@@ -2879,6 +2971,7 @@ export class DashboardView extends ItemView {
       const main = row.createDiv({ cls: "ggai-dash-session-main" });
       const nameEl = main.createDiv({ cls: "ggai-dash-session-name" });
       nameEl.createSpan({ text: s.session.meta.name || s.folderName });
+      this.appendModeBadge(nameEl, s);
       this.appendSeriesBadge(nameEl, s);
       const time = formatRelativeTime(sessionRecentTime(s));
       const nodeCount = Object.keys(s.session.nodes ?? {}).length;

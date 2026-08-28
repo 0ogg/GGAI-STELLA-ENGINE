@@ -17,7 +17,8 @@
  *  - 사용자 활동(그 세션의 본문 변경)마다 타이머 리셋 — 대화 중엔 안 끼어들고,
  *    마지막 활동에서 간격만큼 지난 뒤에 온다. 켜기/끄기는 session-changed 로 감지.
  *  - 발화 전 판정: 안 읽은 응답이 누적 상한(`settings.proactiveMaxUnread`)만큼
- *    쌓였으면 쉼(N0 unread 재사용), 지금 보고 있는 세션이면 다음 기회로.
+ *    쌓였으면 쉼(N0 unread 재사용). 세션을 보고 있어도 발화한다 — 마지막 활동에서
+ *    간격만큼 지났으면 "보는 중"은 미루는 이유가 아니다(사용자 요청, 2026-08-29).
  */
 import type StellaEnginePlugin from "../main";
 import type { SessionChangeDetail } from "../state/store";
@@ -34,7 +35,6 @@ import {
 } from "../util/group-speaker";
 import { formatIdleEn } from "../util/idle-duration";
 import { uuidv4 } from "../util/uuid";
-import { isViewingSession } from "../views/session-host";
 
 export type ProactiveResult = { ok: true } | { ok: false; error: string };
 
@@ -246,11 +246,6 @@ export class ProactiveService {
     ) {
       // 세션이 사라졌거나 꺼짐 — 예약만 정리.
       await this.setSchedule(file, null);
-      return;
-    }
-    // 지금 보면서 대화 중인 세션엔 끼어들지 않는다 — 다음 기회로 (독촉/일반 공통).
-    if (isViewingSession(plugin.app.workspace, file)) {
-      await postpone();
       return;
     }
     if (!plugin.ai.isAvailable()) {

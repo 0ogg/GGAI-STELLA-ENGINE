@@ -41,6 +41,21 @@ export function sessionRecentTime(item: SessionListItem): number {
   );
 }
 
+/** 세션 모드 필터 — "novel" 은 챗이 아닌 모든 세션(소설·textgame). */
+export function matchesSessionMode(
+  item: SessionListItem,
+  filter: "all" | "novel" | "chat"
+): boolean {
+  if (filter === "all") return true;
+  const isChat = item.session.meta.mode === "chat";
+  return filter === "chat" ? isChat : !isChat;
+}
+
+/** 세션 카드에 붙는 모드 표시 — 챗이 아닌 세션은 전부 "소설". */
+export function sessionModeLabel(item: SessionListItem): "소설" | "채팅" {
+  return item.session.meta.mode === "chat" ? "채팅" : "소설";
+}
+
 /** 새 세션 루트에 심을 first_mes + alternate_greetings 분기 목록. */
 export function firstMessageBranches(item: ScenarioListItem): string[] {
   const data = item.scenario.data;
