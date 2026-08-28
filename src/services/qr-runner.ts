@@ -49,6 +49,8 @@ import { uuidv4 } from "../util/uuid";
 import { ChoiceModal, PromptModal } from "../views/modals";
 import { detectFormat, type ImportFormat } from "../import/detect";
 import { flushQrInjections, setQrInjection } from "./qr-injections";
+import { applyRawRegexToGeneration } from "../util/session-regex";
+import type { GenerationProfileLite } from "./ai-service";
 
 /** 실행 호스트 — 커맨드가 아닌 텍스트를 세션에 넣는 방법(뷰마다 다르다). */
 export interface QrRunHost {
@@ -295,9 +297,11 @@ async function runCommand(state: QrRunState, cmd: QrCommand): Promise<string> {
       return await runButtons(state, cmd, unquoteQrBody(body()));
 
     case "re-exec": {
-      // 정규식 실행 — AI 응답에서 값을 뽑는 용도. `first=` 는 값 없는 플래그다.
+      // 정규식 실행 — AI 응답에서 값을 뽑는 용도.
+      // `first=` 는 LALib 원본이 `first=true|false` 로 쓴다 — 있기만 하면 참으로 보면
+      // `first=false`(원본 기본값을 명시한 것)가 참이 되어 매치를 하나만 돌려준다.
       const find = cmd.named.find === undefined ? "" : expand(state, cmd.named.find);
-      return runQrRegex(find, body(), cmd.named.first !== undefined);
+      return runQrRegex(find, body(), isQrFlagOn(cmd.named.first, arg("first")));
     }
 
     case "re-replace": {
@@ -467,7 +471,15 @@ function runInject(
 async function runSend(state: QrRunState, text: string): Promise<string> {
   const file = state.host.sessionFile();
   if (!file || !text.trim()) return text;
-  await appendSessionMessage(state, file, text, "user");
+  const appended = await appendSessionMessage(state, file, text, "user");
+  // 유저 발화는 생성이 아니므로 유저 입력 훅 — 뷰의 입력 경로와 같은 규약.
+  if (appended) {
+    await state.plugin.extensions.runUserText({
+      sessionFile: file,
+      nodeId: appended.nodeId,
+      text: appended.text,
+    });
+  }
   return text;
 }
 
@@ -632,10 +644,10 @@ async function runSendAs(
 ): Promise<string> {
   const file = state.host.sessionFile();
   if (!file || !text.trim()) return text;
-  const session = await appendSessionMessage(state, file, text);
-  if (!session) return text;
+  const appended = await appendSessionMessage(state, file, text);
+  if (!appended) return text;
 
-  const nodeId = session.meta.activeLeafId;
+  const { session, nodeId } = appended;
   const speakerId = await resolveSpeakerId(state, session, name);
   if (speakerId) {
     session.nodes[nodeId].speaker = speakerId;
@@ -645,24 +657,43 @@ async function runSendAs(
       speakerName: name,
     });
   }
+  // 발화자 귀속까지 확정한 뒤 마무리 파이프 — 이어쓰기와 같은 후처리를 받는다.
+  await runGenerationPipe(state, file, appended);
   return text;
 }
 
+/** `appendSessionMessage` 결과 — 호출부가 노드에 더 얹고 마무리 파이프를 돌릴 재료. */
+interface AppendedMessage {
+  session: StellaSession;
+  nodeId: string;
+  /** 붙기 직전까지의 본문 — 생성-완료 훅이 "이번에 새로 생긴 구간"을 가르는 기준. */
+  parentText: string;
+  /** 실제로 저장된 텍스트 (AI 발화는 저장 원문 정규식이 적용된 뒤). */
+  text: string;
+}
+
 /**
- * 본문 끝에 AI 발화 노드 하나를 붙인다 (`/sendas` `/comment` 공용).
- * 저장까지 마친 세션 객체를 돌려준다 — 호출부가 그 노드에 더 얹을 게 있으면 이어서 쓴다.
+ * 본문 끝에 발화 노드 하나를 붙인다 (`/sendas` `/comment` `/impersonate` `/send` 공용).
+ *
+ * AI 발화는 **저장 전에 저장 원문(raw) 정규식**을 거친다 — 소설 뷰·챗 뷰·선채팅의
+ * 생성 마무리와 같은 처리다. QR 산출물만 정규식을 안 타면 마법 신문·가십지 같은
+ * 결과물에서 사용자가 걸어 둔 치환이 통째로 빠진다.
  */
 async function appendSessionMessage(
   state: QrRunState,
   file: string,
   text: string,
-  /** 누구의 발화로 남길지. 기본은 AI(`/sendas` `/comment`), `/send` 만 유저다. */
+  /** 누구의 발화로 남길지. 기본은 AI(`/sendas` `/comment` `/impersonate`), `/send` 만 유저다. */
   author: "ai" | "user" = "ai"
-): Promise<StellaSession | null> {
+): Promise<AppendedMessage | null> {
   const plugin = state.plugin;
   await plugin.flushSessionEdits(file);
   const session = await plugin.store.getSession(file).catch(() => null);
   if (!session) return null;
+
+  const saved =
+    author === "ai" ? await applyRawRegexToGeneration(plugin, file, text) : text;
+  if (!saved.trim()) return null;
 
   const parentId = session.meta.activeLeafId;
   // body-raw: 앞에 구분자를 넣을지만 본다(본문이 비었는가) — 저장 원문 기준.
@@ -677,14 +708,51 @@ async function appendSessionMessage(
     id: uuidv4(),
     parent: parentId,
     kind: author === "user" ? "user-write" : "ai-continue",
-    patches: [{ op: "append", spans: [{ author, text: sep + text }] }],
+    patches: [{ op: "append", spans: [{ author, text: sep + saved }] }],
     createdAt: Date.now(),
   };
   session.nodes[node.id] = node;
   session.meta.activeLeafId = node.id;
   session.meta.modifiedAt = Date.now();
   await plugin.store.saveSession(file, session);
-  return session;
+  return { session, nodeId: node.id, parentText, text: saved };
+}
+
+/**
+ * QR 이 남긴 AI 발화의 **마무리 파이프** — 이어쓰기가 끝날 때 도는 것과 같은 훅
+ * (자동 번역·자동 삽화·자동 요약·로어북 자동 생성·반복 표현·폰·알림).
+ * 선채팅 서비스와 같은 규약이다 — 확장마다 별도 실행 경로를 만들지 않는다.
+ *
+ * `/comment` 처럼 AI 에게 숨긴 노드도 그대로 통과시킨다: 숨김은 "전송본에서 빼기"라
+ * 요약·로어북 자동 생성은 본문 통로에서 알아서 빠지고, 화면에 보이는 번역·삽화만 붙는다.
+ */
+async function runGenerationPipe(
+  state: QrRunState,
+  file: string,
+  appended: AppendedMessage
+): Promise<void> {
+  await state.plugin.extensions.runGenerationComplete({
+    sessionFile: file,
+    nodeId: appended.nodeId,
+    generatedText: appended.text,
+    parentText: appended.parentText,
+    profile: resolveSessionProfile(state, appended.session),
+  });
+}
+
+/** 훅에 실어 보낼 생성 프로필 — 세션 활성 프로필 → 기본 프로필 순. */
+function resolveSessionProfile(
+  state: QrRunState,
+  session: StellaSession
+): GenerationProfileLite {
+  const ai = state.plugin.ai;
+  const found =
+    ai.getProfileById(session.meta.modelProfileId) ??
+    ai.getDefaultChatProfile() ??
+    ai.getDefaultGenerationProfile();
+  return (
+    found ?? { id: "", name: "", kind: "chat", provider: "", model: "" }
+  );
 }
 
 /** `/sendas name=` 의 이름 → 그룹 멤버 시나리오 id (아니면 null = 호스트 발화). */
@@ -711,9 +779,14 @@ async function resolveSpeakerId(
 }
 
 /**
- * `/impersonate <지시>` — AI 가 **유저 대신** 다음 발언을 써 준다. 결과는 바로
- * 보내지 않고 유저 입력 경로(`runText(send=false)`)로 넘긴다 — 챗은 입력창에,
- * 소설은 본문 끝 유저 문단으로. 마음에 안 들면 지우면 되는 자리에 놓는 것이다.
+ * `/impersonate <지시>` — AI 가 **유저 대신** 다음 발언을 써 준다(대필).
+ *
+ * 결과는 **AI 생성 노드**로 본문에 남는다 — 프롬프트만 다를 뿐 이어쓰기와 같은 생성이라,
+ * 정규식·자동 번역·자동 삽화·요약이 이어쓰기와 똑같이 붙고 분기 지도에서 재생성도 된다.
+ * (예전엔 유저 초고로만 붙어 이 파이프들과 따로 놀았다.)
+ *
+ * 챗 세션에서는 말풍선이 캐릭터 쪽에 서므로 **누구의 말인지 이름표**를 달아 준다
+ * (`/sendas` 의 익명 발화자와 같은 기계 — 본문에는 접두어를 박지 않는다).
  */
 async function runImpersonate(state: QrRunState, extra: string): Promise<string> {
   const macro = state.macro;
@@ -726,7 +799,16 @@ async function runImpersonate(state: QrRunState, extra: string): Promise<string>
       `]`
   );
   if (!text) return "";
-  await state.host.runText(text, false);
+  const file = state.host.sessionFile();
+  if (!file) return text;
+  const appended = await appendSessionMessage(state, file, text);
+  if (!appended) return text;
+  if (appended.session.meta.mode === "chat" && macro.user) {
+    await state.plugin.store.patchSessionNodeMeta(file, appended.nodeId, {
+      speakerName: macro.user,
+    });
+  }
+  await runGenerationPipe(state, file, appended);
   return text;
 }
 
@@ -747,11 +829,14 @@ async function runComment(state: QrRunState, text: string): Promise<string> {
   const { title, body } = parseDetailsBlock(text);
   const content = title ? `${title}\n${body}` : body;
   if (!content.trim()) return text;
-  const session = await appendSessionMessage(state, file, content);
-  if (!session) return text;
-  await state.plugin.store.patchSessionNodeMeta(file, session.meta.activeLeafId, {
+  const appended = await appendSessionMessage(state, file, content);
+  if (!appended) return text;
+  await state.plugin.store.patchSessionNodeMeta(file, appended.nodeId, {
     hidden: true,
   });
+  // 숨김을 확정한 뒤 파이프 — 요약/로어북은 본문 통로에서 알아서 빠지고,
+  // 화면에 보이는 번역·삽화만 붙는다.
+  await runGenerationPipe(state, file, appended);
   return text;
 }
 
