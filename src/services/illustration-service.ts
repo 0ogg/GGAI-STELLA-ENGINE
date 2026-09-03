@@ -5,8 +5,8 @@
  *  1. 대상 노드(기본: activeLeaf)까지의 본문 끝 일부(첨부량)를 컨텍스트로 모은다.
  *  2. 삽화 프롬프트 생성 모델(LLM)에 컨텍스트를 넣어 영어 이미지 프롬프트 1개를 받는다.
  *  3. 생성된 장면 프롬프트만 Core image() 로 넘긴다 — 품질태그(메인 프롬프트)와 UC 는
- *     삽화 이미지 프로필(Core)에 등록된 값을 쓰고, Core 가 프로필 메인 프롬프트 뒤에
- *     이 장면 프롬프트를 이어붙여 생성한다 (NovelAI 이미지 프로필).
+ *     삽화 이미지 프로필(Core)에 등록된 값을 쓰고, Core 가 이 장면 프롬프트 뒤에
+ *     프로필 메인 프롬프트를 이어붙여 생성한다 (Core 0.6.2+, NovelAI 이미지 프로필).
  *  4. PNG 를 세션 assets/ 에 저장하고 노드 variant 로 기록 (Store 경유).
  *
  * 원문 세션 노드는 절대 수정하지 않는다. 에러는 throw 대신 결과 객체로 반환한다.
@@ -127,7 +127,7 @@ export class IllustrationService {
     if (!imagePrompt.trim()) return fail("생성된 삽화 프롬프트가 비어 있습니다.");
 
     // 품질 태그(메인 프롬프트)와 UC 는 삽화 이미지 프로필(Core)에 등록된 값을 쓴다.
-    // Stella 는 장면 프롬프트만 넘기고, Core 가 프로필 메인 프롬프트 뒤에 이어붙인다.
+    // Stella 는 장면 프롬프트만 넘기고, Core 가 그 뒤에 프로필 메인 프롬프트를 붙인다.
     return this.renderToVariant(sessionFile, targetNode, {
       prompt: imagePrompt.trim(),
       imageProfileId,
