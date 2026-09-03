@@ -372,6 +372,7 @@ export async function startNextEpisode(
       summarize: prev.meta.summarize ? { ...prev.meta.summarize } : undefined,
       naiFormat: prev.meta.naiFormat,
       continueAnchor: prev.meta.continueAnchor,
+      trimIncomplete: prev.meta.trimIncomplete,
     };
     // 루트 분기면 제목에 루트 번호를 붙여 목록에서 구분되게 한다.
     const newName =

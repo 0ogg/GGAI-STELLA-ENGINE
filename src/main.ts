@@ -916,6 +916,7 @@ export default class StellaEnginePlugin extends Plugin {
           pro: session.meta.pro ? { ...session.meta.pro } : undefined,
           naiFormat: session.meta.naiFormat,
           continueAnchor: session.meta.continueAnchor,
+          trimIncomplete: session.meta.trimIncomplete,
         };
       }
     }
@@ -2043,6 +2044,7 @@ function applyActiveSettingsPatch(
   if (patch.pro !== undefined) target.pro = { ...patch.pro };
   if (patch.naiFormat !== undefined) target.naiFormat = patch.naiFormat;
   if (patch.continueAnchor !== undefined) target.continueAnchor = patch.continueAnchor;
+  if (patch.trimIncomplete !== undefined) target.trimIncomplete = patch.trimIncomplete;
 }
 
 /** patch 를 적용하면 target 의 값이 실제로 바뀌는가 — no-op 저장·방송 방지용. */

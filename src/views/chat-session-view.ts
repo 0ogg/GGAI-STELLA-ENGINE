@@ -42,6 +42,7 @@ import {
 import { planSessionRequest } from "../util/build-session-context";
 import { presetToGenerationOverride } from "../types/preset";
 import { applyRawRegexToGeneration } from "../util/session-regex";
+import { trimIncompleteTail } from "../util/trim-incomplete";
 import {
   buildChatMessages,
   CHAT_MESSAGE_SEPARATOR,
@@ -53,7 +54,8 @@ import {
   setActiveIllustrationVariant,
   toggleIllustrationFavorite,
 } from "../util/illustrations";
-import { formatChatText } from "../util/chat-format";
+import { formatMessageHtml } from "../util/message-format";
+import { attachCodeCopyButtons } from "../util/code-copy";
 import {
   hasCardImageTag,
   hasHtmlMarkup,
@@ -67,7 +69,6 @@ import { readScenarioRegexScripts } from "../util/regex-scripts";
 import { listParagraphRanges } from "../util/paragraph-regen";
 import { attachLongPress } from "../util/long-press";
 import { PressMenuController } from "../util/press-menu";
-import { attachTapToEdit } from "../util/tap-to-edit";
 import {
   openExtensionActionsMenu,
   renderHeaderCommandBar,
@@ -243,8 +244,15 @@ export class ChatSessionView extends ItemView {
 
   private editCommitTimer: number | null = null;
   private pendingEditBubble: HTMLElement | null = null;
+  /**
+   * 지금 수정 중인 메시지 — 수정 버튼으로만 열린다(말풍선 클릭 = 편집 진입은 폐지).
+   * `target` 은 번역 보기에서 무엇을 고치는지: 번역문(translation) / 원문(source).
+   * 열려 있는 동안 그 말풍선 하나만 편집칸이고 나머지는 읽기 상태 그대로다.
+   */
+  private editing: { index: number; target: "source" | "translation" } | null =
+    null;
   private followTail = true;
-  /** 번역 보기 직접 편집 상태 — 포커스된 말풍선 하나만 (blur 시 커밋 후 해제). */
+  /** 번역 보기 수정 상태 — 수정칸이 열린 말풍선 하나만 (닫을 때 커밋 후 해제). */
   private trEdit: {
     bubble: HTMLElement;
     blocks: { hash: string; source: string; baseline: string; el: HTMLElement }[];
@@ -305,6 +313,23 @@ export class ChatSessionView extends ItemView {
     return this.generation != null;
   }
 
+  /**
+   * 사용자가 지금 말풍선에 손대고 있는가 (session-host 규약).
+   * 포커스/조합 중이거나, 아직 노드로 커밋되지 않은 편집(디바운스 대기·번역 편집·
+   * 양방향 반영 대기)이 남아 있으면 true. 백그라운드 쓰기(선채팅)가 이 순간을
+   * 피하는 데 쓴다 — 편집이 커밋되는 중간에 다른 쓰기가 끼어들면 안 된다.
+   */
+  isBusyEditing(): boolean {
+    return (
+      this.isBubbleEditing() ||
+      this.editing != null ||
+      this.pendingEditBubble != null ||
+      this.editCommitTimer != null ||
+      this.trEdit != null ||
+      this.bidiReflectTimer != null
+    );
+  }
+
   /** 자동 실행 QR (session-host 규약) — 판단·실행은 전부 바가 소유한다. */
   async runAutoQuickReplies(trigger: AutoExecuteFlagKey): Promise<void> {
     await this.qrBar?.runAuto(trigger);
@@ -317,6 +342,10 @@ export class ChatSessionView extends ItemView {
     }
     const bubble = this.pendingEditBubble;
     this.pendingEditBubble = null;
+    // 열려 있던 수정칸은 여기서 닫는다 — 전송·재생성·undo 같은 명시적 액션은
+    // 편집을 확정하고 진행한다(회귀금지: 미커밋 편집을 안은 채 생성 금지).
+    const wasEditing = this.editing != null;
+    this.editing = null;
     if (bubble) await this.commitBubbleEdit(bubble);
     // 번역 보기에서 편집 중인 말풍선도 커밋 (translations.json 에만 저장).
     if (this.trEdit) await this.endTranslationBubbleEdit(this.trEdit.bubble);
@@ -327,6 +356,12 @@ export class ChatSessionView extends ItemView {
       this.bidiReflectTimer = null;
     }
     if (this.bidirectional()) await this.runBidiReflect();
+    // 수정칸을 닫았으면 표시본으로 되돌려 그린다 (호출자가 재렌더하지 않는
+    // 경로 — 백그라운드 쓰기 직전 flush 등 — 에서도 화면이 편집칸으로 남지 않게).
+    if (wasEditing) {
+      if (this.renderPending) await this.reloadFromStore();
+      else this.renderMessages();
+    }
   }
 
   scrollToNode(nodeId: string): boolean {
@@ -618,9 +653,14 @@ export class ChatSessionView extends ItemView {
     this.renderMessages();
   }
 
-  /** 말풍선 안에서 실제로 편집(포커스/조합) 중인가 — 버튼 포커스는 편집이 아니다. */
+  /**
+   * 말풍선 안에서 실제로 편집(포커스/조합) 중인가 — 버튼 포커스는 편집이 아니다.
+   * 수정칸이 닫혀 있으면(editing==null) 지킬 것이 없으므로 재렌더를 막지 않는다
+   * — 방금 닫은 편집칸에 포커스가 남아 갱신이 통째로 미뤄지는 것을 막는다.
+   */
   private isBubbleEditing(): boolean {
     if (this.guard.isComposing) return true;
+    if (this.editing == null) return false;
     const active = document.activeElement;
     return (
       active instanceof HTMLElement &&
@@ -867,6 +907,17 @@ export class ChatSessionView extends ItemView {
       },
       true
     );
+    // 카드가 낸 선택지 버튼 — 누르면 그 글자를 그대로 보낸다.
+    // (원본 실리태번은 카드 버튼을 장식으로만 그린다 — 여기는 우리 추가다.)
+    this.messagesEl.addEventListener("click", (e) => {
+      const target = e.target as HTMLElement | null;
+      const btn = target?.closest?.(".ggai-card-btn");
+      if (!(btn instanceof HTMLElement)) return;
+      e.preventDefault();
+      if (this.paraSelectMode || this.generation || this.editing) return;
+      const label = (btn.textContent ?? btn.getAttribute("value") ?? "").trim();
+      if (label) void this.applyQuickReplyText(label, true);
+    });
     this.applyViewStyle();
 
     // 빠른 답장(QR) 바 — 입력바 바로 위 좌측. 열림/닫힘은 전역 영속.
@@ -1184,18 +1235,20 @@ export class ChatSessionView extends ItemView {
         bubble.setText(this.generation?.accumulatedText ?? "");
         this.streamBubbleEl = bubble;
         row.addClass("is-generating");
-      } else if (this.translationViewActive) {
-        // 번역 보기 — 번역 슬롯 치환 표시 + 직접 편집(문단별 user-edit variant 로
-        // translations.json 에만 저장 — 본문(원문)은 절대 건드리지 않는다).
-        this.setBubbleDisplay(bubble, this.bubbleDisplayText(msg, index));
-        row.addClass("is-translated");
-        if (!this.paraSelectMode) this.makeTranslationBubbleEditable(bubble);
       } else {
-        // 표시 = 매크로 적용본에 표기(기울임/대사/문단) 반영, 편집 진입(focus)
-        // 시 raw 로 스왑.
-        this.setBubbleDisplay(bubble, this.bubbleDisplayText(msg, index));
-        // 선택 모드에서는 편집 대신 탭 = 재생성 대상 지정.
-        if (!this.paraSelectMode) this.makeBubbleEditable(bubble);
+        if (this.translationViewActive) row.addClass("is-translated");
+        if (this.editing?.index === index) {
+          // 수정 중인 메시지 하나만 편집칸이 된다 — 내용은 꾸미지 않은 원문.
+          this.openBubbleEditor(bubble, index, this.editing.target);
+        } else {
+          // 표시 = 매크로 적용본에 표기(기울임/대사/문단) 반영. 읽기 상태라
+          // 말풍선을 눌러도 편집이 열리지 않는다 — 편집은 수정 버튼 몫.
+          this.setBubbleDisplay(bubble, this.bubbleDisplayText(msg, index));
+        }
+      }
+      // 수정 버튼 — 이름줄 끝. 생성 중이거나 문단 선택 모드에서는 안 그린다.
+      if (!this.generation && !this.paraSelectMode) {
+        this.renderMessageEditButtons(nameEl, index);
       }
       // 되돌리기 띠는 표시 텍스트를 채운 **뒤에** 얹는다 — setBubbleDisplay 가
       // 말풍선 안을 다시 그리므로 먼저 붙이면 그때 날아간다.
@@ -1862,7 +1915,7 @@ export class ChatSessionView extends ItemView {
    * 말풍선 클릭 → 본문 전체 기준 문단 인덱스.
    * 전역 인덱스 = 앞 메시지들의 문단 수 합 + 말풍선 안 클릭 문단 순번.
    *
-   * 말풍선 표시는 <p class="ggai-chat-para">(빈 줄 경계) 안에 <br>(단일 줄바꿈)로
+   * 말풍선 표시는 <p>(빈 줄 경계) 안에 <br>(단일 줄바꿈)로
    * 그려지고, textContent 에는 그 경계가 남지 않는다 — 그래서 글자 오프셋 역산이
    * 아니라 **클릭한 <p> 블록 + 그 안의 줄(<br>) 순번**을 직접 센다. 재생성 문단
    * 단위(tokenizeParagraphs = 줄 단위)와 1:1 로 맞는 계산이다.
@@ -1885,12 +1938,10 @@ export class ChatSessionView extends ItemView {
 
     let within = total - 1; // 폴백: 여백/경계 클릭은 마지막 문단
     const blocks = Array.from(
-      bubble.querySelectorAll<HTMLElement>(":scope > p.ggai-chat-para")
+      bubble.querySelectorAll<HTMLElement>(":scope > p")
     );
     const clickedBlock =
-      e.target instanceof HTMLElement
-        ? e.target.closest("p.ggai-chat-para")
-        : null;
+      e.target instanceof HTMLElement ? e.target.closest("p") : null;
     if (blocks.length > 0 && clickedBlock instanceof HTMLElement) {
       const bIdx = blocks.indexOf(clickedBlock);
       if (bIdx >= 0) {
@@ -2119,26 +2170,28 @@ export class ChatSessionView extends ItemView {
   // 이 뷰는 store 이벤트로 결과만 반영.
 
   /**
-   * 말풍선 표시본 채우기 — 표기(기울임/대사/문단)를 반영한 HTML.
-   * 편집(focus) 시에는 raw 로 스왑되므로 diff/커밋에는 영향이 없다.
+   * 말풍선 표시본 채우기 — 마크다운 전반(표·목록·인용·코드·링크·강조)을 그린다.
+   * 수정칸을 열면 raw 로 스왑되므로 diff/커밋에는 영향이 없다.
    *
-   * 카드 표시 확장이 켜져 있고 실제 태그가 섞여 있으면 화이트리스트로 걸러 그린다
-   * (게임형 카드 지원 스펙.md U4) — 상태창·표·게이지가 글자가 아니라 화면이 된다.
-   * 태그가 없으면 예전 경로 그대로다(`3 < 5` 같은 글을 마크업으로 오인하지 않게).
+   * 카드 표시 확장이 켜져 있고 실제 태그가 섞여 있으면 HTML 도 함께 살려서
+   * 화이트리스트로 걸러 그린다 (게임형 카드 지원 스펙.md U4) — 상태창·표·게이지가
+   * 글자가 아니라 화면이 된다. 태그가 없으면 태그를 글자로 본다(`3 < 5` 같은 글을
+   * 마크업으로 오인하지 않게).
    */
   private setBubbleDisplay(bubble: HTMLElement, text: string): void {
-    if (
+    const allowHtml =
       this.plugin.isExtensionEnabled("stella:card-display") &&
-      (hasHtmlMarkup(text) || hasCardImageTag(text))
-    ) {
-      renderSafeHtml(
-        bubble,
-        replaceCardImageTags(text, (name) => this.resolveCardImageSrc(name)),
-        formatChatText
-      );
-      return;
-    }
-    bubble.innerHTML = formatChatText(text);
+      (hasHtmlMarkup(text) || hasCardImageTag(text));
+    const source = allowHtml
+      ? replaceCardImageTags(text, (name) => this.resolveCardImageSrc(name))
+      : text;
+    renderSafeHtml(bubble, formatMessageHtml(source, { allowHtml }), {
+      // 카드 CSS 는 말풍선 안으로 가둔다 — 옵시디언 화면 전체를 망치지 않게.
+      styleScope: ".ggai-chat-bubble",
+    });
+    // 마크다운으로 그려진 본문 표시 — 수정칸/스트리밍(원문 그대로)과 구분한다.
+    bubble.addClass("ggai-md");
+    attachCodeCopyButtons(bubble);
   }
 
   /**
@@ -2429,50 +2482,104 @@ export class ChatSessionView extends ItemView {
     this.renderMessages();
   }
 
-  // ── 말풍선 직접 편집 (EditGuard + user-edit 파생 노드) ────────────
+  // ── 말풍선 수정 (수정 버튼 → 편집칸, EditGuard + user-edit 파생 노드) ──
+  //
+  // 말풍선 클릭 = 편집 진입은 폐지했다. 읽는 중 오탭으로 편집이 열려 표시본이
+  // 원문으로 튀어나오고, 링크·접기·이미지 같은 눌러야 하는 것들이 전부 죽었다.
+  // 이제 편집은 이름줄 끝 **수정 버튼**으로만 열리고, 열린 말풍선 하나만
+  // 편집칸이 된다(나머지는 읽기 상태 그대로 — 표시본 유지).
 
-  private makeBubbleEditable(bubble: HTMLElement): void {
-    bubble.setAttr("contenteditable", "plaintext-only");
-    // 클릭 좌표 기억 — raw 스왑 후 커서를 클릭 지점 근처로 복원한다.
-    let lastPointer: { x: number; y: number } | null = null;
-    bubble.addEventListener("pointerdown", (e) => {
-      lastPointer = { x: e.clientX, y: e.clientY };
+  /** 이름줄 끝의 수정/완료 버튼. 번역 보기에서는 원문↔번역 전환도 함께. */
+  private renderMessageEditButtons(nameEl: HTMLElement, index: number): void {
+    const actions = nameEl.createSpan({ cls: "ggai-chat-msg-actions" });
+    const editing = this.editing?.index === index ? this.editing : null;
+    // 번역문을 고치다 원문으로 (또는 그 반대로) — 같은 자리에서 갈아탄다.
+    if (editing && this.translationViewActive) {
+      const toSource = editing.target === "translation";
+      const swap = actions.createEl("button", {
+        cls: "clickable-icon ggai-chat-msg-action",
+        attr: {
+          "aria-label": toSource ? "원문 수정" : "번역문 수정",
+          "data-tooltip-position": "top",
+        },
+      });
+      setIcon(swap, toSource ? "file-text" : "languages");
+      swap.addEventListener("click", () => {
+        void this.startBubbleEdit(index, toSource ? "source" : "translation");
+      });
+    }
+    const btn = actions.createEl("button", {
+      cls: "clickable-icon ggai-chat-msg-action",
+      attr: {
+        "aria-label": editing ? "수정 완료" : "메시지 수정",
+        "data-tooltip-position": "top",
+      },
     });
-    // 편집 진입 — 매크로 표시본 대신 raw 텍스트로 스왑 (매크로 원문을 고치게).
-    bubble.addEventListener("focus", () => {
-      const idx = Number(bubble.dataset.index);
-      const msg = this.messages[idx];
-      if (!msg) return;
-      const raw = this.displayTextOf(msg);
-      if (bubble.textContent !== raw) {
-        bubble.setText(raw);
-        // 커서 복원 — 표시본→raw 스왑으로 클릭 지점을 잃지 않게, 같은 좌표의
-        // 글자 위치에 caret 을 놓는다 (문구가 거의 같아 자연스럽게 맞는다).
-        // 포커스된 말풍선 자신에 대한 조작이라 배경 Selection 개입 금지와 무관.
-        const pt = lastPointer;
-        if (pt && !isImeComposing()) {
-          window.requestAnimationFrame(() => {
-            if (document.activeElement !== bubble || isImeComposing()) return;
-            placeCaretAtPoint(bubble, pt.x, pt.y);
-          });
-        }
+    if (editing) btn.addClass("is-editing");
+    setIcon(btn, editing ? "check" : "pencil");
+    btn.addEventListener("click", () => {
+      if (editing) void this.flushPendingEdits();
+      else {
+        void this.startBubbleEdit(
+          index,
+          this.translationViewActive ? "translation" : "source"
+        );
       }
-      lastPointer = null;
     });
-    // Esc = 편집 취소 — 저장 예약을 버리고 원래 내용으로 되돌린 뒤 편집 종료.
+  }
+
+  /**
+   * 수정 시작 — 다른 메시지를 고치던 중이면 그것부터 확정하고 넘어간다.
+   * 편집칸 자체는 재렌더가 만들고(openBubbleEditor), 여기서는 커서만 옮긴다.
+   */
+  private async startBubbleEdit(
+    index: number,
+    target: "source" | "translation"
+  ): Promise<void> {
+    if (this.generation || this.paraSelectMode) return;
+    await this.flushPendingEdits(); // 앞서 열려 있던 수정칸 커밋 + 닫기
+    if (!this.session || !this.messages[index]) return;
+    this.editing = { index, target };
+    this.renderMessages();
+    const bubble = this.messagesEl?.querySelector<HTMLElement>(
+      `.ggai-chat-bubble[data-index="${index}"]`
+    );
+    // 조합 중에는 선택영역을 건드리지 않는다(입력 마비 회귀 방어).
+    if (!bubble || isImeComposing()) return;
+    bubble.focus({ preventScroll: true });
+    placeCaretAtEnd(bubble);
+  }
+
+  /** 편집칸 열기 — 꾸민 표시본 대신 원문(raw)을 넣고 편집 배선을 붙인다. */
+  private openBubbleEditor(
+    bubble: HTMLElement,
+    index: number,
+    target: "source" | "translation"
+  ): void {
+    const msg = this.messages[index];
+    if (!msg) return;
+    bubble.setAttr("contenteditable", "plaintext-only");
+    bubble.addClass("is-editing");
+    if (target === "translation") {
+      this.beginTranslationBubbleEdit(
+        bubble,
+        this.displayTextOf(msg),
+        this.prevTailOf(index)
+      );
+      this.attachTranslationBubbleEditing(bubble);
+      return;
+    }
+    bubble.setText(this.displayTextOf(msg));
+    this.attachSourceBubbleEditing(bubble);
+  }
+
+  /** 원문 편집 배선 — 커밋은 항상 raw 기준이라 diff/offset 이 변하지 않는다. */
+  private attachSourceBubbleEditing(bubble: HTMLElement): void {
     bubble.addEventListener("keydown", (e) => {
       if (e.key !== "Escape" || e.isComposing || this.guard.isComposing) return;
       e.preventDefault();
       e.stopPropagation();
-      if (this.editCommitTimer != null) {
-        window.clearTimeout(this.editCommitTimer);
-        this.editCommitTimer = null;
-      }
-      if (this.pendingEditBubble === bubble) this.pendingEditBubble = null;
-      const idx = Number(bubble.dataset.index);
-      const msg = this.messages[idx];
-      if (msg) bubble.setText(this.displayTextOf(msg));
-      bubble.blur(); // blur 핸들러가 매크로 표시본으로 복귀시킨다
+      this.cancelBubbleEdit();
     });
     bubble.addEventListener("input", () => {
       if (this.guard.isComposing) return; // IME 조합 중 커밋 금지
@@ -2482,62 +2589,55 @@ export class ChatSessionView extends ItemView {
       // 조합 확정값 유실 방지 — 조합 끝에서 반드시 커밋 스케줄.
       this.scheduleBubbleCommit(bubble);
     });
+    // 다른 곳을 눌러도 수정칸은 열려 있다(닫는 건 완료/Esc 몫) — 다만 지금까지
+    // 친 내용은 여기서 확정해 둔다. 미커밋 편집을 안은 채 다른 동작이 돌지 않게.
     bubble.addEventListener("blur", () => {
-      void (async () => {
-        if (this.pendingEditBubble === bubble) await this.flushPendingEdits();
-        if (this.renderPending) {
-          // 편집 중 미뤄둔 재렌더/외부 변경 반영.
-          await this.reloadFromStore();
-          return;
-        }
-        // 편집 종료 — 매크로+표시 정규식 적용본(표기 반영)으로 복귀.
-        const idx = Number(bubble.dataset.index);
-        const msg = this.messages[idx];
-        if (msg) {
-          this.setBubbleDisplay(
-            bubble,
-            this.displayRegexText(this.macroText(this.displayTextOf(msg)), idx)
-          );
-        }
-      })();
+      if (this.pendingEditBubble !== bubble) return;
+      void this.commitPendingBubble();
     });
-    // 모바일 — 스크롤 끝에서 편집이 열리지 않도록 제자리 탭에만 반응하게 잠근다.
-    attachTapToEdit(bubble);
+  }
+
+  /** 디바운스 대기 중인 말풍선 커밋만 앞당긴다 (수정칸은 열어 둔다). */
+  private async commitPendingBubble(): Promise<void> {
+    if (this.editCommitTimer != null) {
+      window.clearTimeout(this.editCommitTimer);
+      this.editCommitTimer = null;
+    }
+    const bubble = this.pendingEditBubble;
+    this.pendingEditBubble = null;
+    if (bubble) await this.commitBubbleEdit(bubble);
+  }
+
+  /** Esc = 수정 취소 — 저장 예약을 버리고 표시본으로 되돌린다(커밋 안 함). */
+  private cancelBubbleEdit(): void {
+    if (this.editCommitTimer != null) {
+      window.clearTimeout(this.editCommitTimer);
+      this.editCommitTimer = null;
+    }
+    this.pendingEditBubble = null;
+    if (this.trEdit) {
+      if (this.trEdit.timer != null) window.clearTimeout(this.trEdit.timer);
+      this.trEdit = null;
+    }
+    this.editing = null;
+    // 포커스가 편집칸에 남아 있으면 재렌더가 미뤄진다 — 먼저 놓아준다.
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && this.messagesEl?.contains(active)) {
+      active.blur();
+    }
+    if (this.renderPending) void this.reloadFromStore();
+    else this.renderMessages();
   }
 
   // ── 번역 보기 직접 편집 (문단별 user-edit variant — 본문 불변) ────────
   //
-  // 소설 번역 뷰와 같은 커밋 기계를 말풍선 단위로 축소한 것: 편집 진입(focus)
-  // 시 말풍선을 "문단 스팬 + 원자 구분자(contenteditable=false)" 구조로 스왑해
+  // 소설 번역 뷰와 같은 커밋 기계를 말풍선 단위로 축소한 것: 수정칸을 열 때
+  // 말풍선을 "문단 스팬 + 원자 구분자(contenteditable=false)" 구조로 스왑해
   // caret 이 항상 문단 안에서만 움직이고, 바뀐 문단만 user-edit variant 로
   // translations.json 에 저장한다. 커밋 방어(회귀 금지): 내용 있던 문단 → 빈 값
   // 커밋 금지, 정규화로 떨어져 나간 스팬 무시.
 
-  private makeTranslationBubbleEditable(bubble: HTMLElement): void {
-    bubble.setAttr("contenteditable", "plaintext-only");
-    let lastPointer: { x: number; y: number } | null = null;
-    bubble.addEventListener("pointerdown", (e) => {
-      lastPointer = { x: e.clientX, y: e.clientY };
-    });
-    bubble.addEventListener("focus", () => {
-      if (this.trEdit?.bubble === bubble) return;
-      const idx = Number(bubble.dataset.index);
-      const msg = this.messages[idx];
-      if (!msg) return;
-      this.beginTranslationBubbleEdit(
-        bubble,
-        this.displayTextOf(msg),
-        this.prevTailOf(idx)
-      );
-      const pt = lastPointer;
-      lastPointer = null;
-      if (pt && !isImeComposing()) {
-        window.requestAnimationFrame(() => {
-          if (document.activeElement !== bubble || isImeComposing()) return;
-          placeCaretAtPoint(bubble, pt.x, pt.y);
-        });
-      }
-    });
+  private attachTranslationBubbleEditing(bubble: HTMLElement): void {
     bubble.addEventListener("input", () => {
       if (this.guard.isComposing) return; // IME 조합 중 커밋 금지
       this.scheduleTranslationBubbleCommit();
@@ -2545,23 +2645,23 @@ export class ChatSessionView extends ItemView {
     bubble.addEventListener("compositionend", () => {
       this.scheduleTranslationBubbleCommit();
     });
-    // Esc = 편집 취소 — 미커밋 편집을 버리고 표시본으로 복귀.
+    // Esc = 수정 취소 — 미커밋 편집을 버리고 표시본으로 복귀.
     bubble.addEventListener("keydown", (e) => {
       if (e.key !== "Escape" || e.isComposing || this.guard.isComposing) return;
       e.preventDefault();
       e.stopPropagation();
-      const st = this.trEdit;
-      if (st?.bubble === bubble) {
-        if (st.timer != null) window.clearTimeout(st.timer);
-        this.trEdit = null;
-      }
-      this.restoreTranslationBubbleDisplay(bubble);
-      bubble.blur();
+      this.cancelBubbleEdit();
     });
+    // 다른 곳을 눌러도 수정칸은 열어 두되, 지금까지 친 내용은 확정해 둔다.
     bubble.addEventListener("blur", () => {
-      void this.endTranslationBubbleEdit(bubble);
+      const st = this.trEdit;
+      if (st?.bubble !== bubble) return;
+      if (st.timer != null) {
+        window.clearTimeout(st.timer);
+        st.timer = null;
+      }
+      void this.commitTranslationBubbleEdit();
     });
-    attachTapToEdit(bubble);
   }
 
   /** 편집 진입 — 표시본을 "문단 스팬 + 원자 구분자" raw 구조로 스왑. */
@@ -2993,6 +3093,7 @@ export class ChatSessionView extends ItemView {
     }
     const profile = plan.profile;
     const payload = plan.payload;
+    const trimIncomplete = this.session.meta.trimIncomplete === true;
     this.session.meta.variables = plan.updatedVariables;
     this.session.meta.timingStates = plan.output.updatedTimingStates;
 
@@ -3112,6 +3213,15 @@ export class ChatSessionView extends ItemView {
         }
       }
       let generatedText = this.generation?.accumulatedText ?? "";
+      // 미완성 문장 자르기 — 끊긴 마지막 문장/닫히지 않은 대사를 저장 전에 걷어낸다.
+      if (trimIncomplete && generatedText.trim()) {
+        const trimmed = trimIncompleteTail(generatedText);
+        if (trimmed !== generatedText && trimmed.trim()) {
+          generatedText = trimmed;
+          if (appendPatch.spans[0]) appendPatch.spans[0].text = sep + trimmed;
+          if (this.generation) this.generation.accumulatedText = trimmed;
+        }
+      }
       // 저장 원문(raw) 시점 정규식 — 저장 전에 치환 (전송본/표시 시점은 안 돎).
       if (generatedText.trim()) {
         const regexed = await applyRawRegexToGeneration(
@@ -3247,15 +3357,14 @@ function formatDateDivider(ts: number): string {
   return d.getFullYear() === now.getFullYear() ? md : `${d.getFullYear()}년 ${md}`;
 }
 
-/** 좌표의 글자 위치에 caret 배치 — 편집 진입 시 클릭 지점 복원용 (포커스된 요소 전용). */
-function placeCaretAtPoint(el: HTMLElement, x: number, y: number): void {
-  const doc = el.ownerDocument as Document & {
-    caretRangeFromPoint?: (x: number, y: number) => Range | null;
-  };
-  const range = doc.caretRangeFromPoint?.(x, y) ?? null;
-  if (!range || !el.contains(range.startContainer)) return;
+/** 글 끝에 caret 배치 — 수정 버튼으로 편집칸을 열었을 때의 커서 자리. */
+function placeCaretAtEnd(el: HTMLElement): void {
+  const doc = el.ownerDocument;
   const sel = doc.defaultView?.getSelection();
   if (!sel) return;
+  const range = doc.createRange();
+  range.selectNodeContents(el);
+  range.collapse(false);
   sel.removeAllRanges();
   sel.addRange(range);
 }

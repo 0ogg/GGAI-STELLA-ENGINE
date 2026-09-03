@@ -57,6 +57,8 @@ export class PromptsSection {
   private headerEl: HTMLElement | null = null;
   private naiFormat = false;
   private naiCheckbox: HTMLInputElement | null = null;
+  private trimIncomplete = false;
+  private trimIncompleteCheckbox: HTMLInputElement | null = null;
   private continueAnchor = false;
   private continueAnchorCheckbox: HTMLInputElement | null = null;
   private savingSelf = false;
@@ -102,6 +104,7 @@ export class PromptsSection {
     const settings = await this.plugin.resolveActiveSettings(
       this.activeSessionFile
     );
+    this.setTrimIncomplete(settings.trimIncomplete ?? false);
     this.setNaiFormat(await this.resolveEffectiveNai(settings.naiFormat));
     this.setContinueAnchor(settings.continueAnchor ?? false);
     this.resolveActive(settings.promptSetId);
@@ -136,6 +139,7 @@ export class PromptsSection {
     const settings = await this.plugin.resolveActiveSettings(
       this.activeSessionFile
     );
+    this.setTrimIncomplete(settings.trimIncomplete ?? false);
     this.setNaiFormat(await this.resolveEffectiveNai(settings.naiFormat));
     this.setContinueAnchor(settings.continueAnchor ?? false);
     this.resolveActive(settings.promptSetId);
@@ -148,8 +152,10 @@ export class PromptsSection {
   async syncActiveSettings(
     promptSetId: string | undefined,
     naiFormatRaw?: boolean,
-    continueAnchorRaw?: boolean
+    continueAnchorRaw?: boolean,
+    trimIncompleteRaw?: boolean
   ): Promise<void> {
+    this.setTrimIncomplete(trimIncompleteRaw ?? false);
     this.setNaiFormat(await this.resolveEffectiveNai(naiFormatRaw));
     this.setContinueAnchor(continueAnchorRaw ?? false);
     this.resolveActive(promptSetId);
@@ -162,6 +168,20 @@ export class PromptsSection {
   private async resolveEffectiveNai(raw: boolean | undefined): Promise<boolean> {
     if (raw !== undefined) return raw;
     return this.activeModelIsText();
+  }
+
+  /** 미완성 문장 자르기 상태 갱신 + 체크박스 반영. */
+  private setTrimIncomplete(value: boolean): void {
+    this.trimIncomplete = value;
+    if (this.trimIncompleteCheckbox) this.trimIncompleteCheckbox.checked = value;
+  }
+
+  private async handleTrimIncompleteToggle(checked: boolean): Promise<void> {
+    this.trimIncomplete = checked;
+    await this.plugin.patchActiveSettings(
+      { trimIncomplete: checked },
+      this.activeSessionFile
+    );
   }
 
   /** NAI 형식 상태 갱신 + 체크박스 반영. */
@@ -271,6 +291,27 @@ export class PromptsSection {
     this.makeIconBtn(tb2, "external-link", "프롬프트 탭에서 편집", () =>
       void this.handleOpenInTab()
     );
+
+    // 미완성 문장 자르기 — 응답 끝에서 끊긴 문장·닫히지 않은 대사를 잘라낸다.
+    const trimRow = this.contentEl.createDiv({ cls: "ggai-prompts-nai-row" });
+    const trimLabel = trimRow.createEl("label", {
+      cls: "ggai-prompts-nai-label",
+      attr: {
+        title:
+          "생성이 문장 한복판에서 끊겼을 때, 마지막으로 완결된 문장까지만 남깁니다. 완결된 자리가 없으면 그대로 둡니다.",
+      },
+    });
+    this.trimIncompleteCheckbox = trimLabel.createEl("input", {
+      cls: "ggai-form-checkbox",
+      attr: { type: "checkbox" },
+    });
+    this.trimIncompleteCheckbox.checked = this.trimIncomplete;
+    this.trimIncompleteCheckbox.addEventListener("change", () =>
+      void this.handleTrimIncompleteToggle(this.trimIncompleteCheckbox!.checked)
+    );
+    trimLabel.createSpan({
+      text: "미완성 문장 자르기 (닫히지 않은 대사 · 끝나지 않은 문장)",
+    });
 
     // NAI 형식으로 보내기 — 텍스트 컴플리션 전송 시 역할 토큰으로 감싸기.
     const naiRow = this.contentEl.createDiv({ cls: "ggai-prompts-nai-row" });

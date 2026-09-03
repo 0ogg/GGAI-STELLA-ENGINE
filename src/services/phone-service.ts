@@ -41,6 +41,7 @@ import {
 } from "../types/phone";
 import type { StellaUserProfile } from "../types/user";
 import { applyMacros } from "../util/macros";
+import { splitImagePrompt } from "../util/image-char-prompts";
 import { resolveMediaPrompt } from "../util/default-media-prompts";
 import {
   PHONE_CAST_HEADER,
@@ -397,9 +398,12 @@ export class PhoneService {
       imagePrompt !== p ? `${p}\n[image prompt] ${imagePrompt}` : p;
     let data: string | undefined;
     try {
+      // 삽화와 같은 지침으로 뽑은 프롬프트라 `|` 뒤는 캐릭터별 프롬프트다.
+      const split = splitImagePrompt(imagePrompt);
       const res = await this.plugin.ai.image({
         profileId: profile.id,
-        prompt: imagePrompt,
+        prompt: split.prompt,
+        charCaptions: split.charCaptions.length ? split.charCaptions : undefined,
         label: "스텔라 폰 카메라",
       });
       data = res.images[0]?.data;

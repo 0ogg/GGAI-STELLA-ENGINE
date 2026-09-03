@@ -188,6 +188,8 @@ export interface StellaPreset {
   naiFormat?: boolean;
   /** 이어쓰기 이음새 보정 (챗 모델) — 마지막 문장 반복을 유도한 뒤 응답에서 제거. */
   continueAnchor?: boolean;
+  /** 미완성 문장 자르기 — 끊긴 마지막 문장·닫히지 않은 대사를 응답에서 잘라낸다. */
+  trimIncomplete?: boolean;
   /** 임포트 원본 등 라운드트립 보존용. sillytavernRaw 등. */
   extensions?: Record<string, unknown>;
 }
@@ -239,6 +241,8 @@ export interface ActiveSettings {
   naiFormat?: boolean;
   /** 이어쓰기 이음새 보정 (챗 모델) — 마지막 문장 반복을 유도한 뒤 응답에서 제거. */
   continueAnchor?: boolean;
+  /** 미완성 문장 자르기 — 끊긴 마지막 문장·닫히지 않은 대사를 응답에서 잘라낸다. */
+  trimIncomplete?: boolean;
 }
 
 /**
@@ -272,5 +276,6 @@ export function presetToActiveSettings(preset: StellaPreset): ActiveSettings {
     promptSetId: preset.promptSetId,
     naiFormat: preset.naiFormat,
     continueAnchor: preset.continueAnchor,
+    trimIncomplete: preset.trimIncomplete,
   };
 }

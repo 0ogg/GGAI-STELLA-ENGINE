@@ -25,6 +25,7 @@ import {
 import { planSessionRequest } from "../util/build-session-context";
 import { cardDepthPromptText } from "../util/context-builder";
 import { applyRawRegexToGeneration } from "../util/session-regex";
+import { trimIncompleteTail } from "../util/trim-incomplete";
 import {
   isDefaultDatedSessionName,
   requestSessionTitle,
@@ -120,6 +121,7 @@ import {
   clearPendingReflections,
   recordTranslationVariant,
   redoLastTranslation,
+  takeRecentParagraphsByChars,
   tokenizeParagraphs,
   undoLastTranslation,
   upsertPendingReflection,
@@ -196,8 +198,11 @@ interface TranslationBlock {
 type TranslationCaret =
   | ({ focused: boolean } & ({ draft: number } | { hash: string; offset: number }))
   | null;
-/** 일괄 번역이 이 분량을 넘으면 실행 전 확인 다이얼로그 (실수로 전체 텍스트 전송 방지). */
-const TRANSLATE_CONFIRM_PARAGRAPHS = 6;
+/**
+ * 일괄 번역이 이 분량을 넘으면 실행 전 확인 다이얼로그 (실수로 전체 텍스트 전송 방지).
+ * "최근 분량만" 선택도 같은 글자 수로 끊는다 — 문단 개수로 끊으면 대사가 많은
+ * 구간에서 한 번에 몇백 자밖에 안 들어가 같은 생성분을 여러 번 돌려야 했다.
+ */
 const TRANSLATE_CONFIRM_CHARS = 2000;
 /** "전체 번역" 선택이 이 문단 수 이상이면 한 번 더 경고. */
 const TRANSLATE_FULL_WARN_PARAGRAPHS = 20;
@@ -578,6 +583,15 @@ export class SessionView extends ItemView {
   /** AI 생성(스트리밍) 진행 중 — 이 탭은 다른 세션으로 갈아끼우면 안 된다 (session-host 규약). */
   isGenerating(): boolean {
     return this.generation != null;
+  }
+
+  /**
+   * 사용자가 지금 본문에 손대고 있는가 (session-host 규약).
+   * IME 조합 중이거나 아직 노드로 커밋되지 않은 편집이 남아 있으면 true — 포커스만
+   * 있고 고친 게 없으면 바쁨이 아니다. 백그라운드 쓰기가 이 순간을 피하는 데 쓴다.
+   */
+  isBusyEditing(): boolean {
+    return this.composing || this.pendingDiff != null;
   }
 
   /** 자동 실행 QR (session-host 규약) — 판단·실행은 전부 바가 소유한다. */
@@ -3351,6 +3365,19 @@ export class SessionView extends ItemView {
         node.gen.tokensOut = usage.outputTokens;
       }
       let generatedText = this.generation?.accumulatedText ?? "";
+      // 미완성 문장 자르기 — 끊긴 마지막 문장/닫히지 않은 대사를 저장 전에 걷어낸다.
+      // (정규식보다 먼저 — 사용자 스크립트는 잘라낸 결과를 본다.)
+      if (settings.trimIncomplete && hasVisibleText(generatedText)) {
+        const trimmed = trimIncompleteTail(generatedText);
+        if (trimmed !== generatedText && hasVisibleText(trimmed)) {
+          generatedText = trimmed;
+          const append = node.patches[0];
+          if (append.op === "append" && append.spans[0]) {
+            append.spans[0].text = trimmed;
+          }
+          if (this.generation) this.generation.accumulatedText = trimmed;
+        }
+      }
       // 저장 원문(raw) 시점 정규식 — 살아남을 텍스트를 저장 전에 치환한다
       // (전송본/표시 시점 스크립트는 안 돎). 중단으로 살린 부분 텍스트도 동일.
       if (hasVisibleText(generatedText) && this.sessionFile) {
@@ -6251,10 +6278,12 @@ export class SessionView extends ItemView {
         translations
       );
       const chars = targets.reduce((n, p) => n + p.source.length, 0);
-      if (
-        targets.length > TRANSLATE_CONFIRM_PARAGRAPHS ||
-        chars > TRANSLATE_CONFIRM_CHARS
-      ) {
+      if (chars > TRANSLATE_CONFIRM_CHARS) {
+        const recent = takeRecentParagraphsByChars(
+          targets,
+          TRANSLATE_CONFIRM_CHARS
+        );
+        const recentChars = recent.reduce((n, p) => n + p.source.length, 0);
         const choice = await new Promise<string | null>((resolve) => {
           new ChoiceModal(
             this.app,
@@ -6262,7 +6291,7 @@ export class SessionView extends ItemView {
             `번역 안 된 문단이 ${targets.length}개 (약 ${chars.toLocaleString()}자) 있습니다. 얼마나 번역할까요?`,
             [
               {
-                text: `최근 문단 ${TRANSLATE_CONFIRM_PARAGRAPHS}개만`,
+                text: `최근 ${recent.length}문단 (약 ${recentChars.toLocaleString()}자)만`,
                 value: "recent",
                 cta: true,
               },
@@ -6273,11 +6302,7 @@ export class SessionView extends ItemView {
         });
         if (!choice) return undefined;
         if (choice === "recent") {
-          effectiveOpts = {
-            hashes: targets
-              .slice(-TRANSLATE_CONFIRM_PARAGRAPHS)
-              .map((p) => p.hash),
-          };
+          effectiveOpts = { hashes: recent.map((p) => p.hash) };
         } else if (targets.length >= TRANSLATE_FULL_WARN_PARAGRAPHS) {
           // 전체 번역이 정말 큰 경우 한 번 더 경고.
           const reallyAll = await new Promise<boolean>((resolve) => {

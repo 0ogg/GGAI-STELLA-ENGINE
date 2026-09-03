@@ -2060,9 +2060,10 @@ input.ggai-vs-slider[type="range"] {
 .ggai-span-user {
   color: var(--text-accent);
 }
-/* 본문 마크다운 표기(**굵게**, *기울임*, `코드`) — 표시(marker) 문자는 textContent 를
-   바꾸지 않고(오프셋 매핑·diff 유지) 시각적으로만 접는다. 실제 지우면 undo/재생성 등
-   문자 오프셋 기반 로직이 전부 깨지므로 folding 방식을 쓴다. */
+/* ── 본문 마크다운 (표·목록·인용·코드·링크) ───────────────────
+   `.ggai-md` 는 마크다운으로 그려진 본문에만 붙는다. 수정칸·생성 중 말풍선은
+   원문 그대로 보여야 해서 이 클래스가 없고(pre-wrap 유지), 폰 뷰처럼
+   예전 포매터를 쓰는 화면도 영향받지 않는다. */
 .ggai-md-marker {
   font-size: 0;
   line-height: 0;
@@ -7434,13 +7435,44 @@ body.is-mobile .ggai-dash-page {
 
 /* 이름 라벨 — 말풍선 위, 누구의 말인지. 유저는 우측 정렬. */
 .ggai-chat-name {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   font-size: var(--font-ui-smaller);
   color: var(--text-muted);
   padding: 0 4px;
   line-height: 1.2;
 }
 .ggai-chat-msg.is-user .ggai-chat-name {
-  text-align: right;
+  justify-content: flex-end;
+}
+
+/* 이름줄 끝 수정 버튼 — 평소엔 흐리게 물러나 있고, 올리거나 수정 중이면 또렷하게. */
+.ggai-chat-msg-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.ggai-chat-msg-action {
+  --icon-size: 14px;
+  width: auto;
+  height: auto;
+  padding: 2px;
+  opacity: 0.4;
+}
+.ggai-chat-msg-action:hover,
+.ggai-chat-msg-action:focus-visible,
+.ggai-chat-msg-action.is-editing {
+  opacity: 1;
+}
+.ggai-chat-msg-action.is-editing {
+  color: var(--interactive-accent);
+}
+
+/* 수정 중인 말풍선 — 지금 고치는 자리가 어디인지 한눈에. */
+.ggai-chat-bubble.is-editing {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
 }
 
 /* 말풍선 표기 — 지문 기울임 / 문단 간격 (표시 전용, 편집 시 raw). */
@@ -7450,10 +7482,7 @@ body.is-mobile .ggai-dash-page {
 /* 문단 사이 빈 줄 — 원문의 빈 줄 수(--ggai-sep-lines)만큼 그대로 보이고,
    문단 간격 슬라이더 값(px)은 그 위에 추가로 얹는다. 0 = 원문 그대로. */
 .ggai-chat-para-sep {
-  height: calc(
-    var(--ggai-sep-lines, 1) * var(--line-height-normal, 1.5) * 1em +
-      var(--ggai-view-para-gap, 0px)
-  );
+  height: calc(var(--ggai-sep-lines, 1) * var(--line-height-normal, 1.5) * 1em);
 }
 .ggai-chat-bubble em {
   font-style: italic;
@@ -7895,6 +7924,127 @@ body.is-mobile .ggai-chat-inputbar {
   max-width: 100%;
   overflow-x: auto;
   white-space: pre-wrap;
+}
+
+/* ── 말풍선 마크다운 — 표·목록·인용·코드·링크 ─────────────────────────
+   본문은 마크다운으로 그려지므로 말풍선 자체는 white-space: normal 이다.
+   원문 그대로 보여야 하는 두 자리(수정칸 / 생성 중 스트리밍)만 pre-wrap. */
+
+.ggai-md {
+  white-space: normal;
+}
+
+/* 문단 사이 기본 간격 = 빈 줄 한 개. 그보다 더 준 빈 줄은
+   .ggai-chat-para-sep 이 따로 그린다(원문에 준 만큼 보인다). */
+.ggai-md p {
+  margin: 0 0 calc(1em * var(--line-height-normal, 1.5) + var(--ggai-view-para-gap, 0px));
+}
+.ggai-md > *:last-child {
+  margin-bottom: 0;
+}
+.ggai-md h1,
+.ggai-md h2,
+.ggai-md h3,
+.ggai-md h4,
+.ggai-md h5,
+.ggai-md h6 {
+  margin: 0.4em 0 0.2em;
+  line-height: 1.3;
+}
+.ggai-md ul,
+.ggai-md ol {
+  margin: 0.2em 0;
+  padding-left: 1.4em;
+}
+.ggai-md li {
+  margin: 0.1em 0;
+}
+.ggai-md blockquote {
+  margin: 0.2em 0;
+  padding-left: 0.8em;
+  border-left: 3px solid var(--background-modifier-border);
+  color: var(--text-muted);
+}
+.ggai-md hr {
+  margin: 0.6em 0;
+  border: none;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.ggai-md a {
+  color: var(--link-color, var(--text-accent));
+  text-decoration: underline;
+}
+.ggai-chat-msg.is-user .ggai-md a {
+  color: inherit;
+}
+
+/* 대사 — 실리태번처럼 <q> 로 감싼다. 따옴표 글자는 본문에 이미 들어 있으므로
+   브라우저가 덧붙이는 인용부호는 끈다(겹따옴표 방지). */
+.ggai-md q {
+  quotes: none;
+  color: var(--text-accent);
+}
+.ggai-md q::before,
+.ggai-md q::after {
+  content: none;
+}
+.ggai-chat-msg.is-user .ggai-md q {
+  color: inherit;
+}
+.ggai-md code {
+  font-family: var(--font-monospace);
+  font-size: 0.9em;
+}
+.ggai-md :not(pre) > code {
+  padding: 0.1em 0.3em;
+  border-radius: 4px;
+  background: var(--background-modifier-hover);
+}
+.ggai-md table {
+  overflow-x: auto;
+  display: block;
+  width: fit-content;
+}
+
+/* 코드블록 = 복사할 수 있는 스크립트 영역. 버튼은 오른쪽 위 모서리. */
+.ggai-md pre.ggai-code-block {
+  position: relative;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--background-primary-alt, var(--background-primary));
+  border: 1px solid var(--background-modifier-border);
+}
+.ggai-code-copy {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  --icon-size: 14px;
+  width: auto;
+  height: auto;
+  padding: 3px;
+  opacity: 0.35;
+}
+.ggai-code-copy:hover,
+.ggai-code-copy.is-copied {
+  opacity: 1;
+}
+.ggai-code-copy.is-copied {
+  color: var(--text-success, var(--interactive-accent));
+}
+
+/* 카드가 낸 선택지 버튼 — 누르면 그 글자가 그대로 전송된다. */
+.ggai-md .ggai-card-btn {
+  cursor: pointer;
+  padding: 4px 10px;
+  margin: 2px;
+  border-radius: 8px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--interactive-normal);
+  color: var(--text-normal);
+  font-size: inherit;
+}
+.ggai-md .ggai-card-btn:hover {
+  background: var(--interactive-hover);
 }
 
 /* ── 변수 (게임형 카드) — 확장 탭 패널 ──────────────────────────────── */

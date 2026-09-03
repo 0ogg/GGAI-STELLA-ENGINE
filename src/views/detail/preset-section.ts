@@ -260,6 +260,7 @@ export class PresetSection {
         promptSetId: active.promptSetId,
         naiFormat: active.naiFormat,
         continueAnchor: active.continueAnchor,
+        trimIncomplete: active.trimIncomplete,
       };
       const result = await this.store.createPreset(trimmed, newPreset);
       await this.plugin.savePluginData({ lastActivePresetId: newPreset.id });
@@ -285,6 +286,7 @@ export class PresetSection {
         promptSetId: active.promptSetId,
         naiFormat: active.naiFormat,
         continueAnchor: active.continueAnchor,
+        trimIncomplete: active.trimIncomplete,
       };
       await this.store.savePreset(item.presetFile, next);
       this.list = await this.store.getPresets();

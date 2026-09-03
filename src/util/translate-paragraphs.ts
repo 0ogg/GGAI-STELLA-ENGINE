@@ -772,3 +772,27 @@ export function pruneTranslationVariants(
   entry.variants = active ? { [active.id]: active } : {};
   return removed;
 }
+
+/**
+ * 일괄 번역 확인창의 "최근 분량만" 선택 — 문단 개수가 아니라 **글자 수**로 끊는다.
+ * 문서 끝에서 거슬러 올라가며 maxChars 를 넘지 않는 만큼 담고, 순서는 원래대로 돌려준다.
+ *
+ * 개수 기준(6문단 고정)이었을 때 대사 위주 구간은 한 번에 몇백 자밖에 안 들어가
+ * 같은 생성분을 여러 번 나눠 번역해야 했다. 분량 기준이면 짧은 문단이 많을수록
+ * 더 많이 담긴다. 첫 문단 하나가 이미 maxChars 를 넘어도 최소 1개는 담는다
+ * (아무것도 안 담기면 버튼이 무의미해진다).
+ */
+export function takeRecentParagraphsByChars(
+  targets: SourceParagraph[],
+  maxChars: number
+): SourceParagraph[] {
+  const out: SourceParagraph[] = [];
+  let chars = 0;
+  for (let i = targets.length - 1; i >= 0; i--) {
+    const len = targets[i].source.length;
+    if (out.length > 0 && chars + len > maxChars) break;
+    out.push(targets[i]);
+    chars += len;
+  }
+  return out.reverse();
+}

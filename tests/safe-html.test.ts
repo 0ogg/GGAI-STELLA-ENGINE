@@ -11,28 +11,39 @@ import {
   hasCardImageTag,
   hasHtmlMarkup,
   isAllowedAttr,
+  isAllowedSvgAttr,
+  isAllowedSvgTag,
   isAllowedTag,
   isDroppedTag,
   isSafeUrl,
+  prefixCustomNames,
   replaceCardImageTags,
   sanitizeStyleValue,
+  scopeCss,
 } from "../src/util/safe-html";
 
 // ── 1. 태그 정책 ──
 {
-  // 그릴 수 있는 것 — 카드가 상태창에 실제로 쓰는 것들.
-  for (const tag of ["div", "span", "table", "tr", "td", "img", "details", "progress", "b"]) {
+  // 그릴 수 있는 것 — 카드가 상태창에 실제로 쓰는 것들 (실리태번과 같은 범위).
+  for (const tag of [
+    "div", "span", "table", "tr", "td", "img", "details", "summary",
+    "progress", "b", "a", "button", "label", "input", "select", "pre", "code",
+  ]) {
     assert.equal(isAllowedTag(tag), true, `${tag} 는 그려야 한다`);
   }
   assert.equal(isAllowedTag("DIV"), true, "대문자도 같은 태그다");
+  // 게이지·아이콘을 SVG 로 그리는 카드가 많다.
+  for (const tag of ["svg", "path", "circle", "lineargradient"]) {
+    assert.equal(isAllowedSvgTag(tag), true, `${tag} 는 SVG 로 그려야 한다`);
+  }
 
   // 실행/외부요청 통로 — 내용까지 버린다.
-  for (const tag of ["script", "iframe", "object", "embed", "link", "form", "input", "svg"]) {
+  for (const tag of ["script", "iframe", "object", "embed", "link", "form", "foreignobject", "use"]) {
     assert.equal(isDroppedTag(tag), true, `${tag} 는 통째로 버려야 한다`);
     assert.equal(isAllowedTag(tag), false);
   }
-  // <style> 은 전역 CSS 라 앱 화면을 망칠 수 있다 — 받지 않는다.
-  assert.equal(isDroppedTag("style"), true);
+  // <style> 은 버리지 않는다 — 말풍선 안으로 선택자를 가둬서 받는다(scopeCss).
+  assert.equal(isDroppedTag("style"), false);
 
   // 카드들의 가짜 태그 — 허용 목록에 없다(껍데기만 벗기고 내용은 살린다).
   for (const tag of ["stat", "status", "choices", "updatevariable", "freeboard"]) {
@@ -54,7 +65,19 @@ import {
   }
   assert.equal(isAllowedAttr("iframe", "srcdoc"), false);
   assert.equal(isAllowedAttr("div", "src"), false, "img 전용 속성이 아무 데나 붙으면 안 된다");
-  assert.equal(isAllowedAttr("a", "href"), false, "링크는 아직 열지 않는다");
+  assert.equal(isAllowedAttr("a", "href"), true, "링크는 열어야 한다");
+  assert.equal(isAllowedAttr("input", "checked"), true, "체크박스로 접기를 만드는 카드가 있다");
+  assert.equal(isAllowedAttr("label", "for"), true);
+  // 폼 제출 통로 — 눌리면 옵시디언 창이 바깥으로 이동한다.
+  assert.equal(isAllowedAttr("button", "formaction"), false);
+  assert.equal(isAllowedAttr("div", "action"), false);
+  // 그리기에 영향 없는 부가 속성은 통과.
+  assert.equal(isAllowedAttr("div", "data-hp"), true);
+  assert.equal(isAllowedAttr("div", "aria-label"), true);
+  // SVG 는 그리기 기하만 — 바깥을 부르는 참조는 막는다.
+  assert.equal(isAllowedSvgAttr("d"), true);
+  assert.equal(isAllowedSvgAttr("href"), false);
+  assert.equal(isAllowedSvgAttr("onload"), false);
 }
 
 // ── 3. 주소 정책 ──
@@ -78,8 +101,18 @@ import {
 {
   assert.equal(sanitizeStyleValue("color: red; font-weight: 700"), "color: red; font-weight: 700");
 
-  // 외부 요청·코드 실행 통로만 골라 뺀다.
-  assert.equal(sanitizeStyleValue("color: red; background: url(http://x/a.png)"), "color: red");
+  // 그림 배경은 살린다 — 안전한 주소면 통과(카드 디자인의 큰 부분이다).
+  assert.equal(
+    sanitizeStyleValue("color: red; background: url(https://x/a.png)"),
+    "color: red; background: url(https://x/a.png)"
+  );
+  assert.equal(
+    sanitizeStyleValue("background: url(data:image/png;base64,AAAA)"),
+    "background: url(data:image/png;base64,AAAA)",
+    "data: URI 안의 세미콜론에서 선언이 잘리면 안 된다"
+  );
+  // 코드 실행 통로는 뺀다.
+  assert.equal(sanitizeStyleValue("color: red; background: url(javascript:alert(1))"), "color: red");
   assert.equal(sanitizeStyleValue("width: expression(alert(1)); color: blue"), "color: blue");
   assert.equal(sanitizeStyleValue("@import 'x'; color: blue"), "color: blue");
   assert.equal(sanitizeStyleValue("behavior: url(#x); color: blue"), "color: blue");
@@ -126,6 +159,44 @@ import {
   const quoted = replaceCardImageTags('{{img::a".jpg}}', () => 'app://x/a".jpg');
   assert.equal(quoted.includes('src="app://x/a".jpg"'), false, "속성 탈출 금지");
   assert.match(quoted, /&quot;/);
+}
+
+// ── 7. 카드 이름 격리 — 남의 CSS 가 우리 화면을 건드리지 못한다 ──
+{
+  assert.equal(prefixCustomNames(".hud .bar"), ".custom-hud .custom-bar");
+  assert.equal(prefixCustomNames("#panel"), "#custom-panel");
+  assert.equal(prefixCustomNames(".custom-hud"), ".custom-hud", "두 번 붙이지 않는다");
+  assert.equal(
+    prefixCustomNames(".ggai-card-img"),
+    ".ggai-card-img",
+    "우리가 넣은 마크업(ggai-)은 이름을 바꾸지 않는다 — 바꾸면 우리 CSS 가 떨어진다"
+  );
+  assert.equal(prefixCustomNames("div > span"), "div > span", "태그 이름은 그대로");
+}
+
+// ── 8. 카드 <style> — 말풍선 안으로 가둔다 ──
+{
+  const scoped = scopeCss(".hud { color: red; }", ".ggai-chat-bubble");
+  assert.equal(scoped, ".ggai-chat-bubble .custom-hud { color: red }");
+
+  // 화면 전체를 노리는 선택자는 우리 범위 자신이 된다.
+  assert.match(scopeCss("body { background: black; }", ".mine"), /^\.mine \{/);
+
+  // 여러 선택자, 중첩 at-rule.
+  const media = scopeCss("@media (min-width: 10px) { .a, .b { color: red; } }", ".s");
+  assert.match(media, /@media \(min-width: 10px\)/);
+  assert.match(media, /\.s \.custom-a, \.s \.custom-b \{ color: red \}/);
+
+  // @keyframes 안쪽은 선택자가 아니라 진행률이다 — 건드리지 않는다.
+  const kf = scopeCss("@keyframes pulse { 0% { opacity: 0; } 100% { opacity: 1; } }", ".s");
+  assert.match(kf, /0% \{ opacity: 0 \}/);
+  assert.equal(/\.s 0%/.test(kf), false);
+
+  // 바깥을 부르는 at-rule 은 버린다.
+  assert.equal(scopeCss("@import url(http://x/a.css); .a { color: red; }", ".s").includes("@import"), false);
+
+  // 화면을 덮는 배치는 선언 단계에서 걷어낸다.
+  assert.equal(scopeCss(".a { position: fixed; color: red; }", ".s"), ".s .custom-a { color: red }");
 }
 
 console.log("safe-html harness passed");

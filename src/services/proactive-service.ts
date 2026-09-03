@@ -19,12 +19,17 @@
  *  - 발화 전 판정: 안 읽은 응답이 누적 상한(`settings.proactiveMaxUnread`)만큼
  *    쌓였으면 쉼(N0 unread 재사용). 세션을 보고 있어도 발화한다 — 마지막 활동에서
  *    간격만큼 지났으면 "보는 중"은 미루는 이유가 아니다(사용자 요청, 2026-08-29).
+ *  - 다만 **지금 손대고 있는 순간**(말풍선 편집 중 / 생성 중)에는 비켜선다. 같은
+ *    세션에 쓰기가 겹치면 노드가 엉킨다 — "보고 있으면 안 함"을 뺐을 때 그 판정이
+ *    대신 막아주던 겹침 방어가 같이 사라졌다. 예약(nextAt)은 건드리지 않으므로
+ *    손을 떼면 다음 틱(최대 TICK_MS)에 그대로 온다.
  */
 import type StellaEnginePlugin from "../main";
 import type { SessionChangeDetail } from "../state/store";
 import type { SessionNode, StellaSession } from "../types/session";
 import { planSessionRequest } from "../util/build-session-context";
 import { applyRawRegexToGeneration } from "../util/session-regex";
+import { trimIncompleteTail } from "../util/trim-incomplete";
 import { trimChatCompletionOutput } from "../util/text-completion-prompt";
 import { buildSpans, spansToText } from "../util/session-text";
 import { buildChatMessages, CHAT_MESSAGE_SEPARATOR } from "../util/chat-messages";
@@ -35,6 +40,10 @@ import {
 } from "../util/group-speaker";
 import { formatIdleEn } from "../util/idle-duration";
 import { uuidv4 } from "../util/uuid";
+import {
+  isSessionBeingEdited,
+  isSessionGenerating,
+} from "../views/session-host";
 
 export type ProactiveResult = { ok: true } | { ok: false; error: string };
 
@@ -229,8 +238,23 @@ export class ProactiveService {
     const due = Object.entries(map)
       .filter(([, e]) => e.nextAt <= now)
       .sort((a, b) => a[1].nextAt - b[1].nextAt);
-    if (due.length === 0) return;
-    await this.fireScheduled(due[0][0]);
+    // 지금 손대고 있는 세션은 건너뛴다 — 예약을 미루지 않으므로(다음 틱에 다시
+    // 후보가 된다) 손을 떼는 즉시 온다. 여기서 걸러야 바쁜 세션 하나가 맨 앞을
+    // 차지한 채 다른 세션의 차례까지 막지 않는다.
+    const next = due.find(([file]) => !this.isSessionBusy(file));
+    if (!next) return;
+    await this.fireScheduled(next[0]);
+  }
+
+  /**
+   * 사용자가 지금 그 세션에 손대고 있는가 — 열린 세션창이 생성 중이거나 본문/말풍선
+   * 편집 중. 세션을 그냥 보고 있는 것은 바쁨이 아니다.
+   */
+  private isSessionBusy(sessionFile: string): boolean {
+    const ws = this.plugin.app.workspace;
+    return (
+      isSessionGenerating(ws, sessionFile) || isSessionBeingEdited(ws, sessionFile)
+    );
   }
 
   /** 예약 발화 — 판정 후 send. 성공/보류/실패 모두 다음 예약을 다시 잡는다. */
@@ -323,6 +347,12 @@ export class ProactiveService {
   ): Promise<ProactiveResult> {
     if (this.inFlight.has(sessionFile)) {
       return { ok: false, error: "이미 선채팅을 생성하는 중입니다." };
+    }
+    // 세션창이 스트리밍 중이면 그 생성이 본문 소유권을 쥐고 있다 — 여기서 노드를
+    // 붙이면 두 쓰기가 겹친다. 예약 발화는 다음 틱에 다시 오고, 수동 커맨드는
+    // 호출자가 이 사유를 그대로 안내한다.
+    if (isSessionGenerating(this.plugin.app.workspace, sessionFile)) {
+      return { ok: false, error: "세션창이 생성 중입니다. 끝난 뒤 다시 시도해 주세요." };
     }
     this.inFlight.add(sessionFile);
     try {
@@ -485,10 +515,23 @@ export class ProactiveService {
       });
     }
     if (!text) return { ok: false, error: "모델이 빈 응답을 보냈습니다." };
+    // 미완성 문장 자르기 — 세션 설정을 따른다 (챗 뷰의 생성과 동일).
+    if (session.meta.trimIncomplete === true) {
+      const trimmed = trimIncompleteTail(text);
+      if (trimmed.trim()) text = trimmed;
+    }
     // 저장 원문(raw) 시점 정규식 — 저장 전에 치환 (챗 뷰의 생성과 동일 경로).
     text = await applyRawRegexToGeneration(plugin, sessionFile, text);
     if (!text.trim()) {
       return { ok: false, error: "정규식 치환 후 남은 내용이 없습니다." };
+    }
+
+    // 모델을 기다리는 몇 초 사이에 사용자가 전송/이어쓰기를 눌렀을 수 있다. 그
+    // 생성이 진행 중이면 리프 노드의 텍스트가 아직 자라는 중이라, 여기서 그 밑에
+    // 노드를 붙이고 저장하면 반쯤 쓰인 답 위에 선채팅이 얹힌다 — 이번 발화는 버리고
+    // 다음 예약에 맡긴다(예약은 호출자가 다시 잡는다).
+    if (isSessionGenerating(plugin.app.workspace, sessionFile)) {
+      return { ok: false, error: "생성이 시작돼 이번 선채팅은 건너뜁니다." };
     }
 
     // 일반 ai 노드로 저장 — 챗 뷰의 이어쓰기와 같은 형태 (구분자 + ai span).

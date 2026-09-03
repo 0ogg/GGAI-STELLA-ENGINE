@@ -81,6 +81,8 @@ export interface ImageGenRequest {
   profileId: string;
   prompt: string;
   negativePrompt?: string;
+  /** 캐릭터별 프롬프트 (NAI v4 `v4_prompt.caption.char_captions`). 넘기면 프로필 값을 대체. */
+  charCaptions?: Array<{ char_caption: string; centers?: Array<{ x: number; y: number }> }>;
   n?: number;
   paramsOverride?: Record<string, unknown>;
   signal?: AbortSignal;

@@ -196,6 +196,8 @@ export interface SessionMeta {
   naiFormat?: boolean;
   /** 이어쓰기 이음새 보정 (챗 모델) — 마지막 문장 반복을 유도한 뒤 응답에서 제거. */
   continueAnchor?: boolean;
+  /** 미완성 문장 자르기 — 끊긴 마지막 문장·닫히지 않은 대사를 응답에서 잘라낸다. */
+  trimIncomplete?: boolean;
   /** 즉석 메모리 — chatHistory 앞에 system 으로 삽입. */
   memory?: string;
   /** 작가노트 — chatHistory 끝에서 3 메시지 앞에 system 으로 삽입. */

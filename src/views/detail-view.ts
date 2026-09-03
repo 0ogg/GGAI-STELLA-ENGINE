@@ -499,7 +499,8 @@ export class DetailView extends ItemView {
     void this.promptsSection?.syncActiveSettings(
       settings.promptSetId,
       settings.naiFormat,
-      settings.continueAnchor
+      settings.continueAnchor,
+      settings.trimIncomplete
     );
     void this.updateChatSessionClass();
   }

@@ -24,6 +24,7 @@ import { recordIllustrationVariant } from "../util/illustrations";
 import { resolveIllustrationTargetNode } from "../util/illustration-anchors";
 import { buildSpans, spansToText } from "../util/session-text";
 import { createExtensionRegexApplier } from "../util/session-regex";
+import { splitImagePrompt } from "../util/image-char-prompts";
 
 const DEFAULT_CONTEXT_CHARS = 4000;
 
@@ -249,11 +250,15 @@ export class IllustrationService {
       origin?: string;
     }
   ): Promise<IllustrateResult> {
+    // 프롬프트의 `|` 뒤 덩어리는 캐릭터별 프롬프트로 나눠 보낸다 (NAI 멀티 캐릭터).
+    // variant 에는 나누기 전 원본을 그대로 남긴다 — 재생성 UI 에서 다시 편집할 수 있게.
+    const split = splitImagePrompt(input.prompt);
     let result;
     try {
       result = await this.plugin.ai.image({
         profileId: input.imageProfileId,
-        prompt: input.prompt,
+        prompt: split.prompt,
+        charCaptions: split.charCaptions.length ? split.charCaptions : undefined,
         negativePrompt: input.negativePrompt,
         signal: input.signal,
         label: "삽화",

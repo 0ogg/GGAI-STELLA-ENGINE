@@ -76,6 +76,7 @@ export function createBlankSession(
       summarize: initial?.summarize ? { ...initial.summarize } : undefined,
       naiFormat: initial?.naiFormat,
       continueAnchor: initial?.continueAnchor,
+      trimIncomplete: initial?.trimIncomplete,
     },
     nodes,
   };
