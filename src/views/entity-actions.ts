@@ -1496,5 +1496,21 @@ function reportImportResult(
     new Notice(
       `정규식 임포트: ${result.script.scriptName} · 확장 탭 → 정규식 치환 (모든 세션 공통)`
     );
+    return;
+  }
+  if (result.kind === "user") {
+    const w = result.write;
+    if (w.created.length === 0 && w.skipped.length === 0) {
+      new Notice("페르소나 백업에 가져올 페르소나가 없습니다.");
+      return;
+    }
+    const parts: string[] = [];
+    if (w.created.length > 0) {
+      parts.push(`페르소나 ${w.created.length}개 임포트: ${w.created.map((c) => c.name).join(", ")}`);
+    }
+    if (w.skipped.length > 0) {
+      parts.push(`${w.skipped.length}개 건너뜀(이름 겹침): ${w.skipped.map((s) => s.name).join(", ")}`);
+    }
+    new Notice(parts.join(" · "));
   }
 }

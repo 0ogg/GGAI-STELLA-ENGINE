@@ -7,6 +7,7 @@ export type ImportFormat =
   | "sillytavern-prompt-preset"
   | "sillytavern-quick-reply"
   | "sillytavern-regex"
+  | "sillytavern-persona-backup"
   | "novelai-lorebook"
   | "novelai-scenario"
   | "novelai-story"
@@ -79,6 +80,19 @@ export function detectFormat(data: unknown): ImportFormat {
   // `findRegex` 는 다른 어느 포맷에도 없는 키다.
   if (typeof d.findRegex === "string") {
     return "sillytavern-regex";
+  }
+
+  // ST 페르소나 백업(personas.js onBackupPersonas) — personas + persona_descriptions
+  // 두 객체(딕셔너리, 배열 아님) 조합은 다른 어느 포맷과도 겹치지 않는다.
+  if (
+    d.personas &&
+    typeof d.personas === "object" &&
+    !Array.isArray(d.personas) &&
+    d.persona_descriptions &&
+    typeof d.persona_descriptions === "object" &&
+    !Array.isArray(d.persona_descriptions)
+  ) {
+    return "sillytavern-persona-backup";
   }
 
   if (d.entries && typeof d.entries === "object" && !Array.isArray(d.entries)) {

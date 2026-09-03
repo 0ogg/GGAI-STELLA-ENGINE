@@ -21,6 +21,8 @@ import { scanQuickReplies } from "../util/scan-quick-replies";
 import { normalizeRegexScript, type RegexScript } from "../types/regex";
 import { uuidv4 } from "../util/uuid";
 import { writeScenario, WriteScenarioResult } from "./write-scenario";
+import { parseSillyTavernPersonas } from "./parse-sillytavern-persona";
+import { writeImportedPersonas, WriteUsersResult } from "./write-user";
 
 /**
  * 임포트 디스패처 결과.
@@ -46,6 +48,7 @@ export type ImportResult =
    * 시나리오 카드에 얹히는 설정이라, 디스패처는 **파싱만 하고 기록은 호출자**가 한다.
    */
   | { kind: "regex"; format: ImportFormat; script: RegexScript }
+  | { kind: "user"; format: ImportFormat; write: WriteUsersResult }
   | { kind: "error"; format: ImportFormat | "unknown"; error: string };
 
 /**
@@ -158,6 +161,18 @@ export async function importFile(
       // 이름이 없으면 파일명을 쓴다(ST 는 scriptName 을 항상 넣지만 손편집본 대비).
       if (!script.scriptName) script.scriptName = fallbackName;
       return { kind: "regex", format, script };
+    }
+    case "sillytavern-persona-backup": {
+      try {
+        const personas = parseSillyTavernPersonas(data);
+        return {
+          kind: "user",
+          format,
+          write: await writeImportedPersonas(vault, personas),
+        };
+      } catch (err) {
+        return { kind: "error", format, error: errMsg(err) };
+      }
     }
     case "novelai-lorebook": {
       const book = parseNovelAILorebook(data, fallbackName);
