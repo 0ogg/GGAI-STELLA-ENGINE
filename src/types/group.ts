@@ -13,6 +13,12 @@
 export interface StellaGroupMember {
   /** 멤버 시나리오의 stella.id (StellaScenarioExtension.id). */
   scenarioId: string;
+  /**
+   * 뮤트 — 자동 발화자 판결에서 제외한다 (ST 그룹의 disabled member 대응).
+   * 발화자 버튼에서 **직접 지목하면 말한다**. 카드/로어북 주입은 그대로다
+   * (방에 있되 먼저 나서지 않는 상태). 미설정 = 참여.
+   */
+  muted?: boolean;
 }
 
 export interface StellaGroup {

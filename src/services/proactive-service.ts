@@ -382,7 +382,7 @@ export class ProactiveService {
         (i) => [i.scenario.data?.extensions?.stella?.id, i] as const
       )
     );
-    const candidates: GroupSpeakerCandidate[] = gi.group.members.flatMap((m) => {
+    const all = gi.group.members.flatMap((m) => {
       const sc = byId.get(m.scenarioId);
       const name = sc?.scenario.data?.name?.trim();
       if (!name) return [];
@@ -393,10 +393,16 @@ export class ProactiveService {
           talkativeness: parseTalkativeness(
             (sc?.scenario.data as any)?.extensions?.talkativeness
           ),
+          muted: m.muted === true,
         },
       ];
     });
-    if (candidates.length < 2) return null;
+    if (all.length < 2) return null;
+    // 뮤트된 멤버는 먼저 말을 걸지 않는다 (챗 뷰의 자동 판결과 같은 규칙).
+    // 전원 뮤트면 선채팅이 통째로 멈추므로 그때만 전원을 후보로 되돌린다.
+    const unmuted = all.filter((c) => !c.muted);
+    const candidates: GroupSpeakerCandidate[] =
+      unmuted.length > 0 ? unmuted : all;
 
     const hostId = session.meta.scenarioId;
     const msgs = buildChatMessages(session);
@@ -428,8 +434,8 @@ export class ProactiveService {
         recentSpeakerIds,
       }) ?? hostId;
     const name =
-      candidates.find((c) => c.scenarioId === pickedId)?.name ??
-      candidates.find((c) => c.scenarioId === hostId)?.name ??
+      all.find((c) => c.scenarioId === pickedId)?.name ??
+      all.find((c) => c.scenarioId === hostId)?.name ??
       "Character";
     return { id: pickedId, name };
   }

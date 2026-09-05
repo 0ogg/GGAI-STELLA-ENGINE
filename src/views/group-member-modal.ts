@@ -9,6 +9,8 @@ export interface GroupMemberRow {
   thumbnailPath: string | null;
   /** 세션 주인공 — 체크 해제(내보내기) 불가. */
   isHost: boolean;
+  /** 뮤트 상태 — 표시만(토글은 세션창 발화자 버튼 메뉴). */
+  muted: boolean;
 }
 
 /** 그룹 챗 대화 설정 — 자동 연쇄/중복 발화 상한 (채팅 그룹에서만 노출). */
@@ -79,6 +81,12 @@ export class GroupMemberModal extends Modal {
         nameWrap.createEl("span", {
           cls: "ggai-group-member-badge",
           text: "주인공",
+        });
+      }
+      if (row.muted) {
+        nameWrap.createEl("span", {
+          cls: "ggai-group-member-badge",
+          text: "뮤트",
         });
       }
     }

@@ -12,6 +12,7 @@
 import {
   ItemView,
   Menu,
+  MenuItem,
   Notice,
   Platform,
   TFile,
@@ -117,6 +118,8 @@ import {
 import { IllustrationRegenModal } from "./illustration-regen-modal";
 import { ParagraphRegenModal } from "./paragraph-regen-modal";
 import { ViewStylePopover } from "./view-style-popover";
+import { buildSessionMenu, sessionListItemOf } from "./session-menu";
+import { removeGroupMember, setGroupMemberMuted } from "./entity-actions";
 
 interface ChatSessionViewState {
   sessionFile: string;
@@ -226,6 +229,8 @@ export class ChatSessionView extends ItemView {
     name: string;
     thumbPath: string | null;
     talkativeness: number;
+    /** 뮤트 — 자동 발화자 판결에서 제외 (지목하면 말한다). */
+    muted: boolean;
   }[] = [];
   /** 발화자 지목 (입력창 옆 버튼). null = 자동 결정. 세션에 저장하지 않는다. */
   private pinnedSpeakerId: string | null = null;
@@ -567,6 +572,7 @@ export class ChatSessionView extends ItemView {
                 talkativeness: parseTalkativeness(
                   (sc?.scenario.data as any)?.extensions?.talkativeness
                 ),
+                muted: m.muted === true,
               },
             ];
           });
@@ -747,7 +753,11 @@ export class ChatSessionView extends ItemView {
       .filter((m) => m.role === "assistant")
       .slice(-4)
       .map((m) => speakerOf(m.nodeId));
-    const candidates: GroupSpeakerCandidate[] = this.groupMembers;
+    // 뮤트된 멤버는 자동 판결에서 뺀다 (지목은 위에서 이미 통과). 전원 뮤트면
+    // 대화가 멈추므로 그때만 전원을 후보로 되돌린다.
+    const unmuted = this.groupMembers.filter((m) => !m.muted);
+    const candidates: GroupSpeakerCandidate[] =
+      unmuted.length > 0 ? unmuted : this.groupMembers;
     return (
       pickNextSpeaker({
         candidates,
@@ -764,7 +774,9 @@ export class ChatSessionView extends ItemView {
   private maxAutoReplies(): number {
     const configured = this.group?.autoChainMax;
     if (configured && configured > 0) return Math.max(1, Math.floor(configured));
-    return Math.min(3, this.groupMembers.length);
+    // 뮤트된 멤버는 자동으로 말하지 않으므로 기본 라운드 길이에서도 뺀다.
+    const active = this.groupMembers.filter((m) => !m.muted).length;
+    return Math.min(3, Math.max(1, active));
   }
 
   /** 발화자 선택 버튼 표시 — 자동(users 아이콘) 또는 지목 멤버 아바타. */
@@ -786,9 +798,15 @@ export class ChatSessionView extends ItemView {
     btn.setAttr("data-tooltip-position", "top");
   }
 
-  /** 입력창 옆 발화자 메뉴 — 자동 + 멤버 목록. */
-  private openSpeakerMenu(e: MouseEvent): void {
+  /**
+   * 발화자 버튼 = 멤버 목록. 이름 좌클릭 = 다음 발화자 지목,
+   * 이름 우클릭·꾹 = 그 캐릭터의 메뉴(지목/뮤트/내보내기).
+   */
+  private openSpeakerMenu(pos: { x: number; y: number }): void {
+    if (!this.isGroupChat()) return;
     const menu = new Menu();
+    // 줄마다 우클릭·꾹 메뉴를 붙이므로 네이티브 메뉴로 새지 않게 DOM 메뉴로 고정.
+    menu.setUseNativeMenu(false);
     menu.addItem((item) =>
       item
         .setTitle("자동 (다음 발화자 추천)")
@@ -799,19 +817,117 @@ export class ChatSessionView extends ItemView {
           this.updateSpeakerBtn();
         })
     );
+    menu.addSeparator();
     for (const m of this.groupMembers) {
-      menu.addItem((item) =>
+      menu.addItem((item) => {
         item
-          .setTitle(m.name)
-          .setIcon("user")
+          .setTitle(m.muted ? `${m.name} (뮤트)` : m.name)
+          .setIcon(m.muted ? "volume-x" : "user")
           .setChecked(this.pinnedSpeakerId === m.scenarioId)
           .onClick(() => {
             this.pinnedSpeakerId = m.scenarioId;
             this.updateSpeakerBtn();
-          })
-      );
+          });
+        this.attachMemberRowMenu(item, menu, m.scenarioId);
+      });
     }
-    menu.showAtMouseEvent(e);
+    menu.addSeparator();
+    menu.addItem((item) =>
+      item
+        .setTitle("이름 우클릭·꾹 = 뮤트 · 내보내기")
+        .setIsLabel(true)
+    );
+    menu.showAtPosition(pos);
+  }
+
+  /**
+   * 멤버 줄에 2단 메뉴를 붙인다 — 우클릭(데스크톱) / 꾹 누르기(모바일).
+   * 줄의 DOM 은 공개 타입에 없어 있으면 붙이고 없으면 조용히 건너뛴다
+   * (좌클릭 지목은 그대로 동작한다).
+   */
+  private attachMemberRowMenu(
+    item: MenuItem,
+    parent: Menu,
+    scenarioId: string
+  ): void {
+    const dom = (item as MenuItem & { dom?: HTMLElement }).dom;
+    if (!dom) return;
+    const open = (x: number, y: number) => {
+      parent.close();
+      // 이 클릭/탭이 아직 문서로 퍼지는 중이라 같은 틱에 열면 곧바로 닫힌다.
+      window.setTimeout(() => this.openSpeakerMemberMenu(scenarioId, { x, y }), 0);
+    };
+    dom.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      open(e.clientX, e.clientY);
+    });
+    // 꾹 누르기가 발동하면 뒤따르는 click(=지목)은 헬퍼가 삼킨다.
+    attachLongPress(dom, { durationMs: 650, onLongPress: open });
+  }
+
+  /** 멤버 하나의 동작 메뉴 — 지목 / 뮤트 / 그룹에서 내보내기. */
+  private openSpeakerMemberMenu(
+    scenarioId: string,
+    pos: { x: number; y: number }
+  ): void {
+    const member = this.memberOf(scenarioId);
+    const groupId = this.group?.id;
+    if (!member || !groupId) return;
+    const hostId = this.session?.meta.scenarioId ?? "";
+    const isHost = scenarioId === hostId;
+    const pinned = this.pinnedSpeakerId === scenarioId;
+
+    const menu = new Menu();
+    // 누구 메뉴인지 — 이름을 맨 위에 이름표로 박는다(2단 메뉴는 눌린 줄과 떨어져 뜬다).
+    menu.addItem((item) =>
+      item
+        .setTitle(
+          `${member.name}${member.muted ? " (뮤트)" : ""}${isHost ? " · 주인공" : ""}`
+        )
+        .setIcon(member.muted ? "volume-x" : "user")
+        .setIsLabel(true)
+    );
+    menu.addSeparator();
+    menu.addItem((item) =>
+      item
+        .setTitle(pinned ? "지목 해제 (자동으로)" : "다음 발화자로 지목")
+        .setIcon(pinned ? "users" : "mic")
+        .onClick(() => {
+          this.pinnedSpeakerId = pinned ? null : scenarioId;
+          this.updateSpeakerBtn();
+        })
+    );
+    menu.addItem((item) =>
+      item
+        .setTitle(member.muted ? "뮤트 해제" : "뮤트 (자동으로는 말하지 않음)")
+        .setIcon(member.muted ? "volume-2" : "volume-x")
+        .onClick(() =>
+          void setGroupMemberMuted(
+            this.plugin,
+            groupId,
+            scenarioId,
+            !member.muted
+          )
+        )
+    );
+    menu.addSeparator();
+    menu.addItem((item) => {
+      item
+        .setTitle(isHost ? "내보내기 (주인공은 불가)" : "그룹에서 내보내기")
+        .setIcon("user-minus")
+        .onClick(() =>
+          removeGroupMember(
+            this.plugin,
+            groupId,
+            scenarioId,
+            hostId,
+            member.name
+          )
+        );
+      if (isHost) item.setDisabled(true);
+    });
+    menu.showAtPosition(pos);
   }
 
   /** 자동 연쇄 중단 — 타이핑/이동/재생성 등 사용자 개입 시 즉시. */
@@ -1556,7 +1672,14 @@ export class ChatSessionView extends ItemView {
       cls: "ggai-btn ggai-icon-btn ggai-chat-speaker-btn",
     });
     this.speakerBtn.setAttr("data-tooltip-position", "top");
-    this.speakerBtn.addEventListener("click", (e) => this.openSpeakerMenu(e));
+    // 클릭 = 멤버 목록 (이름 좌클릭 지목 / 우클릭·꾹 = 그 캐릭터 메뉴).
+    this.speakerBtn.addEventListener("click", (e) =>
+      this.openSpeakerMenu({ x: e.clientX, y: e.clientY })
+    );
+    this.speakerBtn.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      this.openSpeakerMenu({ x: e.clientX, y: e.clientY });
+    });
     this.updateSpeakerBtn();
     this.nodeFavBtn = mkIconBtn(rightTop, "save", "세이브 (노드 즐겨찾기)", () =>
       void this.toggleNodeFavorite()
@@ -1567,6 +1690,22 @@ export class ChatSessionView extends ItemView {
       "보기 스타일",
       () => this.toggleViewStylePopover(styleBtn)
     );
+    // 세션 메뉴 — 사이드바 우클릭과 같은 항목(그룹 채팅 관리·제목·복제·선채팅…)을
+    // 세션창 안에서 바로. 목록 구성은 session-menu.ts 한 곳에서만 관리한다.
+    const menuBtn = rightTop.createEl("button", {
+      cls: "ggai-btn ggai-icon-btn",
+    });
+    setIcon(menuBtn, "more-vertical");
+    menuBtn.setAttr("aria-label", "세션 메뉴");
+    menuBtn.setAttr("data-tooltip-position", "top");
+    menuBtn.addEventListener("click", (e) => {
+      if (!this.sessionFile || !this.session) return;
+      buildSessionMenu(
+        this.plugin,
+        sessionListItemOf(this.sessionFile, this.session),
+        { omitOpen: true }
+      ).showAtMouseEvent(e);
+    });
 
     const rightBottom = right.createEl("div", {
       cls: "ggai-toolbar-row ggai-toolbar-row-bottom",

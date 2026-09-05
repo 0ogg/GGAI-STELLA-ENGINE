@@ -2,6 +2,7 @@ import { Menu, Notice } from "obsidian";
 import type StellaEnginePlugin from "../main";
 import { generateSessionTitleNow } from "../services/session-title-service";
 import type { SessionListItem } from "../util/scan-sessions";
+import type { StellaSession } from "../types/session";
 import {
   confirmDeleteSession,
   copySession,
@@ -14,12 +15,31 @@ import { LorebookLinksModal } from "./lorebook-links-modal";
 import { NextEpisodeModal } from "./next-episode-modal";
 
 export interface SessionMenuOptions {
+  /** 이미 그 세션을 보고 있는 곳(세션창)에서 열 때 — "이어하기" 항목을 뺀다. */
+  omitOpen?: boolean;
   /** 노드·가지치기 화면을 가진 호스트(대시보드)만 넘긴다. 없으면 항목 미표시. */
   onBranch?: () => void;
   /** 이름 변경 후처리(뷰 retarget 등)가 필요한 호스트용 오버라이드. */
   onRename?: () => void;
   /** 복제 후처리가 필요한 호스트용 오버라이드. */
   onCopy?: () => void;
+}
+
+/**
+ * 열려 있는 세션창(뷰)이 공용 메뉴를 열 때 쓰는 목록 항목 만들기 —
+ * 목록 스캔 없이 `sessionFile` + 메모리의 세션 객체로 같은 모양을 만든다.
+ */
+export function sessionListItemOf(
+  sessionFile: string,
+  session: StellaSession
+): SessionListItem {
+  const folder = sessionFile.replace(/\/session\.json$/, "");
+  return {
+    folder,
+    folderName: folder.split("/").pop() ?? folder,
+    sessionFile,
+    session,
+  };
 }
 
 /**
@@ -33,12 +53,14 @@ export function buildSessionMenu(
   opts?: SessionMenuOptions
 ): Menu {
   const menu = new Menu();
-  menu.addItem((mi) =>
-    mi
-      .setTitle("이어하기")
-      .setIcon("play")
-      .onClick(() => void openSessionByPath(plugin, s.sessionFile))
-  );
+  if (!opts?.omitOpen) {
+    menu.addItem((mi) =>
+      mi
+        .setTitle("이어하기")
+        .setIcon("play")
+        .onClick(() => void openSessionByPath(plugin, s.sessionFile))
+    );
+  }
   if (opts?.onBranch) {
     menu.addItem((mi) =>
       mi

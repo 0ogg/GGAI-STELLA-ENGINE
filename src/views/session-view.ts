@@ -132,6 +132,7 @@ import type {
   TranslateResult,
 } from "../services/translation-service";
 import { ChoiceModal, ConfirmModal } from "./modals";
+import { buildSessionMenu, sessionListItemOf } from "./session-menu";
 import type { ScenarioListItem } from "../util/scan-scenarios";
 import { diffText, TextDiff } from "../util/session-diff";
 import {
@@ -1557,6 +1558,22 @@ export class SessionView extends ItemView {
       "Next branch",
       () => this.handleSiblingNav(1)
     );
+    // 세션 메뉴 — 사이드바 우클릭과 같은 항목(그룹 채팅 관리·제목·복제·내보내기…)을
+    // 세션창 안에서 바로. 목록 구성은 session-menu.ts 한 곳에서만 관리한다.
+    const menuBtn = rightTop.createEl("button", {
+      cls: "ggai-btn ggai-icon-btn",
+    });
+    setIcon(menuBtn, "more-vertical");
+    menuBtn.setAttr("aria-label", "세션 메뉴");
+    menuBtn.setAttr("data-tooltip-position", "top");
+    menuBtn.addEventListener("click", (e) => {
+      if (!this.sessionFile || !this.session) return;
+      buildSessionMenu(
+        this.plugin,
+        sessionListItemOf(this.sessionFile, this.session),
+        { omitOpen: true }
+      ).showAtMouseEvent(e);
+    });
     const rightBottom = right.createEl("div", {
       cls: "ggai-toolbar-row ggai-toolbar-row-bottom",
     });

@@ -805,6 +805,7 @@ export async function openGroupMemberManager(
       name: sc?.scenario.data.name?.trim() || "(사라진 캐릭터)",
       thumbnailPath: sc?.thumbnailPath ?? null,
       isHost: m.scenarioId === hostId,
+      muted: m.muted === true,
     };
   });
   // 안전장치 — 멤버 목록에 주인공이 없으면 맨 앞에 넣는다.
@@ -815,6 +816,7 @@ export async function openGroupMemberManager(
       name: sc?.scenario.data.name?.trim() || "주인공",
       thumbnailPath: sc?.thumbnailPath ?? null,
       isHost: true,
+      muted: false,
     });
   }
 
@@ -849,6 +851,77 @@ export async function openGroupMemberManager(
           `저장 실패: ${err instanceof Error ? err.message : String(err)}`
         );
       }
+    }
+  ).open();
+}
+
+/**
+ * 그룹 멤버 뮤트 토글 — 자동 발화자 판결에서만 빼고, 지목하면 여전히 말한다.
+ * 세션창 발화자 버튼 메뉴에서 호출. 결과는 `groups-changed` 로 전파된다.
+ */
+export async function setGroupMemberMuted(
+  plugin: StellaEnginePlugin,
+  groupId: string,
+  scenarioId: string,
+  muted: boolean
+): Promise<void> {
+  const item = await plugin.store.getGroupById(groupId).catch(() => null);
+  if (!item) {
+    new Notice("그룹 정보를 찾을 수 없습니다.");
+    return;
+  }
+  const member = item.group.members.find((m) => m.scenarioId === scenarioId);
+  if (!member) return;
+  member.muted = muted ? true : undefined;
+  try {
+    await plugin.store.saveGroup(item.groupFile, item.group);
+  } catch (err) {
+    new Notice(
+      `뮤트 저장 실패: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
+
+/**
+ * 그룹에서 멤버 1명 내보내기 (발화자 버튼 메뉴 → 확인 후). 주인공은 뺄 수 없다
+ * — 세션이 주인공 시나리오 폴더에 살기 때문(회귀금지.md 시리즈/그룹/메뉴).
+ */
+export function removeGroupMember(
+  plugin: StellaEnginePlugin,
+  groupId: string,
+  scenarioId: string,
+  hostScenarioId: string,
+  name: string
+): void {
+  if (scenarioId === hostScenarioId) {
+    new Notice("주인공 캐릭터는 내보낼 수 없습니다.");
+    return;
+  }
+  new ConfirmModal(
+    plugin.app,
+    "그룹에서 내보내기",
+    `"${name}" 을(를) 이 그룹에서 내보냅니다. 지금까지의 대화는 그대로 남습니다.`,
+    "내보내기",
+    (ok) => {
+      if (!ok) return;
+      void (async () => {
+        const item = await plugin.store.getGroupById(groupId).catch(() => null);
+        if (!item) {
+          new Notice("그룹 정보를 찾을 수 없습니다.");
+          return;
+        }
+        item.group.members = item.group.members.filter(
+          (m) => m.scenarioId !== scenarioId
+        );
+        try {
+          await plugin.store.saveGroup(item.groupFile, item.group);
+          new Notice(`"${name}" 을(를) 그룹에서 내보냈습니다.`);
+        } catch (err) {
+          new Notice(
+            `내보내기 실패: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      })();
     }
   ).open();
 }
