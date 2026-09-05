@@ -1,7 +1,11 @@
 import { TFile, TFolder, Vault, normalizePath } from "obsidian";
 import type { ActiveSettings } from "../types/preset";
 import type { SessionMode, SessionNode, StellaSession } from "../types/session";
-import { createBlankSession, type SessionSeed } from "./new-session";
+import {
+  createBlankSession,
+  type SessionCreationMeta,
+  type SessionSeed,
+} from "./new-session";
 
 /**
  * 씨드로는 만들 수 없는 내용(임포트한 대화 트리 등)을 **생성 시점의 첫 쓰기에** 함께
@@ -32,7 +36,8 @@ export async function createNewSession(
   seedText: SessionSeed = "",
   initial?: ActiveSettings,
   mode: SessionMode = "novel",
-  prefill?: SessionPrefill
+  prefill?: SessionPrefill,
+  creationMeta?: SessionCreationMeta
 ): Promise<{ folder: string; sessionFile: string; session: StellaSession }> {
   const safe = sanitizeName(name) || "세션";
   const sessionsRoot = normalizePath(`${scenarioFolder}/SESSIONS`);
@@ -41,7 +46,14 @@ export async function createNewSession(
   const folder = await uniquePath(vault, `${sessionsRoot}/${safe}`);
   await vault.createFolder(folder);
 
-  const session = createBlankSession(name, scenarioId, seedText, initial, mode);
+  const session = createBlankSession(
+    name,
+    scenarioId,
+    seedText,
+    initial,
+    mode,
+    creationMeta
+  );
   if (prefill) {
     session.nodes = prefill.nodes;
     session.meta.rootId = prefill.rootId;
@@ -66,7 +78,7 @@ export async function saveSession(
   if (file instanceof TFile) {
     await vault.modify(file, text);
   } else {
-    await vault.create(sessionFile, text);
+    throw new Error("세션이 삭제되거나 이동되어 저장할 수 없습니다.");
   }
 }
 

@@ -2862,6 +2862,16 @@ const asyncTests: Promise<void>[] = [];
   assert.equal(small.meta.activeLeafId, small.meta.rootId);
   assert.equal(small.nodes[small.meta.rootId].kind, "root");
 
+  // 그룹/페르소나 연결은 두 번째 저장에 의존하지 않고 최초 세션 객체에 들어간다.
+  const grouped = createBlankSession("g", "host", "", undefined, "chat", {
+    groupId: "group-1",
+    personaFile: "GGAI/USERS/me.json",
+    personaIds: ["persona-1"],
+  });
+  assert.equal(grouped.meta.groupId, "group-1");
+  assert.equal(grouped.meta.personaFile, "GGAI/USERS/me.json");
+  assert.deepEqual(grouped.meta.personaIds, ["persona-1"]);
+
   // 대형 first_mes → 여러 노드 체인, 본문 재구성은 원문과 동일.
   const paras: string[] = [];
   for (let i = 0; i < 30; i++) paras.push(`장면 ${i} ` + "본문내용".repeat(40));

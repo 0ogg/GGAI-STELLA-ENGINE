@@ -22,7 +22,9 @@ export interface SessionHostView extends View {
   /** 표시 중인 세션 파일 경로 (없으면 null). */
   getSessionFile(): string | null;
   /** 미저장 편집을 store 에 커밋 (미리보기 = 전송본 불변식). */
-  flushPendingEdits(): Promise<void>;
+  flushPendingEdits(opts?: { convert?: boolean }): Promise<void>;
+  /** 이름 변경은 DOM/편집 상태를 다시 만들지 않고 경로만 갱신한다. */
+  retargetSessionFile?(oldFile: string, newFile: string): void;
   /** 해당 노드 위치로 스크롤. 활성 경로에 없으면 false. */
   scrollToNode(nodeId: string): boolean;
   /** AI 생성(스트리밍) 진행 중 여부 — 생성 중인 탭을 다른 세션으로 갈아끼우면 잠금·로딩 상태가 새 세션에 새어든다. */
@@ -130,10 +132,11 @@ export function isViewingSession(
  */
 export function isSessionGenerating(
   workspace: Workspace,
-  sessionFile: string
+  sessionFile: string,
+  except?: SessionHostView
 ): boolean {
   return sessionHostViewsOf(workspace, sessionFile).some(
-    (view) => typeof view.isGenerating === "function" && view.isGenerating()
+    (view) => view !== except && typeof view.isGenerating === "function" && view.isGenerating()
   );
 }
 

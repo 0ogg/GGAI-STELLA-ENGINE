@@ -1,5 +1,11 @@
 import type { ActiveSettings } from "../types/preset";
-import type { SessionMode, SessionNode, Span, StellaSession } from "../types/session";
+import type {
+  SessionMeta,
+  SessionMode,
+  SessionNode,
+  Span,
+  StellaSession,
+} from "../types/session";
 import { buildChatMessages, CHAT_MESSAGE_SEPARATOR } from "./chat-messages";
 import { pathToLeaf } from "./session-text";
 import {
@@ -19,6 +25,11 @@ export interface StorySeed {
 }
 
 export type SessionSeed = string | string[] | StorySeed;
+
+/** 세션 파일을 처음 만들 때부터 함께 기록해야 하는 연결 메타데이터. */
+export type SessionCreationMeta = Partial<
+  Pick<SessionMeta, "groupId" | "personaFile" | "personaIds">
+>;
 
 function isStorySeed(seed: SessionSeed): seed is StorySeed {
   return (
@@ -40,13 +51,15 @@ function isStorySeed(seed: SessionSeed): seed is StorySeed {
  *                     사용자가 마지막에 박은 모델/파라미터/프롬프트 세트가 그대로 따라온다.
  * @param mode         선택: 세션 모드 (기본 novel). 챗 세션은 first_mes = 첫 AI 메시지
  *                     통짜 1노드 (대형 씨드 분할 안 함 — 노드 1개 = 메시지 1개 대전제).
+ * @param creationMeta 선택: 그룹·페르소나 연결처럼 첫 디스크 쓰기에 포함할 메타데이터.
  */
 export function createBlankSession(
   name: string,
   scenarioId: string,
   seedText: SessionSeed = "",
   initial?: ActiveSettings,
-  mode: SessionMode = "novel"
+  mode: SessionMode = "novel",
+  creationMeta?: SessionCreationMeta
 ): StellaSession {
   const now = Date.now();
   const { nodes, rootId, activeLeafId } = isStorySeed(seedText)
@@ -61,6 +74,11 @@ export function createBlankSession(
       id: uuidv4(),
       name,
       scenarioId,
+      groupId: creationMeta?.groupId,
+      personaFile: creationMeta?.personaFile,
+      personaIds: creationMeta?.personaIds
+        ? [...creationMeta.personaIds]
+        : undefined,
       mode,
       createdAt: now,
       modifiedAt: now,

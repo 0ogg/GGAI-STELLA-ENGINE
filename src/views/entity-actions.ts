@@ -971,23 +971,38 @@ export async function openGroupCreator(
         seed = result.opening.text;
       }
 
+      // 그룹/페르소나 연결은 세션을 만든 뒤 덧씌우지 않고 첫 쓰기에 함께 넣는다.
+      // 이 사이의 저장 실패로 일반 세션만 남는 반쪽 생성 상태를 막는다.
+      const activePersona = await plugin.resolveActiveUserProfile();
       const group = await plugin.store.createGroup(
         result.groupName,
         result.memberScenarioIds
       );
-      const created = await plugin.store.createSession(
-        host.folder,
-        hostId,
-        result.groupName,
-        seed,
-        plugin.data.current,
-        result.mode
-      );
-      created.session.meta.groupId = group.group.id;
-      const activePersona = await plugin.resolveActiveUserProfile();
-      created.session.meta.personaFile = activePersona.userFile;
-      rememberSessionPersona(created.session.meta, activePersona.profile.id);
-      await plugin.store.saveSession(created.sessionFile, created.session);
+      let created: Awaited<ReturnType<typeof plugin.store.createSession>>;
+      try {
+        created = await plugin.store.createSession(
+          host.folder,
+          hostId,
+          result.groupName,
+          seed,
+          plugin.data.current,
+          result.mode,
+          undefined,
+          {
+            groupId: group.group.id,
+            personaFile: activePersona.userFile,
+            personaIds: [activePersona.profile.id],
+          }
+        );
+      } catch (err) {
+        // 그룹만 생기고 세션이 없는 잔재도 남기지 않는다.
+        try {
+          await plugin.store.deleteGroup(group.folder);
+        } catch (rollbackErr) {
+          console.warn("[GGAI Stella] 그룹 생성 롤백 실패:", rollbackErr);
+        }
+        throw err;
+      }
       await openSessionByPath(plugin, created.sessionFile);
       new Notice(`그룹 세션 생성: ${result.groupName}`);
     } catch (err) {
@@ -1178,7 +1193,7 @@ export function promptRenameSession(
       if (name === s.session.meta.name && s.folderName === name) return;
       void (async () => {
         try {
-          const result = await plugin.store.renameSession(s.sessionFile, name);
+          const result = await plugin.renameSession(s.sessionFile, name);
           await onRenamed?.(result.oldSessionFile, result.newSessionFile);
           new Notice(`세션 제목 변경: ${name}`);
         } catch (err) {

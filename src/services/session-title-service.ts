@@ -46,6 +46,6 @@ export async function generateSessionTitleNow(
   });
   if (!title) return { ok: false, error: "제목 생성 결과가 비어 있습니다." };
 
-  const result = await plugin.store.renameSession(sessionFile, title);
+  const result = await plugin.renameSession(sessionFile, title);
   return { ok: true, title, newSessionFile: result.newSessionFile };
 }

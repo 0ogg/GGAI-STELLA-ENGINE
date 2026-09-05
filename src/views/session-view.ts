@@ -1,3 +1,4 @@
+import { isSessionGenerating } from "./session-host";
 import { ItemView, Notice, Platform, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 import {
   VIEW_TYPE_CHAT_SESSION,
@@ -554,9 +555,9 @@ export class SessionView extends ItemView {
       // 생성 중 재타게팅 방지는 openStellaSession 이 담당하지만, 예상 밖 경로
       // (레이아웃 복원 등)로 여기 오면 생성을 중단해 잠금·스트리밍이 새 세션에
       // 새어들지 않게 한다.
-      this.generation?.abort.abort();
+      if (this.isGenerating()) throw new Error("작업 중인 세션은 다른 세션으로 전환할 수 없습니다.");
       // 다른 세션으로 갈아탈 때 — 아직 커밋 안 된 pending 편집을 먼저 확정 저장.
-      await this.commitPending();
+      await this.flushPendingEdits({ convert: false });
       this.flushScrollSave(); // 떠나는 세션의 스크롤 위치 저장
       this.sessionFile = next;
       this.plugin.rememberActiveSessionFile(next);
@@ -577,13 +578,19 @@ export class SessionView extends ItemView {
   }
 
   /** detail view 등 다른 곳에서 이 세션의 파일 경로를 얻어갈 때 쓰는 진입점. */
+  retargetSessionFile(oldFile: string, newFile: string): void {
+    if (this.sessionFile !== oldFile) return;
+    this.sessionFile = newFile;
+    this.refreshNativeTitle();
+  }
+
   getSessionFile(): string | null {
     return this.sessionFile;
   }
 
   /** AI 생성(스트리밍) 진행 중 — 이 탭은 다른 세션으로 갈아끼우면 안 된다 (session-host 규약). */
   isGenerating(): boolean {
-    return this.generation != null;
+    return !!(this.sessionFile && this.plugin.isSessionChanging?.(this.sessionFile)) || this.generation != null || this.preparing || this.proConvertPromise != null || this.translating || this.illustrating;
   }
 
   /**
@@ -624,12 +631,14 @@ export class SessionView extends ItemView {
    * 미리보기처럼 외부에서 "지금 전송될 그대로"를 읽기 전에 호출한다 —
    * 그래야 방금 친 문단이 컨텍스트에 포함되고, 미리보기 = 전송본 불변식이 유지된다.
    */
-  async flushPendingEdits(): Promise<void> {
+  async flushPendingEdits(opts?: { convert?: boolean }): Promise<void> {
     await this.commitPending({ force: true });
     // 집필 프로 — 대기 초고/문단을 영어판에 반영 (소설 뷰는 no-op). 미리보기 =
     // 전송본 불변식에 초고도 포함되어야 하므로 여기서 함께 flush 한다. 실패해도
     // 여기서는 막지 않는다(호출자 다수) — 생성 시작 차단은 handleContinue 몫.
-    if (this.bidirectionalWriting()) await this.runProConvert();
+    this.flushTranslationEdits();
+    if (this.sessionFile) await this.store.retrySessionWrites(this.sessionFile);
+    if (opts?.convert !== false && this.bidirectionalWriting()) await this.runProConvert();
   }
 
   /**
@@ -761,7 +770,10 @@ export class SessionView extends ItemView {
     }
   }
 
+  private closed = false;
+
   async onOpen(): Promise<void> {
+    this.closed = false;
     document.addEventListener("selectionchange", this.selectionChangeHandler);
     document.addEventListener("visibilitychange", this.visibilityHandler);
     this.render();
@@ -882,6 +894,7 @@ export class SessionView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.closed = true;
     document.removeEventListener(
       "selectionchange",
       this.selectionChangeHandler
@@ -913,8 +926,8 @@ export class SessionView extends ItemView {
       this.syncRafId = null;
     }
     this.flushScrollSave();
-    this.flushTranslationEdits();
-    await this.commitPending();
+    this.generation?.abort.abort();
+    await this.flushPendingEdits({ convert: false });
   }
 
   // --- load / render ---
@@ -2880,7 +2893,7 @@ export class SessionView extends ItemView {
   // --- undo / redo via activeLeaf ---
 
   private async handleUndo(): Promise<void> {
-    if (!this.session || !this.sessionFile) return;
+    if (!this.session || !this.sessionFile || this.isGenerating()) return;
     if (this.leafNavigationBusy) return;
     await this.commitPending({ force: true });
     const curId = this.session.meta.activeLeafId;
@@ -2901,7 +2914,7 @@ export class SessionView extends ItemView {
   }
 
   private async handleRedo(): Promise<void> {
-    if (!this.session || !this.sessionFile) return;
+    if (!this.session || !this.sessionFile || this.isGenerating()) return;
     if (this.leafNavigationBusy) return;
     await this.commitPending({ force: true });
     // commitPending 이 redoStack 을 비울 수 있으므로 그 이후에 pop 한다.
@@ -3068,11 +3081,11 @@ export class SessionView extends ItemView {
 
   /** 이어쓰기 — activeLeaf 의 child 로 AI 노드를 만들고 chatStream 으로 생성 시작. */
   private async handleContinue(): Promise<void> {
-    if (!this.session || this.generation || this.preparing) return;
+    if (!this.session || !this.sessionFile || this.generation || this.preparing || (this.plugin.isSessionChanging?.(this.sessionFile) || isSessionGenerating(this.app.workspace, this.sessionFile, this))) return;
     this.preparing = true;
     this.updateToolbar();
     try {
-      await this.commitPending({ force: true });
+      await this.flushPendingEdits({ convert: false });
       // 양방향 — 대기 초고/수정을 먼저 원장에 반영하고 출발한다. 이어쓰기 버튼이 곧
       // "필요한 걸 전부 하고 생성"이라, 직전 실패가 있어도 누를 때마다 다시 시도한다.
       // 지금 이 시도가 실패했을 때만 멈춘다 — 알림은 반영 실행부가 이미 띄웠고
@@ -3100,11 +3113,11 @@ export class SessionView extends ItemView {
    * activeLeaf 가 AI 노드가 아니거나 root 면 동작하지 않는다.
    */
   private async handleRegen(): Promise<void> {
-    if (!this.session || this.generation || this.preparing) return;
+    if (!this.session || !this.sessionFile || this.generation || this.preparing || (this.plugin.isSessionChanging?.(this.sessionFile) || isSessionGenerating(this.app.workspace, this.sessionFile, this))) return;
     this.preparing = true;
     this.updateToolbar();
     try {
-      await this.commitPending({ force: true });
+      await this.flushPendingEdits({ convert: false });
 
       const cur = this.session.nodes[this.session.meta.activeLeafId];
       if (!cur || !isAINode(cur) || cur.parent == null) {
@@ -3134,6 +3147,7 @@ export class SessionView extends ItemView {
     kind: "ai-continue" | "ai-regen"
   ): Promise<void> {
     if (!this.session || !this.sessionFile) return;
+    const session = this.session;
     this.exitParaSelectMode();
 
     if (!this.ai.isAvailable()) {
@@ -3177,6 +3191,7 @@ export class SessionView extends ItemView {
       new Notice(plan.error);
       return;
     }
+    if (this.closed || this.session !== session || !this.sessionFile) return;
     const profile = plan.profile;
     const ctx = plan.output;
     const payload = plan.payload;
@@ -3217,9 +3232,7 @@ export class SessionView extends ItemView {
     // 3) 생성 상태 준비 — abort controller + generation 필드 + 편집 잠금.
     const abort = new AbortController();
     this.generation = { nodeId, abort, accumulatedText: "" };
-    // 재진입 잠금 인계 — 여기서부터는 generation 이 막으므로 준비 잠금은 푼다
-    // (생성 후 자동 번역/삽화가 도는 동안까지 버튼을 묶어두지 않는다).
-    this.preparing = false;
+    // 준비부터 저장·후처리 완료까지 대상 세션을 유지한다.
     this.setBodyEditable(false);
     this.updateToolbar();
     // 이어쓰기/재생성 — 생성이 붙는 지점(본문 끝)으로 이동해 스트리밍을 따라간다.
@@ -3369,6 +3382,7 @@ export class SessionView extends ItemView {
         }
       }
     } finally {
+      if (this.session !== session || !this.sessionFile) return;
       // 예약돼 있던 프레임 갱신은 여기서 버린다 — 아래 전체 렌더가 최종본을 그린다.
       this.cancelStreamPaint();
       // 중단/오류로 스트림이 끊긴 경우에도 앵커 반복 제거를 확정 (재호출 안전).
@@ -3444,11 +3458,11 @@ export class SessionView extends ItemView {
       this.scrollTailIfFollowing();
       this.followTail = false;
       window.requestAnimationFrame(() => this.saveAnchor());
-      await this.persistSession(
+      const saved = await this.persistSession(
         aborted ? "Partial generation save failed" : "AI generation save failed",
         true
       );
-      if (!aborted && !emptyResponse && !blankGeneration) {
+      if (saved && !aborted && !emptyResponse && !blankGeneration) {
         await this.maybeGenerateSessionTitle({
           generatedText,
           parentText,
@@ -3636,8 +3650,8 @@ export class SessionView extends ItemView {
 
   /** 같은 parent 밑 형제 사이로 activeLeaf 이동. direction = -1(이전) | 1(다음). */
   private async handleSiblingNav(direction: -1 | 1): Promise<void> {
-    if (!this.session || !this.sessionFile) return;
-    await this.commitPending();
+    if (!this.session || !this.sessionFile || this.isGenerating()) return;
+    await this.flushPendingEdits({ convert: false });
 
     const cur = this.session.nodes[this.session.meta.activeLeafId];
     if (!cur) return;
@@ -3669,16 +3683,16 @@ export class SessionView extends ItemView {
   private async persistSession(
     errorPrefix: string,
     silent = false
-  ): Promise<void> {
-    if (!this.session || !this.sessionFile) return;
+  ): Promise<boolean> {
+    if (!this.session || !this.sessionFile) return false;
     try {
       await this.store.saveSession(this.sessionFile, this.session, {
         origin: this.storeOrigin,
       });
+      return true;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (silent) console.warn("[GGAI Stella] " + errorPrefix + ":", err);
-      else new Notice(errorPrefix + ": " + msg);
+      console.warn("[GGAI Stella] " + errorPrefix + ":", err);
+      return false;
     }
   }
 

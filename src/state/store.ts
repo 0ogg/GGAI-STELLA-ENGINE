@@ -160,6 +160,7 @@ import {
   saveSession as diskSaveSession,
   trashSession as diskTrashSession,
 } from "../util/session-ops";
+import { WriteQueue } from "./write-queue";
 import { uuidv4 } from "../util/uuid";
 
 /**
@@ -188,6 +189,46 @@ export interface SessionChangeDetail {
 }
 
 export class StellaStore extends Events {
+  private readonly sessionFiles = new WeakMap<StellaSession, string>();
+  private readonly translationFiles = new WeakMap<SessionTranslations, string>();
+
+  private cacheSession(file: string, session: StellaSession): void {
+    this.sessionByFile.set(file, session);
+    this.sessionFiles.set(session, file);
+  }
+
+  private cacheTranslations(file: string, translations: SessionTranslations): void {
+    this.translationsBySessionFile.set(file, translations);
+    this.translationFiles.set(translations, file);
+  }
+
+  private readonly sessionWrites = new WriteQueue();
+  private readonly sessionRenames = new Map<
+    string,
+    Promise<{
+      oldFolder: string;
+      newFolder: string;
+      oldSessionFile: string;
+      newSessionFile: string;
+    }>
+  >();
+
+  hasPendingSessionWrites(file: string): boolean {
+    return (
+      this.sessionWrites.hasPending(file) ||
+      this.sessionWrites.hasPending(translationsFileOfSessionFile(file) ?? "")
+    );
+  }
+
+  async retrySessionWrites(file: string): Promise<void> {
+    const pending = this.hasPendingSessionWrites(file);
+    await this.sessionWrites.retry(file);
+    const translations = translationsFileOfSessionFile(file);
+    if (translations) await this.sessionWrites.retry(translations);
+    if (pending) {
+      this.trigger("session-save-recovered", file);
+    }
+  }
   private scenariosCache: ScenarioListItem[] | null = null;
   private sessionsByFolder = new Map<string, SessionListItem[]>();
   private sessionByFile = new Map<string, StellaSession>();
@@ -392,7 +433,7 @@ export class StellaStore extends Events {
       const cached = this.sessionByFile.get(oldFile);
       if (cached) {
         this.sessionByFile.delete(oldFile);
-        this.sessionByFile.set(newFile, cached);
+        this.cacheSession(newFile, cached);
       }
     }
     this.trigger("scenarios-changed");
@@ -485,7 +526,7 @@ export class StellaStore extends Events {
       clonedSession.meta.favorite = false;
       this.markSelfWrite(newSessionFile);
       await this.vault.create(newSessionFile, JSON.stringify(clonedSession, null, 2));
-      this.sessionByFile.set(newSessionFile, clonedSession);
+      this.cacheSession(newSessionFile, clonedSession);
       copiedSessions.push({ oldFile, newFile: newSessionFile });
     }
 
@@ -678,7 +719,7 @@ export class StellaStore extends Events {
     // 세션 객체도 file-cache 에 채워두되, 이미 있는 건 덮어쓰지 않는다 (다른 view 가 들고 있는 참조 보호).
     for (const item of list) {
       if (!this.sessionByFile.has(item.sessionFile)) {
-        this.sessionByFile.set(item.sessionFile, item.session);
+        this.cacheSession(item.sessionFile, item.session);
       }
     }
     this.sessionsByFolder.set(scenarioFolder, list);
@@ -706,7 +747,7 @@ export class StellaStore extends Events {
       if (existing) {
         item.session = existing;
       } else {
-        this.sessionByFile.set(item.sessionFile, item.session);
+        this.cacheSession(item.sessionFile, item.session);
       }
     }
     this.sessionsByFolder.set(scenarioFolder, list);
@@ -721,7 +762,7 @@ export class StellaStore extends Events {
     try {
       const text = await this.vault.read(f);
       const session = JSON.parse(text) as StellaSession;
-      this.sessionByFile.set(file, session);
+      this.cacheSession(file, session);
       return session;
     } catch (err) {
       console.error("[GGAI Stella] session 로드 실패:", err);
@@ -736,7 +777,7 @@ export class StellaStore extends Events {
     // 생성 노드를 '외부 변경'으로 오인해 오래된 내용으로 덮어써 사라진다. 자기 write
     // grace 내에는 캐시를 진실로 삼아 디스크 재읽기를 건너뛴다(onVaultChange 와 동일 규칙).
     const cachedSelf = this.sessionByFile.get(file);
-    if (cachedSelf && this.isRecentSelfWrite(file)) return cachedSelf;
+    if (cachedSelf && (this.hasPendingSessionWrites(file) || this.isRecentSelfWrite(file))) return cachedSelf;
 
     const f = this.vault.getAbstractFileByPath(file);
     if (!(f instanceof TFile)) return null;
@@ -761,7 +802,7 @@ export class StellaStore extends Events {
         assignSessionInPlace(existing, fresh);
         return existing;
       }
-      this.sessionByFile.set(file, fresh);
+      this.cacheSession(file, fresh);
       return fresh;
     } catch (err) {
       console.error("[GGAI Stella] session 로드 실패:", err);
@@ -776,7 +817,8 @@ export class StellaStore extends Events {
     seed: import("../util/new-session").SessionSeed = "",
     initial?: import("../types/preset").ActiveSettings,
     mode: import("../types/session").SessionMode = "novel",
-    prefill?: import("../util/session-ops").SessionPrefill
+    prefill?: import("../util/session-ops").SessionPrefill,
+    creationMeta?: import("../util/new-session").SessionCreationMeta
   ): Promise<{ folder: string; sessionFile: string; session: StellaSession }> {
     const result = await diskCreateSession(
       this.vault,
@@ -786,10 +828,11 @@ export class StellaStore extends Events {
       seed,
       initial,
       mode,
-      prefill
+      prefill,
+      creationMeta
     );
     this.markSelfWrite(result.sessionFile);
-    this.sessionByFile.set(result.sessionFile, result.session);
+    this.cacheSession(result.sessionFile, result.session);
     this.sessionsByFolder.delete(scenarioFolder);
     // 세션 수/최근 시각이 바뀌므로 시나리오 목록 캐시 갱신 (구현은 saveSession 의
     // 캐시 파기에 무임승차했었다 — saveSession 이 더는 파기하지 않으므로 여기서).
@@ -801,8 +844,10 @@ export class StellaStore extends Events {
   }
 
   async deleteSession(folder: string): Promise<void> {
-    await diskTrashSession(this.vault, folder);
     const sessionFile = `${folder}/session.json`;
+    // 저장 실패나 진행 중 쓰기를 휴지통 이동과 경합시키지 않는다. 실패하면 삭제도 멈춘다.
+    await this.retrySessionWrites(sessionFile);
+    await diskTrashSession(this.vault, folder);
     this.sessionByFile.delete(sessionFile);
     this.translationsBySessionFile.delete(sessionFile);
     this.summariesBySessionFile.delete(sessionFile);
@@ -821,9 +866,23 @@ export class StellaStore extends Events {
     session: StellaSession,
     detail?: SessionChangeDetail
   ): Promise<void> {
+    const rename = this.sessionRenames.get(file);
+    if (rename) file = (await rename).newSessionFile;
+    file = this.sessionFiles.get(session) ?? file;
+    // 호출 즉시 수정 시각을 올려 느린 디스크 재읽기로부터 공유 객체를 보호한다.
+    session.meta.modifiedAt = Date.now();
     this.markSelfWrite(file);
-    this.sessionByFile.set(file, session);
-    await diskSaveSession(this.vault, file, session);
+    this.cacheSession(file, session);
+    await this.sessionWrites.run(file, async () => {
+      this.markSelfWrite(file);
+      await diskSaveSession(this.vault, file, session);
+      this.markSelfWrite(file);
+      this.trigger("session-changed", file, detail);
+    }).catch((err) => {
+      this.trigger("session-save-failed", file, err);
+      throw err;
+    });
+    if (!this.hasPendingSessionWrites(file)) this.trigger("session-save-recovered", file);
     // 시나리오 목록의 "최근 플레이" 정렬 재료(lastSessionAt)만 캐시 제자리 갱신.
     // 캐시 무효화 + scenarios-changed 방송(구 동작)은 세션 저장마다 전 뷰를
     // 재렌더시키던 원흉 — 실제 시나리오 변경(이름/표지 등)은 saveScenario 가 쏜다.
@@ -843,7 +902,7 @@ export class StellaStore extends Events {
         );
       }
     }
-    this.trigger("session-changed", file, detail);
+
   }
 
   async renameSession(
@@ -855,6 +914,27 @@ export class StellaStore extends Events {
     oldSessionFile: string;
     newSessionFile: string;
   }> {
+    const existing = this.sessionRenames.get(sessionFile);
+    if (existing) return existing;
+    const run = this.renameSessionInner(sessionFile, name);
+    this.sessionRenames.set(sessionFile, run);
+    try {
+      return await run;
+    } finally {
+      this.sessionRenames.delete(sessionFile);
+    }
+  }
+
+  private async renameSessionInner(
+    sessionFile: string,
+    name: string
+  ): Promise<{
+    oldFolder: string;
+    newFolder: string;
+    oldSessionFile: string;
+    newSessionFile: string;
+  }> {
+    await this.retrySessionWrites(sessionFile);
     const cleanName = name.trim();
     if (!cleanName) throw new Error("Session name is empty");
 
@@ -888,10 +968,10 @@ export class StellaStore extends Events {
     }
 
     this.sessionByFile.delete(sessionFile);
-    this.sessionByFile.set(newSessionFile, session);
+    this.cacheSession(newSessionFile, session);
     const cachedTranslations = this.translationsBySessionFile.get(sessionFile);
     this.translationsBySessionFile.delete(sessionFile);
-    if (cachedTranslations) this.translationsBySessionFile.set(newSessionFile, cachedTranslations);
+    if (cachedTranslations) this.cacheTranslations(newSessionFile, cachedTranslations);
     const cachedSummaries = this.summariesBySessionFile.get(sessionFile);
     this.summariesBySessionFile.delete(sessionFile);
     if (cachedSummaries) this.summariesBySessionFile.set(newSessionFile, cachedSummaries);
@@ -945,7 +1025,7 @@ export class StellaStore extends Events {
     const newFile = `${folder}/session.json`;
     this.markSelfWrite(newFile);
     await this.vault.create(newFile, JSON.stringify(cloned, null, 2));
-    this.sessionByFile.set(newFile, cloned);
+    this.cacheSession(newFile, cloned);
     const scenarioFolder = scenarioFolderOfSessionFile(sessionFile);
     this.scenariosCache = null;
     if (scenarioFolder) {
@@ -980,7 +1060,7 @@ export class StellaStore extends Events {
         }
       }
     }
-    this.translationsBySessionFile.set(sessionFile, translations);
+    this.cacheTranslations(sessionFile, translations);
     return translations;
   }
 
@@ -989,15 +1069,29 @@ export class StellaStore extends Events {
     translations: SessionTranslations,
     detail?: SessionChangeDetail
   ): Promise<void> {
+    const rename = this.sessionRenames.get(sessionFile);
+    if (rename) sessionFile = (await rename).newSessionFile;
+    sessionFile = this.translationFiles.get(translations) ?? sessionFile;
     const path = translationsFileOfSessionFile(sessionFile);
     if (!path) throw new Error("Invalid session path");
-    this.translationsBySessionFile.set(sessionFile, translations);
-    this.markSelfWrite(path);
-    const body = JSON.stringify(translations, null, 2);
-    const f = this.vault.getAbstractFileByPath(path);
-    if (f instanceof TFile) await this.vault.modify(f, body);
-    else await this.vault.create(path, body);
-    this.trigger("session-translations-changed", sessionFile, detail);
+    this.cacheTranslations(sessionFile, translations);
+    await this.sessionWrites.run(path, async () => {
+      if (!(this.vault.getAbstractFileByPath(sessionFile) instanceof TFile)) {
+        throw new Error("세션이 삭제되거나 이동되어 번역을 저장할 수 없습니다.");
+      }
+      this.markSelfWrite(path);
+      const body = JSON.stringify(translations, null, 2);
+      const f = this.vault.getAbstractFileByPath(path);
+      if (f instanceof TFile) await this.vault.modify(f, body);
+      else await this.vault.create(path, body);
+      this.markSelfWrite(path);
+      this.trigger("session-translations-changed", sessionFile, detail);
+    }).catch((err) => {
+      this.trigger("session-save-failed", sessionFile, err);
+      throw err;
+    });
+    if (!this.hasPendingSessionWrites(sessionFile)) this.trigger("session-save-recovered", sessionFile);
+
   }
 
   // ─────────────────────────── phone messages (PHONE/<personaId>/messages.json) ───────────────────────────
@@ -2408,7 +2502,7 @@ export class StellaStore extends Events {
     this.sessionByFile.delete(sessionFile);
     const movedTranslations = this.translationsBySessionFile.get(sessionFile);
     this.translationsBySessionFile.delete(sessionFile);
-    if (movedTranslations) this.translationsBySessionFile.set(newSessionFile, movedTranslations);
+    if (movedTranslations) this.cacheTranslations(newSessionFile, movedTranslations);
     const movedSummaries = this.summariesBySessionFile.get(sessionFile);
     this.summariesBySessionFile.delete(sessionFile);
     if (movedSummaries) this.summariesBySessionFile.set(newSessionFile, movedSummaries);
@@ -2439,7 +2533,7 @@ export class StellaStore extends Events {
     path: string,
     kind: "create" | "delete" | "modify"
   ): void {
-    if (this.isRecentSelfWrite(path)) return;
+    if ((kind !== "delete" && this.sessionWrites.hasPending(path)) || this.isRecentSelfWrite(path)) return;
 
     // scenario.json 변경
     if (path.endsWith("/scenario.json")) {

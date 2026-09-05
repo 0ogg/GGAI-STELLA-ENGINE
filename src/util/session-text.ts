@@ -57,7 +57,12 @@ export function buildSpans(
   let spans: Span[] = [];
   for (const node of path) {
     for (const patch of node.patches) {
-      spans = applyPatch(spans, patch);
+      if (patch.op === "append") {
+        // 재구성 전용 배열이므로 누적 스팬 전체를 매번 복사하지 않는다.
+        for (const span of patch.spans) spans.push(span);
+      } else {
+        spans = applyPatch(spans, patch);
+      }
     }
   }
   return normalize(spans);

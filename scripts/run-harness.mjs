@@ -22,6 +22,7 @@ const testNames = [
   "card-instructions",
   "qr-jjangdol",
   "trim-incomplete",
+  "write-queue",
 ];
 const testEntries = testNames.map((n) => path.join(root, "tests", `${n}.test.ts`));
 

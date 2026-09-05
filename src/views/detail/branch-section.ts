@@ -99,6 +99,7 @@ export class BranchSection {
 
   /** session-changed 이벤트 — 트리만 새로 읽는다(검색 input 은 보존). */
   async refresh(): Promise<void> {
+    this.prevTailCache.clear();
     if (!this.activeSessionFile) return;
     this.session = await this.plugin.store.getSession(this.activeSessionFile);
     this.translations = await this.plugin.store.getSessionTranslations(
@@ -921,9 +922,19 @@ export class BranchSection {
 
   // ── 액션 ──
 
+  private async sessionForTreeChange(file: string): Promise<StellaSession | null> {
+    try {
+      return await this.plugin.prepareSessionTreeChange(file);
+    } catch (err) {
+      new Notice(err instanceof Error ? err.message : String(err));
+      return null;
+    }
+  }
+
   private async handleJumpTo(nodeId: string): Promise<void> {
     const file = this.activeSessionFile;
-    const session = this.session;
+    if (!file) return;
+    const session = await this.sessionForTreeChange(file);
     if (!file || !session) return;
     if (session.meta.activeLeafId === nodeId) return;
     if (!session.nodes[nodeId]) return;
@@ -985,7 +996,8 @@ export class BranchSection {
 
   private async handleDeleteDescendants(nodeId: string): Promise<void> {
     const file = this.activeSessionFile;
-    const session = this.session;
+    if (!file) return;
+    const session = await this.sessionForTreeChange(file);
     if (!file || !session || !session.nodes[nodeId]) return;
 
     const deleteIds = collectDescendantIds(session, nodeId);
@@ -1012,7 +1024,8 @@ export class BranchSection {
 
   private async handleKeepOnlyLine(nodeId: string): Promise<void> {
     const file = this.activeSessionFile;
-    const session = this.session;
+    if (!file) return;
+    const session = await this.sessionForTreeChange(file);
     if (!file || !session || !session.nodes[nodeId]) return;
 
     const keepIds = new Set(pathToLeaf(session, nodeId).map((node) => node.id));

@@ -26,10 +26,17 @@ test-vault/
 
 # AI vibe coding files
 .claude/
-AGENTS.md
 CODEX_HANDOFF.md
 branch-tree-mockup.html
 
 # Documentation / spec .md files
 *.md
 !README.md
+
+# Shared project instructions and reviewed specifications
+!/AGENTS.md
+!/CLAUDE.md
+!/회귀금지.md
+!/구현현황.md
+!/*스펙.md
+!/docs/*.md

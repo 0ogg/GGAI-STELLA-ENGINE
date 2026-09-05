@@ -1,3 +1,4 @@
+import { isSessionGenerating } from "./session-host";
 /**
  * 챗 세션 뷰 (M6/C2) — 소설 세션뷰와 **완전 별도**의 뷰.
  *
@@ -289,10 +290,10 @@ export class ChatSessionView extends ItemView {
       // 생성 중 재타게팅 방지는 openStellaSession 이 담당하지만, 예상 밖 경로
       // (레이아웃 복원 등)로 여기 오면 생성을 중단해 잠금·스트리밍이 새 세션에
       // 새어들지 않게 한다.
-      this.generation?.abort.abort();
+      if (this.isGenerating()) throw new Error("작업 중인 세션은 다른 세션으로 전환할 수 없습니다.");
       this.cancelAutoChain();
       this.pinnedSpeakerId = null;
-      await this.flushPendingEdits();
+      await this.flushPendingEdits({ convert: false });
       this.sessionFile = next;
       this.plugin.rememberActiveSessionFile(next);
       await this.loadSession();
@@ -309,13 +310,19 @@ export class ChatSessionView extends ItemView {
 
   // ── 세션 호스트 공통 창구 (session-host.ts) ──────────────────────
 
+  retargetSessionFile(oldFile: string, newFile: string): void {
+    if (this.sessionFile !== oldFile) return;
+    this.sessionFile = newFile;
+    this.app.workspace.requestSaveLayout();
+  }
+
   getSessionFile(): string | null {
     return this.sessionFile;
   }
 
   /** AI 생성(스트리밍) 진행 중 — 이 탭은 다른 세션으로 갈아끼우면 안 된다 (session-host 규약). */
   isGenerating(): boolean {
-    return this.generation != null;
+    return !!(this.sessionFile && this.plugin.isSessionChanging?.(this.sessionFile)) || this.generation != null || this.preparing || this.sending || this.bidiSending || this.bidiReflecting != null || this.translating || this.illustrating;
   }
 
   /**
@@ -340,7 +347,7 @@ export class ChatSessionView extends ItemView {
     await this.qrBar?.runAuto(trigger);
   }
 
-  async flushPendingEdits(): Promise<void> {
+  async flushPendingEdits(opts?: { convert?: boolean }): Promise<void> {
     if (this.editCommitTimer != null) {
       window.clearTimeout(this.editCommitTimer);
       this.editCommitTimer = null;
@@ -360,7 +367,8 @@ export class ChatSessionView extends ItemView {
       window.clearTimeout(this.bidiReflectTimer);
       this.bidiReflectTimer = null;
     }
-    if (this.bidirectional()) await this.runBidiReflect();
+    if (opts?.convert !== false && this.bidirectional()) await this.runBidiReflect();
+    if (this.sessionFile) await this.store.retrySessionWrites(this.sessionFile);
     // 수정칸을 닫았으면 표시본으로 되돌려 그린다 (호출자가 재렌더하지 않는
     // 경로 — 백그라운드 쓰기 직전 flush 등 — 에서도 화면이 편집칸으로 남지 않게).
     if (wasEditing) {
@@ -380,7 +388,10 @@ export class ChatSessionView extends ItemView {
 
   // ── 라이프사이클 ─────────────────────────────────────────────────
 
+  private closed = false;
+
   async onOpen(): Promise<void> {
+    this.closed = false;
     this.registerEvent(
       this.store.on(
         "session-changed",
@@ -426,6 +437,10 @@ export class ChatSessionView extends ItemView {
     this.registerEvent(
       this.store.on("session-deleted", (file: string) => {
         if (file !== this.sessionFile) return;
+        this.generation?.abort.abort();
+        this.generation = null;
+        this.cancelAutoChain();
+        this.cancelStreamPaint();
         this.sessionFile = null;
         this.session = null;
         this.plugin.rememberActiveSessionFile(null);
@@ -490,11 +505,13 @@ export class ChatSessionView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.closed = true;
+    this.cancelStreamPaint();
     this.cancelAutoChain();
     this.viewStylePopover?.close();
     this.viewStylePopover = null;
-    await this.flushPendingEdits();
     this.generation?.abort.abort();
+    await this.flushPendingEdits({ convert: false });
   }
 
   private async loadSession(): Promise<void> {
@@ -950,7 +967,7 @@ export class ChatSessionView extends ItemView {
   }
 
   private async runAutoChainStep(): Promise<void> {
-    if (!this.session || !this.sessionFile || this.generation) return;
+    if (!this.session || !this.sessionFile || this.isGenerating()) return;
     if (!this.isGroupChat() || this.autoChainRemaining <= 0) return;
     // 사용자가 입력 중이면 연쇄를 조용히 멈춘다 (타이핑 인터럽트).
     if ((this.inputEl?.value ?? "").trim() !== "") {
@@ -966,7 +983,7 @@ export class ChatSessionView extends ItemView {
 
   /** [계속 진행] — 자동 연쇄 한 라운드를 다시 연다 (상한 도달/중단 후 이어가기). */
   private async continueGroupRound(): Promise<void> {
-    if (!this.session || this.generation) return;
+    if (!this.session || this.isGenerating()) return;
     await this.flushPendingEdits();
     this.autoChainRemaining = this.maxAutoReplies();
     await this.runAutoChainStep();
@@ -1193,7 +1210,7 @@ export class ChatSessionView extends ItemView {
 
   /** 갤러리에서 고른 삽화의 메시지로 이동 — 그 노드의 최신 분기로 전환 후 스크롤. */
   private async jumpToIllustrationNode(nodeId: string): Promise<void> {
-    if (!this.session || !this.sessionFile || this.generation) return;
+    if (!this.session || !this.sessionFile || this.isGenerating()) return;
     if (!this.session.nodes[nodeId]) return;
     await this.flushPendingEdits();
     const leaf =
@@ -1234,6 +1251,7 @@ export class ChatSessionView extends ItemView {
     // 보존 원칙과 동일).
     const savedScrollTop = this.followTail ? null : host.scrollTop;
 
+    this.cancelStreamPaint();
     host.empty();
     this.streamBubbleEl = null;
     this.messages = buildChatMessages(this.session);
@@ -1792,7 +1810,7 @@ export class ChatSessionView extends ItemView {
 
   /** undo — 활성 리프를 부모로 (마지막 메시지/편집 접기). redo 스택에 쌓는다. */
   private async handleUndo(): Promise<void> {
-    if (!this.session || this.generation) return;
+    if (!this.session || this.isGenerating()) return;
     this.cancelAutoChain();
     await this.flushPendingEdits();
     const cur = this.session.nodes[this.session.meta.activeLeafId];
@@ -1806,7 +1824,7 @@ export class ChatSessionView extends ItemView {
 
   /** redo — undo 스택 우선, 없으면 최근 자식으로 전진. */
   private async handleRedo(): Promise<void> {
-    if (!this.session || this.generation) return;
+    if (!this.session || this.isGenerating()) return;
     this.cancelAutoChain();
     await this.flushPendingEdits();
     let targetId: string | null = null;
@@ -1833,7 +1851,7 @@ export class ChatSessionView extends ItemView {
 
   /** 끝으로 — 현재 리프에서 가장 깊은 최신 후손으로. */
   private async handleJumpEnd(): Promise<void> {
-    if (!this.session || this.generation) return;
+    if (!this.session || this.isGenerating()) return;
     this.cancelAutoChain();
     await this.flushPendingEdits();
     const deepest = getDeepestLatestDescendant(
@@ -2460,7 +2478,7 @@ export class ChatSessionView extends ItemView {
    *    문제의 해법 — 컨텍스트에서는 그 메시지를 제외해 자기 답을 다시 보지 않게).
    */
   private async regenerateLastAssistant(): Promise<void> {
-    if (!this.session || this.generation) return;
+    if (!this.session || this.isGenerating()) return;
     await this.flushPendingEdits();
     const msgs = buildChatMessages(this.session);
     const last = msgs[msgs.length - 1];
@@ -2485,7 +2503,7 @@ export class ChatSessionView extends ItemView {
   }
 
   private async swipeTo(sibling: SessionNode): Promise<void> {
-    if (!this.session || !this.sessionFile || this.generation) return;
+    if (!this.session || !this.sessionFile || this.isGenerating()) return;
     this.cancelAutoChain();
     await this.flushPendingEdits();
     const target = getDeepestLatestDescendant(this.session, sibling.id);
@@ -2569,7 +2587,7 @@ export class ChatSessionView extends ItemView {
    * 목록에서 빠지고 전송본에서도 제외된다.
    */
   private async deleteMessages(index: number, toEnd: boolean): Promise<void> {
-    if (!this.session || !this.sessionFile || this.generation) return;
+    if (!this.session || !this.sessionFile || this.isGenerating()) return;
     this.cancelAutoChain();
     await this.flushPendingEdits();
     if (!this.session || !this.sessionFile) return;
@@ -3053,7 +3071,7 @@ export class ChatSessionView extends ItemView {
    * `speaker` 는 그룹 멤버 이름 또는 순번(1부터) — 맞으면 그 멤버가 답한다.
    */
   private async triggerGeneration(speaker?: string): Promise<void> {
-    if (!this.session || !this.sessionFile || this.generation) return;
+    if (!this.session || !this.sessionFile || this.isGenerating()) return;
     this.cancelAutoChain();
     await this.flushPendingEdits();
     if (!this.session || !this.sessionFile) return;
@@ -3093,7 +3111,20 @@ export class ChatSessionView extends ItemView {
 
   // ── 전송 / 생성 ──────────────────────────────────────────────────
 
+  private sending = false;
+  private preparing = false;
+
   private async handleSend(): Promise<void> {
+    if (this.generation) { this.generation.abort.abort(); return; }
+    if (this.sending || this.preparing || !this.sessionFile || (this.plugin.isSessionChanging?.(this.sessionFile) || isSessionGenerating(this.app.workspace, this.sessionFile, this))) return;
+    this.sending = true;
+    this.updateSendButton();
+    try { await this.sendMessage(); }
+    catch (err) { new Notice("전송 실패: " + (err instanceof Error ? err.message : String(err))); }
+    finally { this.sending = false; this.updateSendButton(); }
+  }
+
+  private async sendMessage(): Promise<void> {
     if (!this.session || !this.sessionFile) return;
     if (this.generation) {
       this.generation.abort.abort();
@@ -3164,9 +3195,10 @@ export class ChatSessionView extends ItemView {
         this.inputEl.value = "";
         this.autosizeInput();
       }
-      await this.persistSession("메시지 저장 실패");
+      const saved = await this.persistSession("메시지 저장 실패");
       this.followTail = true;
       this.renderMessages();
+      if (!saved) return;
       // 사용자 입력도 서사 진행 — 확장 훅(폰 키워드/방송 감지 등)이 생성과 같은
       // 자격으로 돈다. 전송 흐름을 막지 않게 백그라운드.
       void this.plugin.extensions.runUserText({
@@ -3202,7 +3234,30 @@ export class ChatSessionView extends ItemView {
       chain?: boolean;
     }
   ): Promise<void> {
+    if (!this.sessionFile || this.preparing || this.generation || (this.plugin.isSessionChanging?.(this.sessionFile) || isSessionGenerating(this.app.workspace, this.sessionFile, this))) return;
+    this.preparing = true;
+    try { await this.runGenerationInner(parentId, kind, opts); }
+    catch (err) { new Notice("생성 실패: " + (err instanceof Error ? err.message : String(err))); }
+    finally { this.preparing = false; this.updateSendButton(); }
+  }
+
+  private async runGenerationInner(
+    parentId: string,
+    kind: "ai-continue" | "ai-regen",
+    opts?: {
+      /**
+       * 수정 보존 갈아끼우기 — 부모 본문의 이 오프셋부터 끝(=마지막 AI 메시지
+       * 구간)을 지우고 새 메시지를 붙인다. 컨텍스트에서도 그 메시지를 제외.
+       */
+      replaceFrom?: number;
+      /** 그룹 챗 발화자 (멤버 시나리오 stella.id) — 노드 귀속 + 전송본 반영. */
+      speakerId?: string;
+      /** 그룹 챗 자동 연쇄의 한 스텝 — 성공 시 다음 발화자를 예약한다. */
+      chain?: boolean;
+    }
+  ): Promise<void> {
     if (!this.session || !this.sessionFile || this.generation) return;
+    const session = this.session;
     this.exitParaSelectMode();
     if (!this.ai.isAvailable()) {
       new Notice("GGAI Core 가 활성화되어 있지 않습니다.");
@@ -3230,11 +3285,11 @@ export class ChatSessionView extends ItemView {
       new Notice(plan.error);
       return;
     }
+    if (this.closed || this.session !== session || !this.sessionFile) return;
     const profile = plan.profile;
     const payload = plan.payload;
     const trimIncomplete = this.session.meta.trimIncomplete === true;
-    this.session.meta.variables = plan.updatedVariables;
-    this.session.meta.timingStates = plan.output.updatedTimingStates;
+    // 변수·로어북 진행은 결과가 남았을 때만 확정한다.
 
     const parentSpans = buildSpans(this.session, parentId);
     const parentFullText = spansToText(parentSpans);
@@ -3339,6 +3394,7 @@ export class ChatSessionView extends ItemView {
         new Notice("생성 실패: " + (err?.message ?? String(err)));
       }
     } finally {
+      if (this.session !== session || !this.sessionFile) return;
       // 그룹 챗 (챗 컴플리션): 다른 멤버/유저 턴 절단 + 발화자 라벨 제거 —
       // 스트리밍이 끝난 뒤 한 번 적용한다 (텍스트 컴플리션은 위에서 이미 처리).
       if (payload.kind === "chat" && payload.names) {
@@ -3390,15 +3446,19 @@ export class ChatSessionView extends ItemView {
         }
         if (!aborted) new Notice("AI 응답이 비어 있어 저장하지 않았습니다.");
       }
+      if (!blank) {
+        this.session.meta.variables = plan.updatedVariables;
+        this.session.meta.timingStates = plan.output.updatedTimingStates;
+      }
       this.generation = null;
-      await this.persistSession(
+      const saved = await this.persistSession(
         aborted ? "부분 생성 저장 실패" : "생성 결과 저장 실패",
         true
       );
       this.renderMessages();
       this.updateSendButton();
 
-      if (!blank && !aborted) {
+      if (saved && !blank && !aborted) {
         // 확장 생성-완료 훅 — 번역/삽화/요약 확장이 각자 자동 실행을 판정한다
         // (서로 독립, 레지스트리가 병렬 실행). 결과는 store 이벤트로 이 뷰에 반영.
         await this.plugin.extensions.runGenerationComplete({
@@ -3415,7 +3475,22 @@ export class ChatSessionView extends ItemView {
   }
 
   /** 스트리밍 텍스트 반영 — IME 조합 중에는 화면 갱신을 조합 종료 뒤로 미룬다. */
+  private streamPaintRaf: number | null = null;
+
+  private cancelStreamPaint(): void {
+    if (this.streamPaintRaf != null) window.cancelAnimationFrame(this.streamPaintRaf);
+    this.streamPaintRaf = null;
+  }
+
   private paintStreamBubble(text: string): void {
+    if (this.streamPaintRaf != null) return;
+    this.streamPaintRaf = window.requestAnimationFrame(() => {
+      this.streamPaintRaf = null;
+      this.paintStreamBubbleNow(this.generation?.accumulatedText ?? text);
+    });
+  }
+
+  private paintStreamBubbleNow(text: string): void {
     const bubble = this.streamBubbleEl;
     if (!bubble) return;
     if (isImeComposing()) {
@@ -3437,22 +3512,23 @@ export class ChatSessionView extends ItemView {
 
   // ── 저장/보조 ────────────────────────────────────────────────────
 
-  private async persistSession(errorPrefix: string, silent = false): Promise<void> {
-    if (!this.session || !this.sessionFile) return;
+  private async persistSession(errorPrefix: string, silent = false): Promise<boolean> {
+    if (!this.session || !this.sessionFile) return false;
     try {
       await this.store.saveSession(this.sessionFile, this.session, {
         origin: this.storeOrigin,
       });
+      return true;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (silent) console.warn("[GGAI Stella] " + errorPrefix + ":", err);
-      else new Notice(errorPrefix + ": " + msg);
+      console.warn("[GGAI Stella] " + errorPrefix + ":", err);
+      return false;
     }
   }
 
   private updateSendButton(): void {
     const btn = this.sendBtn;
     if (!btn) return;
+    btn.disabled = !this.generation && (this.preparing || this.sending);
     btn.empty();
     setIcon(btn, this.generation ? "square" : "send");
     btn.toggleClass("is-generating", this.generation != null);

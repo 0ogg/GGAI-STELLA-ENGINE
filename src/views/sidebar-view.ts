@@ -8,7 +8,6 @@ import {
   setIcon,
 } from "obsidian";
 import { VIEW_TYPE_SIDEBAR } from "../constants";
-import { getSessionHostLeaves } from "./session-host";
 import type StellaEnginePlugin from "../main";
 import { StellaStore, type SessionChangeDetail } from "../state/store";
 import type { LorebookListItem } from "../util/scan-lorebooks";
@@ -166,11 +165,6 @@ export class SidebarView extends ItemView {
       })
     );
     // 로어북 변경 (L3a) — 활성 탭이 lorebook 일 때만 그 안만 갱신.
-    this.registerEvent(
-      this.store.on("session-renamed", (oldFile: string, newFile: string) => {
-        this.retargetSessionViews(oldFile, newFile);
-      })
-    );
     const debouncedLoreRefresh = debounce(
       () => void this.refreshAndRerenderLorebooks(),
       120,
@@ -960,8 +954,7 @@ export class SidebarView extends ItemView {
   }
 
   private renameSession(s: SessionListItem): void {
-    promptRenameSession(this.plugin, s, async (oldFile, newFile) => {
-      this.retargetSessionViews(oldFile, newFile);
+    promptRenameSession(this.plugin, s, async () => {
       await this.refreshAndRerenderList();
     });
   }
@@ -1064,26 +1057,6 @@ export class SidebarView extends ItemView {
 
   private consumeSuppressedClick(e: MouseEvent): boolean {
     return this.pressMenu.consumeSuppressedClick(e);
-  }
-
-  private retargetSessionViews(oldFile: string, newFile: string): void {
-    if (this.plugin.data.lastActiveSessionFile === oldFile) {
-      void this.plugin.savePluginData({ lastActiveSessionFile: newFile });
-    }
-    for (const leaf of getSessionHostLeaves(this.app.workspace)) {
-      const view = leaf.view as unknown as {
-        getSessionFile?: () => string | null;
-      };
-      if (view.getSessionFile?.() !== oldFile) continue;
-      const state =
-        typeof leaf.view.getState === "function"
-          ? (leaf.view.getState() as Record<string, unknown>)
-          : {};
-      void leaf.setViewState({
-        type: leaf.view.getViewType(),
-        state: { ...state, sessionFile: newFile },
-      });
-    }
   }
 
   private async openScenarioJson(item: ScenarioListItem): Promise<void> {

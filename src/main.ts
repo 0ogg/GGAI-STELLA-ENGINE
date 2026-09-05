@@ -99,6 +99,7 @@ import {
   canRetargetSessionView,
   getSessionHostLeaves,
   isSessionHostView,
+  isSessionGenerating,
   runAutoQuickRepliesEverywhere,
   SESSION_HOST_VIEW_TYPES,
 } from "./views/session-host";
@@ -356,6 +357,42 @@ export default class StellaEnginePlugin extends Plugin {
 
     // 2. Store — view 팩토리가 호출되기 전에 만들어야 한다.
     this.store = new StellaStore(this.app.vault);
+    const failedSessionNotices = new Map<string, Notice>();
+    this.registerEvent(
+      this.store.on("session-save-failed", (file: string) => {
+        if (failedSessionNotices.has(file)) return;
+        const content = document.createDocumentFragment();
+        content.createEl("div", {
+          text: "세션 저장 실패 — 변경은 메모리에 남아 있습니다. 저장될 때까지 앱을 종료하지 마세요.",
+        });
+        const retry = content.createEl("button", { text: "저장 재시도" });
+        retry.addEventListener("click", () => {
+          retry.disabled = true;
+          void this.store
+            .retrySessionWrites(file)
+            .catch((err) => {
+              new Notice(
+                "저장 재시도 실패: " +
+                  (err instanceof Error ? err.message : String(err))
+              );
+            })
+            .finally(() => {
+              retry.disabled = false;
+            });
+        });
+        failedSessionNotices.set(file, new Notice(content, 0));
+      })
+    );
+    this.registerEvent(
+      this.store.on("session-save-recovered", (file: string) => {
+        failedSessionNotices.get(file)?.hide();
+        failedSessionNotices.delete(file);
+      })
+    );
+    this.register(() => {
+      for (const notice of failedSessionNotices.values()) notice.hide();
+    });
+
     this.store.bindVaultEvents((ref) => this.registerEvent(ref));
 
     // 전역 IME 조합 추적 — 조합 중 배경 뷰의 DOM/선택영역 개입을 미루는 기준.
@@ -631,6 +668,10 @@ export default class StellaEnginePlugin extends Plugin {
     );
     this.registerEvent(
       this.store.on("session-renamed", (oldFile: string, newFile: string) => {
+        for (const leaf of getSessionHostLeaves(this.app.workspace)) {
+          if (isSessionHostView(leaf.view)) leaf.view.retargetSessionFile?.(oldFile, newFile);
+        }
+        if (this.data.lastActiveSessionFile === oldFile) this.rememberActiveSessionFile(newFile);
         const patch: Partial<StellaPluginData> = {};
         const prevAnchor = this.data.sessionAnchor?.[oldFile];
         if (prevAnchor !== undefined) {
@@ -1343,16 +1384,49 @@ export default class StellaEnginePlugin extends Plugin {
     this.store.trigger("active-session-changed", sessionFile);
   }
 
+  /** 분기 조작은 모든 열린 편집을 보존한 뒤 실행한다. 단순 이동은 AI 변환을 하지 않는다. */
+  async prepareSessionTreeChange(sessionFile: string) {
+    if (isSessionGenerating(this.app.workspace, sessionFile)) {
+      throw new Error("생성·변환 작업을 마친 뒤 분기를 변경해 주세요.");
+    }
+    await this.flushSessionEdits(sessionFile, { convert: false });
+    await this.store.retrySessionWrites(sessionFile);
+    const session = await this.store.getSession(sessionFile);
+    if (isSessionGenerating(this.app.workspace, sessionFile)) {
+      throw new Error("생성이 시작되어 분기 변경을 중단했습니다.");
+    }
+    return session;
+  }
+
+  /** 제목 변경 전에 초안을 보존한다. 이름 변경 자체는 열린 뷰를 다시 만들지 않는다. */
+  private readonly sessionChanges = new Set<string>();
+
+  isSessionChanging(file: string): boolean {
+    return this.sessionChanges.has(file);
+  }
+
+  async renameSession(sessionFile: string, title: string) {
+    if (this.sessionChanges.has(sessionFile)) {
+      throw new Error("세션 제목을 변경하는 중입니다.");
+    }
+    await this.prepareSessionTreeChange(sessionFile);
+    this.sessionChanges.add(sessionFile);
+    try {
+      return await this.store.renameSession(sessionFile, title);
+    } finally {
+      this.sessionChanges.delete(sessionFile);
+    }
+  }
+
   /**
    * 열려 있는 세션 뷰의 미저장 본문 편집을 store 에 커밋한다.
-   * "현재 컨텍스트 확인"처럼 전송본을 외부에서 만들기 직전에 호출해, 방금 친
-   * 문단까지 컨텍스트에 포함되도록 한다 (미리보기 = 전송본 불변식).
+   * convert=false 는 분기 이동·제목 변경처럼 초안만 보존하고 AI 변환은 하지 않는 경로다.
    */
-  async flushSessionEdits(sessionFile: string): Promise<void> {
+  async flushSessionEdits(sessionFile: string, opts?: { convert?: boolean }): Promise<void> {
     for (const leaf of getSessionHostLeaves(this.app.workspace)) {
       const view = leaf.view;
       if (isSessionHostView(view) && view.getSessionFile() === sessionFile) {
-        await view.flushPendingEdits();
+        await view.flushPendingEdits(opts);
       }
     }
   }
