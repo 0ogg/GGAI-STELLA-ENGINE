@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   hasNsfwTag,
   isHourInRange,
+  isMinuteInRange,
   isNsfwIllustration,
   shouldHideDashboardNsfw,
 } from "../src/util/dashboard-content-safety";
@@ -32,6 +33,9 @@ assert.equal(shouldHideDashboardNsfw({ schedule: true, scheduleStartHour: 9, sch
 assert.equal(shouldHideDashboardNsfw({ schedule: true, scheduleStartHour: 22, scheduleEndHour: 7 }, { isMobile: false, isFocused: true, hour: 2 }), true);
 assert.equal(isHourInRange(18, 9, 18), false);
 assert.equal(isHourInRange(4, 4, 4), true);
+assert.equal(isMinuteInRange(9 * 60 + 29, 9 * 60 + 30, 18 * 60 + 15), false);
+assert.equal(shouldHideDashboardNsfw({ schedule: true, scheduleStartTime: "09:30", scheduleEndTime: "18:15" }, { isMobile: false, isFocused: true, hour: 9, minute: 30 }), true);
+assert.equal(shouldHideDashboardNsfw({ schedule: true, scheduleStartTime: "22:30", scheduleEndTime: "07:15" }, { isMobile: false, isFocused: true, hour: 7, minute: 14 }), true);
 
 assert.equal(hasNsfwTag(["NSFW"], ""), true);
 assert.equal(hasNsfwTag(undefined, "masterpiece, nsfw, 1girl"), true);

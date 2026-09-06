@@ -478,12 +478,14 @@ export class DashboardView extends ItemView {
   }
 
   private nsfwProtectionActive(): boolean {
+    const now = new Date();
     return shouldHideDashboardNsfw(
       this.plugin.data.settings?.dashboardNsfwProtection,
       {
         isMobile: Platform.isMobile,
         isFocused: document.hasFocus(),
-        hour: new Date().getHours(),
+        hour: now.getHours(),
+        minute: now.getMinutes(),
       }
     );
   }

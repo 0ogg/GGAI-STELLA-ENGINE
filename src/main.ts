@@ -2251,28 +2251,31 @@ class StellaSettingTab extends PluginSettingTab {
 
     const hourSetting = new Setting(containerEl)
       .setName("숨김 시간대")
-      .setDesc("시작 시각은 포함하고 종료 시각은 포함하지 않습니다. 같은 시각이면 하루 종일입니다.");
-    const hourOptions = Object.fromEntries(
-      Array.from({ length: 24 }, (_, hour) => [String(hour), `${String(hour).padStart(2, "0")}:00`])
-    );
-    hourSetting.addDropdown((dropdown) =>
-      dropdown
-        .addOptions(hourOptions)
-        .setValue(String(safety.scheduleStartHour ?? 9))
-        .setDisabled(safety.schedule !== true)
-        .onChange((value) =>
-          this.saveDashboardNsfwProtection({ scheduleStartHour: Number(value) })
+      .setDesc("시작 시각은 포함하고 종료 시각은 포함하지 않습니다. 자정을 넘길 수 있으며, 같은 시각이면 하루 종일입니다.");
+    const legacyTime = (hour: number | undefined, fallback: string): string =>
+      hour === undefined ? fallback : `${String(hour).padStart(2, "0")}:00`;
+    hourSetting.addText((text) => {
+      text.inputEl.type = "time";
+      text.inputEl.setAttr("aria-label", "숨김 시작 시각");
+      text
+        .setValue(
+          safety.scheduleStartTime ?? legacyTime(safety.scheduleStartHour, "09:00")
         )
-    );
-    hourSetting.addDropdown((dropdown) =>
-      dropdown
-        .addOptions(hourOptions)
-        .setValue(String(safety.scheduleEndHour ?? 18))
-        .setDisabled(safety.schedule !== true)
         .onChange((value) =>
-          this.saveDashboardNsfwProtection({ scheduleEndHour: Number(value) })
+          this.saveDashboardNsfwProtection({ scheduleStartTime: value })
+        );
+    });
+    hourSetting.addText((text) => {
+      text.inputEl.type = "time";
+      text.inputEl.setAttr("aria-label", "숨김 종료 시각");
+      text
+        .setValue(
+          safety.scheduleEndTime ?? legacyTime(safety.scheduleEndHour, "18:00")
         )
-    );
+        .onChange((value) =>
+          this.saveDashboardNsfwProtection({ scheduleEndTime: value })
+        );
+    });
     addSafetyToggle(
       "창이 포커스를 잃으면 숨기기",
       "앱 전환, 화면 공유 중 다른 창 클릭 등으로 Obsidian이 비활성화되면 숨깁니다.",
