@@ -347,7 +347,10 @@ export class ChatSessionView extends ItemView {
     await this.qrBar?.runAuto(trigger);
   }
 
-  async flushPendingEdits(opts?: { convert?: boolean }): Promise<void> {
+  async flushPendingEdits(opts?: {
+    convert?: boolean;
+    allowEmptyBubbleDelete?: boolean;
+  }): Promise<void> {
     if (this.editCommitTimer != null) {
       window.clearTimeout(this.editCommitTimer);
       this.editCommitTimer = null;
@@ -357,8 +360,12 @@ export class ChatSessionView extends ItemView {
     // 열려 있던 수정칸은 여기서 닫는다 — 전송·재생성·undo 같은 명시적 액션은
     // 편집을 확정하고 진행한다(회귀금지: 미커밋 편집을 안은 채 생성 금지).
     const wasEditing = this.editing != null;
+    const allowEmptyBubbleDelete =
+      opts?.allowEmptyBubbleDelete === true && this.editing?.target === "source";
     this.editing = null;
-    if (bubble) await this.commitBubbleEdit(bubble);
+    if (bubble) {
+      await this.commitBubbleEdit(bubble, { allowEmpty: allowEmptyBubbleDelete });
+    }
     // 번역 보기에서 편집 중인 말풍선도 커밋 (translations.json 에만 저장).
     if (this.trEdit) await this.endTranslationBubbleEdit(this.trEdit.bubble);
     // 양방향 번역 — 대기 중인 말풍선 수정을 원문에 반영한다(디바운스를 앞당김).
@@ -2675,7 +2682,9 @@ export class ChatSessionView extends ItemView {
     if (editing) btn.addClass("is-editing");
     setIcon(btn, editing ? "check" : "pencil");
     btn.addEventListener("click", () => {
-      if (editing) void this.flushPendingEdits();
+      if (editing) {
+        void this.flushPendingEdits({ allowEmptyBubbleDelete: true });
+      }
       else {
         void this.startBubbleEdit(
           index,
@@ -3010,7 +3019,10 @@ export class ChatSessionView extends ItemView {
     }, EDIT_COMMIT_DEBOUNCE_MS);
   }
 
-  private async commitBubbleEdit(bubble: HTMLElement): Promise<void> {
+  private async commitBubbleEdit(
+    bubble: HTMLElement,
+    opts?: { allowEmpty?: boolean }
+  ): Promise<void> {
     if (!this.session || !this.sessionFile) return;
     const index = Number(bubble.dataset.index);
     if (!Number.isFinite(index)) return;
@@ -3023,11 +3035,19 @@ export class ChatSessionView extends ItemView {
     const newText = bubble.textContent ?? "";
     const oldDisplay = this.displayTextOf(msg);
     if (newText === oldDisplay) return;
-    // 커밋 방어 — 내용 있던 말풍선이 통째로 빈 값이 되는 커밋은 하지 않는다
-    // (브라우저 정규화/전체선택 삭제로 메시지가 증발하는 회귀 방지).
+    // 자동 저장 중 빈 DOM 을 바로 저장하면 브라우저 정규화/전체선택 실수로
+    // 메시지가 증발할 수 있다. 단, 수정 완료 버튼은 사용자의 명시적 삭제 의도이므로
+    // 빈 replace 를 허용한다. 편집칸이 열린 동안에는 빈 DOM 을 그대로 보존해
+    // blur 가 완료 버튼보다 먼저 와도 그 의도가 사라지지 않게 한다.
     if (newText.trim() === "" && oldDisplay.trim() !== "") {
-      bubble.setText(oldDisplay);
-      return;
+      if (opts?.allowEmpty) {
+        // 아래 replace 로 빈 메시지의 삭제 노드를 남긴다.
+      } else if (this.editing?.index === index) {
+        return;
+      } else {
+        bubble.setText(oldDisplay);
+        return;
+      }
     }
 
     // 평탄화 본문에서 이 메시지의 표시 구간 [from, to) 계산.
