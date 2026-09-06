@@ -2,6 +2,7 @@ import {
   ItemView,
   Menu,
   Notice,
+  Platform,
   WorkspaceLeaf,
   debounce,
   setIcon,
@@ -22,7 +23,13 @@ import { formatRelativeTime } from "../util/relative-time";
 import { renderThumb } from "../util/render-thumb";
 import { PressMenuController } from "../util/press-menu";
 import {
+  hasNsfwTag,
+  isNsfwIllustration,
+  shouldHideDashboardNsfw,
+} from "../util/dashboard-content-safety";
+import {
   latestIllustrationVariant,
+  latestMatchingIllustrationVariant,
   removeIllustrationVariant,
   toggleIllustrationFavorite,
 } from "../util/illustrations";
@@ -150,6 +157,8 @@ interface GalleryEntry {
   path: string;
   /** 게시 시 이미지 캡션 (삽화 프롬프트 첫 줄 / 폰 갤러리 캡션). */
   caption: string;
+  /** 대시보드 안전 표시에서 제외할 항목인지. */
+  nsfw: boolean;
 }
 
 /** 갤러리 분류 칩 필터 — "" 전체 / "__fav__" 즐겨찾기 / 그 외 시나리오 folder. */
@@ -206,6 +215,7 @@ export class DashboardView extends ItemView {
   private gallerySort: "new" | "old" = "new";
   /** 홈 캐러셀 자동 넘김 타이머 — 홈 재렌더/탭 이탈 때 정리. */
   private carouselTimers: number[] = [];
+  private lastNsfwProtectionActive = false;
 
   private activeTab: DashboardTab = "home";
   private scenarioQuery = "";
@@ -300,6 +310,7 @@ export class DashboardView extends ItemView {
     await this.refreshPromptData();
     await this.refreshQuickReplyData();
     this.renderPage();
+    this.lastNsfwProtectionActive = this.nsfwProtectionActive();
 
     const debouncedScenarios = debounce(
       () => void this.refreshScenarioData().then(() => this.refreshSurface()),
@@ -387,6 +398,16 @@ export class DashboardView extends ItemView {
     this.registerEvent(this.plugin.ai.on("core-availability-changed", onAiChange));
     this.registerEvent(this.plugin.ai.on("profiles-changed", onAiChange));
 
+    const updateSafety = (): void => {
+      const active = this.nsfwProtectionActive();
+      if (active === this.lastNsfwProtectionActive) return;
+      this.lastNsfwProtectionActive = active;
+      void this.refreshDashboardSafety();
+    };
+    this.registerDomEvent(window, "focus", updateSafety);
+    this.registerDomEvent(window, "blur", updateSafety);
+    this.registerInterval(window.setInterval(updateSafety, 60_000));
+
     // 마우스 뒤로(3)/앞으로(4) 버튼 → 대시보드 내부 히스토리 이동. 내부 스택이 있을
     // 때만 가로채고(preventDefault), 비어 있으면 옵시디언 기본 탭 히스토리에 넘긴다.
     // 옵시디언 기본 핸들러보다 먼저 잡도록 capture 단계에서, 실행은 pointerup/auxclick
@@ -447,6 +468,24 @@ export class DashboardView extends ItemView {
   /** 외부(우측 프롬프트 섹션 "새 탭에서 편집" 등)에서 특정 탭으로 이동. */
   async jumpToTab(tab: DashboardTab): Promise<void> {
     await this.setTab(tab);
+  }
+
+  /** 설정 변경·시간대 전환·창 포커스 변화 뒤 대표 삽화를 안전하게 다시 고른다. */
+  async refreshDashboardSafety(): Promise<void> {
+    this.lastNsfwProtectionActive = this.nsfwProtectionActive();
+    this.recentSessions = await this.loadRecentSessions();
+    this.refreshSurface();
+  }
+
+  private nsfwProtectionActive(): boolean {
+    return shouldHideDashboardNsfw(
+      this.plugin.data.settings?.dashboardNsfwProtection,
+      {
+        isMobile: Platform.isMobile,
+        isFocused: document.hasFocus(),
+        hour: new Date().getHours(),
+      }
+    );
   }
 
   /** 편집 섹션 정리 — 구독 해제 + 미저장 편집 flush. 라우트 이동/뷰 종료 시 호출. */
@@ -646,7 +685,13 @@ export class DashboardView extends ItemView {
       const illustrations = await this.store.getSessionIllustrations(
         session.sessionFile
       );
-      const latest = latestIllustrationVariant(illustrations);
+      const hideNsfw = this.nsfwProtectionActive();
+      const latest = hideNsfw
+        ? latestMatchingIllustrationVariant(
+            illustrations,
+            (variant) => !isNsfwIllustration(variant)
+          )
+        : latestIllustrationVariant(illustrations);
       if (latest) {
         const path = `${session.folder}/${latest.path}`;
         if (this.app.vault.getAbstractFileByPath(path)) return path;
@@ -1569,8 +1614,9 @@ export class DashboardView extends ItemView {
       void this.loadGalleryEntries();
       return;
     }
-    if (this.galleryEntries.length === 0) return;
-    const recent = this.galleryEntries
+    const safeEntries = this.visibleGalleryEntries();
+    if (safeEntries.length === 0) return;
+    const recent = safeEntries
       .slice()
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, HOME_ILLUST_LIMIT);
@@ -2248,17 +2294,20 @@ export class DashboardView extends ItemView {
       void this.loadGalleryEntries();
       return;
     }
-    if (this.galleryEntries.length === 0) {
+    const displayEntries = this.visibleGalleryEntries();
+    if (displayEntries.length === 0) {
       this.renderEmpty(
         body,
-        "아직 생성한 삽화가 없습니다. 세션에서 삽화를 만들면 여기 모입니다."
+        this.galleryEntries.length === 0
+          ? "아직 생성한 삽화가 없습니다. 세션에서 삽화를 만들면 여기 모입니다."
+          : "현재 안전 표시 조건에서 보여줄 수 있는 삽화가 없습니다."
       );
       return;
     }
 
     // 분류 칩 — 전체 / 즐겨찾기 / 시나리오별 (시나리오 탭 태그 칩과 같은 UI, 단일 선택).
     const scenarioNames = new Map<string, string>();
-    for (const e of this.galleryEntries) {
+    for (const e of displayEntries) {
       if (!scenarioNames.has(e.scenarioFolder)) {
         scenarioNames.set(e.scenarioFolder, e.scenarioName);
       }
@@ -2270,7 +2319,7 @@ export class DashboardView extends ItemView {
     ) {
       this.galleryFilter = "";
     }
-    const favoriteCount = this.galleryEntries.filter((e) => e.favorite).length;
+    const favoriteCount = displayEntries.filter((e) => e.favorite).length;
 
     const chips = body.createDiv({ cls: "ggai-dash-chips ggai-dash-gallery-chips" });
     const allChip = chips.createEl("button", { cls: "ggai-dash-chip", text: "전체" });
@@ -2290,7 +2339,7 @@ export class DashboardView extends ItemView {
     });
 
     for (const [folder, name] of scenarioNames) {
-      const count = this.galleryEntries.filter(
+      const count = displayEntries.filter(
         (e) => e.scenarioFolder === folder
       ).length;
       const chip = chips.createEl("button", { cls: "ggai-dash-chip" });
@@ -2305,10 +2354,10 @@ export class DashboardView extends ItemView {
 
     const filtered =
       this.galleryFilter === GALLERY_FAVORITE_FILTER
-        ? this.galleryEntries.filter((e) => e.favorite)
+        ? displayEntries.filter((e) => e.favorite)
         : this.galleryFilter
-          ? this.galleryEntries.filter((e) => e.scenarioFolder === this.galleryFilter)
-          : this.galleryEntries;
+          ? displayEntries.filter((e) => e.scenarioFolder === this.galleryFilter)
+          : displayEntries;
     const visible = filtered.slice().sort((a, b) =>
       this.gallerySort === "new"
         ? b.createdAt - a.createdAt
@@ -2417,6 +2466,7 @@ export class DashboardView extends ItemView {
             favorite: !!v.favorite,
             path,
             caption: illustrationCaption(v.prompt),
+            nsfw: isNsfwIllustration(v),
           });
         }
       }
@@ -2437,6 +2487,7 @@ export class DashboardView extends ItemView {
         favorite: !!item.favorite,
         path: item.file,
         caption: item.caption,
+        nsfw: hasNsfwTag(undefined, item.caption),
       });
     }
     entries.sort((a, b) => b.createdAt - a.createdAt);
@@ -2446,6 +2497,11 @@ export class DashboardView extends ItemView {
       if (this.activeTab === "gallery") this.renderGalleryTab();
       else if (this.activeTab === "home") this.renderHome();
     }
+  }
+
+  private visibleGalleryEntries(): GalleryEntry[] {
+    const entries = this.galleryEntries ?? [];
+    return this.nsfwProtectionActive() ? entries.filter((entry) => !entry.nsfw) : entries;
   }
 
   /** 갤러리 셀 우클릭/롱프레스 메뉴 — 폰 사진은 분기 이동만 빠진다. */

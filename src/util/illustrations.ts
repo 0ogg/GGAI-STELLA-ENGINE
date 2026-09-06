@@ -12,6 +12,12 @@ import type {
 } from "../types/media";
 import type { IllustrationOutputPosition } from "../types/preset";
 import { uuidv4 } from "./uuid";
+import { hasNsfwTag } from "./dashboard-content-safety";
+
+/** 이미지 생성 프롬프트의 쉼표 구분 태그 중 안전 표시에 필요한 태그만 보존한다. */
+function contentTagsOfPrompt(prompt: string | undefined): string[] | undefined {
+  return hasNsfwTag(undefined, prompt) ? ["nsfw"] : undefined;
+}
 
 /**
  * 저장된 출력 위치를 정규화한다.
@@ -58,6 +64,22 @@ export function latestIllustrationVariant(
     const active = getActiveIllustration(illustrations, nodeId);
     if (active && (!latest || active.createdAt > latest.createdAt)) {
       latest = active;
+    }
+  }
+  return latest;
+}
+
+/** active 선택과 무관하게 조건에 맞는 가장 최근 variant — 안전한 대표 이미지 대체용. */
+export function latestMatchingIllustrationVariant(
+  illustrations: SessionIllustrations,
+  predicate: (variant: IllustrationVariant) => boolean
+): IllustrationVariant | null {
+  let latest: IllustrationVariant | null = null;
+  for (const entry of Object.values(illustrations.nodes)) {
+    for (const variant of Object.values(entry.variants)) {
+      if (predicate(variant) && (!latest || variant.createdAt > latest.createdAt)) {
+        latest = variant;
+      }
     }
   }
   return latest;
@@ -147,6 +169,7 @@ export function recordIllustrationVariant(
     path: input.path,
     createdAt: now,
     updatedAt: now,
+    tags: contentTagsOfPrompt(input.prompt),
   };
   const entry = illustrations.nodes[input.nodeId] ?? {
     activeVariantId: id,

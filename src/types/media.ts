@@ -151,6 +151,8 @@ export interface IllustrationVariant {
   updatedAt: number;
   /** 즐겨찾기 — 갤러리 분류/필터용. */
   favorite?: boolean;
+  /** 콘텐츠 분류 태그. `nsfw`는 대시보드 안전 표시 정책에서 사용한다. */
+  tags?: string[];
 }
 
 export interface IllustrationEntry {

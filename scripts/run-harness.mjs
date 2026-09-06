@@ -19,6 +19,7 @@ const testNames = [
   "branch-map",
   "illustration-anchors",
   "image-char-prompts",
+  "dashboard-content-safety",
   "card-instructions",
   "qr-jjangdol",
   "trim-incomplete",

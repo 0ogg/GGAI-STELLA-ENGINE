@@ -51,6 +51,7 @@ import {
   registerRepetitionExtension,
 } from "./extensions/repetition-extension";
 import type { RepetitionSettings } from "./util/repetition";
+import type { DashboardNsfwProtection } from "./util/dashboard-content-safety";
 import { registerTranslationExtension } from "./extensions/translation-extension";
 import { registerIllustrationExtension } from "./extensions/illustration-extension";
 import {
@@ -265,6 +266,8 @@ export interface StellaPluginSettings {
   proactiveFrequency?: "low" | "mid" | "high";
   /** 선채팅 미확인 누적 상한 (기본 2, 0=제한 없음) — 안 읽은 선채팅이 이만큼 쌓이면 그 세션은 쉼. */
   proactiveMaxUnread?: number;
+  /** 대시보드에서 nsfw 태그 삽화를 숨길 조건. 선택한 조건은 OR로 적용한다. */
+  dashboardNsfwProtection?: DashboardNsfwProtection;
 }
 
 /**
@@ -2174,6 +2177,26 @@ class StellaSettingTab extends PluginSettingTab {
     }
   }
 
+  private async saveDashboardNsfwProtection(
+    patch: Partial<DashboardNsfwProtection>
+  ): Promise<void> {
+    const settings = this.plugin.data.settings ?? {};
+    await this.plugin.savePluginData({
+      settings: {
+        ...settings,
+        dashboardNsfwProtection: {
+          ...(settings.dashboardNsfwProtection ?? {}),
+          ...patch,
+        },
+      },
+    });
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_DASHBOARD)) {
+      if (leaf.view instanceof DashboardView) {
+        void leaf.view.refreshDashboardSafety();
+      }
+    }
+  }
+
   /**
    * '확장' 탭 — 기본 제공 기능 켜기/끄기. 끄면 그 기능의 자동 동작·설정 패널·
    * 세션 화면의 관련 버튼이 전부 사라진다(완전 비활성화). 언제든 다시 켤 수 있다.
@@ -2201,6 +2224,62 @@ class StellaSettingTab extends PluginSettingTab {
 
   /** '일반' 탭 — 기존 플러그인 설정 항목들. */
   private renderGeneralTab(containerEl: HTMLElement): void {
+    containerEl.createEl("h3", { text: "대시보드 안전 표시" });
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "보호가 필요한 조건을 자유롭게 고르세요. 여러 조건을 고르면 하나라도 맞을 때 nsfw 태그 삽화를 숨기고, 대표 이미지는 최신 안전 삽화로 자동 교체합니다. 아무 조건도 고르지 않으면 필터가 동작하지 않습니다.",
+    });
+    const safety = this.plugin.data.settings?.dashboardNsfwProtection ?? {};
+    const addSafetyToggle = (
+      name: string,
+      desc: string,
+      key: "always" | "mobile" | "schedule" | "unfocused"
+    ): void => {
+      new Setting(containerEl)
+        .setName(name)
+        .setDesc(desc)
+        .addToggle((toggle) =>
+          toggle.setValue(safety[key] === true).onChange(async (value) => {
+            await this.saveDashboardNsfwProtection({ [key]: value });
+            if (key === "schedule") this.display();
+          })
+        );
+    };
+    addSafetyToggle("항상 숨기기", "대시보드를 여는 모든 환경에서 숨깁니다.", "always");
+    addSafetyToggle("스마트폰에서 숨기기", "Obsidian 모바일 앱에서 대시보드를 볼 때 숨깁니다.", "mobile");
+    addSafetyToggle("지정 시간에 숨기기", "아래 현지 시간 구간에 대시보드를 볼 때 숨깁니다.", "schedule");
+
+    const hourSetting = new Setting(containerEl)
+      .setName("숨김 시간대")
+      .setDesc("시작 시각은 포함하고 종료 시각은 포함하지 않습니다. 같은 시각이면 하루 종일입니다.");
+    const hourOptions = Object.fromEntries(
+      Array.from({ length: 24 }, (_, hour) => [String(hour), `${String(hour).padStart(2, "0")}:00`])
+    );
+    hourSetting.addDropdown((dropdown) =>
+      dropdown
+        .addOptions(hourOptions)
+        .setValue(String(safety.scheduleStartHour ?? 9))
+        .setDisabled(safety.schedule !== true)
+        .onChange((value) =>
+          this.saveDashboardNsfwProtection({ scheduleStartHour: Number(value) })
+        )
+    );
+    hourSetting.addDropdown((dropdown) =>
+      dropdown
+        .addOptions(hourOptions)
+        .setValue(String(safety.scheduleEndHour ?? 18))
+        .setDisabled(safety.schedule !== true)
+        .onChange((value) =>
+          this.saveDashboardNsfwProtection({ scheduleEndHour: Number(value) })
+        )
+    );
+    addSafetyToggle(
+      "창이 포커스를 잃으면 숨기기",
+      "앱 전환, 화면 공유 중 다른 창 클릭 등으로 Obsidian이 비활성화되면 숨깁니다.",
+      "unfocused"
+    );
+
+    containerEl.createEl("h3", { text: "일반" });
     new Setting(containerEl)
       .setName("새 세션 제목 자동 생성")
       .setDesc("첫 AI 전개가 끝나면 본문 초반부를 반영한 제목으로 세션 이름을 한 번 자동 변경합니다.")

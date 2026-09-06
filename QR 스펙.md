@@ -119,13 +119,11 @@ ST 파일에 있는 모르는 키는 라운드트립을 위해 그대로 보존�
 | `/flushvar` | 50 | ❌ |
 | `/echo` | 37 | ✅ |
 | `/abort` | 33 | ❌ |
-| `/setentryfield` | 28 | ❌ (로어북 **쓰기**) |
 | `/gen` | 28 | ✅ |
 | `/sendas` | 28 | ❌ |
 | `/input` | 19 | ✅ |
 | `/buttons` | 13 | ✅ |
 | `/re-exec` | 7 | ❌ (버튼이 버튼 호출) |
-| `/getat` | 7 | ❌ |
 | `/inject` | 2 | ✅ |
 | `/impersonate` | 1 | ❌ |
 | `/comment` | 1 | ❌ |
@@ -167,7 +165,6 @@ ST 파일에 있는 모르는 키는 라운드트립을 위해 그대로 보존�
 ### 우리에게 개념 자체가 없는 것
 
 - **변수 저장소** (`setvar`/`getvar`/`flushvar`) — 세션에 딸린 임시 변수. EDEN 은 이걸로 역할·카스트·상태를 기억한다.
-- **로어북 항목 쓰기** (`/setentryfield`) — EDEN 이 게임 상태를 **영구 저장**하는 방법. **지원하지 않기로 확정**(아래 2c).
 - **특정 캐릭터로 발화** (`/sendas`), **AI 가 유저 대신 쓰기** (`/impersonate`)
 - **버튼이 버튼 호출** (`/re-exec`) — EDEN 숨김 버튼 6개가 이 방식.
 
@@ -242,18 +239,11 @@ ST 파일에 있는 모르는 키는 라운드트립을 위해 그대로 보존�
   커맨드 7개 `/input` `/setvar` `/if` `/echo` `/abort` `/gen` `/comment` = `services/qr-runner.ts`,
   매크로 `{{pipe}}` `{{getvar::x}}`(변수는 `session.meta.variables` — 이미 있던 저장소 재사용).
   `/comment` 는 세션 노트(`notes.json`)로 남고 인라인 접이식 위젯으로 표시된다.
-  `/setentryfield` 등 무거운 것은 손대지 않았다(로어북 쓰기 미접촉).
 
 - **슬라이스 2b — 완료.** `/flushvar` `/buttons` `/re-exec` `/inject`(+`/flushinject`) `/sendas` `/impersonate`.
   `isChained` 체인 실행은 2a 시점에 바에서 이미 붙었다.
   **실물 파일 확인으로 정정된 것**: `/re-exec` 는 "버튼이 버튼 호출"이 아니라 **정규식 실행**
   (`/re-exec first= find="/pattern/" {{lastMessage}}` — AI 응답에서 값 뽑기)이다. 배선은 `구현현황.md`.
-
-- **슬라이스 2c — 상태 영속. 지원하지 않는다 (확정, 재검토 대상 아님).**
-  `/setentryfield`(로어북 쓰기) `/getat`. 버튼이 로어북 파일을 직접 고쳐 쓰기 시작하면
-  노드·가지와 로어북 수명이 얽혀 **사용자가 무엇이 언제 바뀌었는지 제어할 수 없다**.
-  게임 상태 영속은 변수 저장소(`/setvar` `/setglobalvar` — 가지별 되짚기가 되는 쪽)가 맡는다.
-  이 커맨드를 쓰는 카드는 그 줄만 조용히 무시된다.
 
 - **슬라이스 2d — 완료.** 결과가 조용히 증발하던 원인 3종 + 게임형 카드용 커맨드 4종.
   - **암묵적 파이프**: 맨 인자가 **적혀 있지 않으면** `{{pipe}}` 가 그 자리에 온다(ST 규칙).
