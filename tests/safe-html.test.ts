@@ -18,6 +18,7 @@ import {
   isSafeUrl,
   prefixCustomNames,
   replaceCardImageTags,
+  replaceCardImageTagsDeferred,
   sanitizeStyleValue,
   scopeCss,
 } from "../src/util/safe-html";
@@ -159,6 +160,13 @@ import {
   const quoted = replaceCardImageTags('{{img::a".jpg}}', () => 'app://x/a".jpg');
   assert.equal(quoted.includes('src="app://x/a".jpg"'), false, "속성 탈출 금지");
   assert.match(quoted, /&quot;/);
+
+  const deferred = replaceCardImageTagsDeferred("{{img::city.jpg}}", () =>
+    "app://local/city.jpg"
+  );
+  assert.match(deferred, /class="ggai-card-img-slot"/);
+  assert.match(deferred, /data-asset-src="app:\/\/local\/city\.jpg"/);
+  assert.equal(deferred.includes("<img"), false, "화면 밖 로그는 실제 이미지를 만들지 않는다");
 }
 
 // ── 7. 카드 이름 격리 — 남의 CSS 가 우리 화면을 건드리지 못한다 ──

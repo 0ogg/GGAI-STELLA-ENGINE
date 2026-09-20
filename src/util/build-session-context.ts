@@ -1,5 +1,8 @@
 import type StellaEnginePlugin from "../main";
-import type { GenerationProfileLite } from "../services/ai-service";
+import type {
+  ChatMessageContent,
+  GenerationProfileLite,
+} from "../services/ai-service";
 import type { CustomContextContribution } from "../services/extension-registry";
 import {
   consumeQrInjections,
@@ -28,11 +31,13 @@ import { buildChatMessages } from "./chat-messages";
 import { spansExcludingNodes } from "./node-segments";
 import type { StellaGroup } from "../types/group";
 import { applyMacros } from "./macros";
-import { getDefaultPrompts } from "./default-media-prompts";
+import { getDefaultPrompts, resolveMediaPrompt } from "./default-media-prompts";
 import type { MediaPromptItem } from "../types/preset";
 import { REGEX_PLACEMENT } from "../types/regex";
 import { getRegexedString } from "./regex-engine";
 import { collectRegexScripts } from "./regex-scripts";
+import { appendAttachmentContext } from "./chat-attachments";
+import { buildCharacterAssetMacros } from "./character-assets";
 
 /**
  * 작가노트 프레이밍 — 세션이 전용 프롬프트를 골랐으면 작가노트 원문을 그 프롬프트의
@@ -82,12 +87,21 @@ function buildChatSessionLog(
   session: StellaSession,
   leafId: string,
   excludeTail: boolean,
-  hidden: ReadonlySet<string>
+  hidden: ReadonlySet<string>,
+  attachmentPrompt: string,
+  transform?: (text: string, role: "user" | "assistant", depth: number) => string
 ): { role: "user" | "assistant"; content: string }[] {
-  return chatMessagesForLog(session, leafId, excludeTail, hidden).map((m) => ({
-    role: m.role,
-    content: m.text.trim(),
-  }));
+  const msgs = chatMessagesForLog(session, leafId, excludeTail, hidden);
+  return msgs.map((m, i) => ({
+      role: m.role,
+      content: appendAttachmentContext(
+        transform
+          ? transform(m.text.trim(), m.role, msgs.length - 1 - i)
+          : m.text.trim(),
+        session.nodes[m.nodeId]?.attachments,
+        attachmentPrompt
+      ),
+    }));
 }
 
 /**
@@ -105,6 +119,7 @@ function buildGroupChatSessionLog(
   hostName: string,
   nameById: Map<string, string>,
   nodeMeta: SessionNodeMetaMap,
+  attachmentPrompt: string,
   // 정규식 치환 — `이름: ` 프리픽스가 붙기 전 원문에 적용한다 (ST 동일).
   transform?: (text: string, role: "user" | "assistant", depth: number) => string
 ): { role: "user" | "assistant"; content: string }[] {
@@ -119,7 +134,14 @@ function buildGroupChatSessionLog(
     const text = transform
       ? transform(m.text.trim(), m.role, msgs.length - 1 - i)
       : m.text.trim();
-    return { role: m.role, content: `${speaker}: ${text}` };
+    return {
+      role: m.role,
+      content: appendAttachmentContext(
+        `${speaker}: ${text}`,
+        session.nodes[m.nodeId]?.attachments,
+        attachmentPrompt
+      ),
+    };
   });
 }
 import {
@@ -182,7 +204,7 @@ export interface SessionRequestPayloadText {
 export interface SessionRequestPayloadChat {
   kind: "chat";
   /** 정확히 chatStream() 에 보내는 메시지 (normalizeMessagesForChat 적용 후). */
-  messages: ChatMessage[];
+  messages: Array<Omit<ChatMessage, "content"> & { content: ChatMessageContent }>;
   /**
    * 이어쓰기 이음새 보정 앵커 — 본문 마지막 문장. 값이 있으면 전송본 끝에
    * "이 문장을 그대로 받아쓰며 시작하라"는 지시문이 붙어 있고, 생성 결과의
@@ -353,11 +375,15 @@ export async function planSessionRequest(
   // 발화자 = 풀 카드: 호스트가 아니면 시나리오 슬롯을 발화자 카드로 교체하고,
   // 나머지 멤버(호스트 포함)는 프로필 로어북(압축)으로 합류한다.
   let speakerData = scenarioData;
+  let speakerItem = scenarioItem;
   if (isGroupChat && speakerId !== session.meta.scenarioId) {
     const sc = scenarios.find(
       (i) => i.scenario.data?.extensions?.stella?.id === speakerId
     );
-    if (sc) speakerData = sc.scenario.data;
+    if (sc) {
+      speakerData = sc.scenario.data;
+      speakerItem = sc;
+    }
   }
   const speakerName = (speakerData.name ?? "").trim() || "Character";
   const otherNames = isGroupChat
@@ -589,6 +615,38 @@ export async function planSessionRequest(
       regexScripts,
       { isPrompt: true, depth, substitute: regexSubstitute }
     );
+  const attachmentPrompt =
+    resolveMediaPrompt(
+      "chatImageReaction",
+      plugin.data.chatImageReactionPromptId,
+      plugin.data.mediaPrompts
+    )?.prompt ?? "";
+  let characterAssets: ReturnType<typeof buildCharacterAssetMacros> | undefined;
+  if (
+    session.meta.mode === "chat" &&
+    plugin.isExtensionEnabled("stella:character-assets") &&
+    speakerItem
+  ) {
+    const assetOwners = group
+      ? group.members.flatMap((member) => {
+          const found = scenarios.find(
+            (candidate) =>
+              candidate.scenario.data?.extensions?.stella?.id === member.scenarioId
+          );
+          return found ? [found] : [];
+        })
+      : [speakerItem];
+    const lists = await Promise.all(
+      assetOwners.map((owner) =>
+        plugin.store.listScenarioCharacterAssets(owner.scenarioFile)
+      )
+    );
+    const filenames = lists.flat().map((asset) => asset.filename);
+    characterAssets = buildCharacterAssetMacros(
+      filenames,
+      speakerItem.folderName
+    );
+  }
   const applyPromptRegex = (
     log: { role: "user" | "assistant"; content: string }[]
   ): { role: "user" | "assistant"; content: string }[] =>
@@ -633,15 +691,16 @@ export async function planSessionRequest(
               scenarioData.name?.trim() || "(unknown)",
               memberNameById,
               nodeMeta,
+              attachmentPrompt,
               regexScripts.length > 0 ? regexMessage : undefined
             )
-          : applyPromptRegex(
-              buildChatSessionLog(
-                session,
-                leafId,
-                opts.excludeTailAssistant === true,
-                hiddenIds
-              )
+          : buildChatSessionLog(
+              session,
+              leafId,
+              opts.excludeTailAssistant === true,
+              hiddenIds,
+              attachmentPrompt,
+              regexScripts.length > 0 ? regexMessage : undefined
             )
         : applyPromptRegex(buildSessionLog(parentSpans, session.meta.mode)),
     memory: session.meta.memory,
@@ -656,6 +715,7 @@ export async function planSessionRequest(
       formatIdleEn(
         Date.now() - (session.nodes[leafId]?.createdAt ?? Date.now())
       ) || "less than a minute",
+    characterAssets,
     variables,
     choiceValues: { ...(session.meta.choiceValues ?? {}) },
     timingStates: { ...(session.meta.timingStates ?? {}) },
@@ -743,9 +803,9 @@ export async function planSessionRequest(
   } else {
     // NAI 형식이 아닌 챗 전송본도 배경 설정과 본문 사이에 세션 시작 마커를 끼운다
     // (텍스트 평문 경로와 같은 의미). 마커 삽입 후 역할 병합을 돌린다.
-    const messages = normalizeMessagesForChat(
-      insertSessionStartMarker(output.messages)
-    );
+    const messages: Array<
+      Omit<ChatMessage, "content"> & { content: ChatMessageContent }
+    > = normalizeMessagesForChat(insertSessionStartMarker(output.messages));
     // 이어쓰기 이음새 보정 — 마지막 문장 반복 지시문을 전송본 끝에 붙인다.
     // 미리보기도 이 payload 를 그대로 그리므로 지시문이 그대로 보인다.
     let anchor: string | undefined;
@@ -774,6 +834,53 @@ export async function planSessionRequest(
         content: `[Write the next reply only as ${speakerName}.]`,
         source: { type: "prompt", label: "그룹 발화 지시" },
       });
+    }
+    // 이번 답변이 직접 반응할 마지막 사용자 첨부만 원본 이미지로 싣는다. 이후 턴은
+    // sessionLog에 저장된 캡션만 남겨 이미지 토큰/요청 크기가 계속 누적되지 않는다.
+    // 재생성은 assistant 꼬리를 제외한 뒤 다시 user가 마지막이므로 같은 원본을 본다.
+    const visibleLog = chatMessagesForLog(
+      session,
+      leafId,
+      opts.excludeTailAssistant === true,
+      hiddenIds
+    );
+    const latest = visibleLog[visibleLog.length - 1];
+    const attachments =
+      latest?.role === "user"
+        ? session.nodes[latest.nodeId]?.attachments
+        : undefined;
+    if (profile.supportsVision && attachments?.length) {
+      const folder = sessionFile.endsWith("/session.json")
+        ? sessionFile.slice(0, -"/session.json".length)
+        : "";
+      const imageParts: Array<{
+        type: "image";
+        source: { kind: "base64"; mediaType: string; data: string };
+      }> = [];
+      for (const attachment of attachments) {
+        const bytes = folder
+          ? await plugin.store.readAssetBytes(folder, attachment.path)
+          : null;
+        if (!bytes) continue;
+        imageParts.push({
+          type: "image",
+          source: {
+            kind: "base64",
+            mediaType: attachment.mediaType || "image/png",
+            data: bytesToBase64(bytes),
+          },
+        });
+      }
+      if (imageParts.length) {
+        // 그룹 발화 지시처럼 뒤에 붙는 user prompt는 contextKind=prompt다. 실제 채팅
+        // 이력의 마지막 user 메시지를 찾아 멀티모달 content로 바꾼다.
+        const target = [...messages]
+          .reverse()
+          .find((m) => m.role === "user" && m.contextKind === "history");
+        if (target && typeof target.content === "string") {
+          target.content = [{ type: "text", text: target.content }, ...imageParts];
+        }
+      }
     }
     payload = { kind: "chat", messages, anchor, names };
   }
@@ -808,7 +915,9 @@ export interface SessionContextDryRun {
   /** 위 문자열을 파트별로 나눈 세그먼트 — 이어붙이면 textPrompt 와 동일. */
   textSegments?: PromptSegment[];
   /** 챗 프로필일 때, 실제로 보낼 메시지 배열 (normalize 적용 후 = 전송본 그대로). */
-  chatMessages?: ChatMessage[];
+  chatMessages?: Array<
+    Omit<ChatMessage, "content"> & { content: ChatMessageContent }
+  >;
   /** chatMessages 각 항목의 근사 토큰 수 (프로필 토크나이저 기준). */
   chatMessageTokens?: number[];
   /** textSegments 각 세그먼트의 근사 토큰 수. */
@@ -843,9 +952,21 @@ export async function buildSessionContextDryRun(
       payload.kind === "text" ? payload.segments.map((s) => countTok(s.text)) : undefined,
     chatMessages: payload.kind === "chat" ? payload.messages : undefined,
     chatMessageTokens:
-      payload.kind === "chat" ? payload.messages.map((m) => countTok(m.content)) : undefined,
+      payload.kind === "chat"
+        ? payload.messages.map((m) => plugin.ai.countTokens([m], profile.id))
+        : undefined,
     meta,
   };
+}
+
+/** 큰 이미지에서도 호출 스택을 넘치지 않는 base64 변환. */
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
 }
 
 /** `Max Context` 미지정 시의 기본 예산. */

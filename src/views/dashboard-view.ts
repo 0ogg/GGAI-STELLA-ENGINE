@@ -4,6 +4,7 @@ import {
   Notice,
   Platform,
   WorkspaceLeaf,
+  TFile,
   debounce,
   setIcon,
 } from "obsidian";
@@ -87,6 +88,7 @@ import {
 } from "../types/quick-reply";
 import type { QuickReplyListItem } from "../util/scan-quick-replies";
 import { ConfirmModal, PromptModal } from "./modals";
+import { readCharacterAssetUploads } from "../util/character-assets";
 
 export type DashboardTab =
   | "home"
@@ -112,6 +114,10 @@ export interface EditorRoute {
   itemId?: number;
 }
 
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 /** 대시보드 내부 라우트 — 뒤로가기 스택 한 칸. */
 interface DashRoute {
   tab: DashboardTab;
@@ -119,6 +125,11 @@ interface DashRoute {
   branchSessionFile: string | null;
   editorRoute: EditorRoute | null;
   scrollTop: number;
+}
+
+interface CharacterAssetImportStatus {
+  kind: "working" | "success" | "error";
+  text: string;
 }
 
 /** 홈 상단에 크게 보여줄 최근 세션(히어로) 수. */
@@ -218,6 +229,10 @@ export class DashboardView extends ItemView {
   private lastNsfwProtectionActive = false;
 
   private activeTab: DashboardTab = "home";
+  private characterAssetsEl: HTMLElement | null = null;
+  private characterAssetsScenarioFile: string | null = null;
+  private characterAssetsRenderSeq = 0;
+  private characterAssetImportStatus = new Map<string, CharacterAssetImportStatus>();
   private scenarioQuery = "";
   private scenarioSort: SortKey = "recent";
   private selectedTags = new Set<string>();
@@ -324,6 +339,24 @@ export class DashboardView extends ItemView {
     );
     this.registerEvent(this.store.on("scenarios-changed", debouncedScenarios));
     this.registerEvent(this.store.on("sessions-changed", debouncedScenarios));
+    this.registerEvent(
+      this.store.on("scenario-assets-changed", (scenarioFile: string) => {
+        if (
+          scenarioFile === this.characterAssetsScenarioFile &&
+          this.characterAssetsEl?.isConnected
+        ) {
+          const item = this.scenarios.find((s) => s.scenarioFile === scenarioFile);
+          if (item) this.renderCharacterAssetsSection(this.characterAssetsEl, item);
+        }
+      })
+    );
+    this.registerEvent(
+      this.store.on("extensions-changed", (id: string) => {
+        if (id === "stella:character-assets" && this.detailFolder) {
+          this.renderScenarioDetail();
+        }
+      })
+    );
     // 그룹 멤버 변경(초대/내보내기) — 세션 카드 겹친 표지 재구성.
     this.registerEvent(this.store.on("groups-changed", debouncedScenarios));
     this.registerEvent(
@@ -2838,6 +2871,14 @@ export class DashboardView extends ItemView {
     );
     delBtn.addClass("ggai-btn-danger");
 
+    this.characterAssetsEl = null;
+    this.characterAssetsScenarioFile = null;
+    if (this.plugin.isExtensionEnabled("stella:character-assets")) {
+      this.characterAssetsEl = body.createDiv({ cls: "ggai-character-assets" });
+      this.characterAssetsScenarioFile = item.scenarioFile;
+      this.renderCharacterAssetsSection(this.characterAssetsEl, item);
+    }
+
     // 세션 목록 헤더 + 선택 삭제 토글
     const listHead = body.createDiv({ cls: "ggai-dash-detail-sessions-head" });
     listHead.createSpan({
@@ -2848,6 +2889,155 @@ export class DashboardView extends ItemView {
     // 헤더의 선택 컨트롤은 세션 목록을 그린 뒤 상태에 맞춰 렌더.
     this.detailSelectHeadEl = listHead;
     void this.loadDetailSessions();
+  }
+
+  /** 시나리오에 귀속되는 ST 캐릭터 에셋 임포트/미리보기. */
+  private renderCharacterAssetsSection(
+    host: HTMLElement,
+    item: ScenarioListItem
+  ): void {
+    host.empty();
+    const renderSeq = ++this.characterAssetsRenderSeq;
+    const head = host.createDiv({ cls: "ggai-character-assets-head" });
+    const title = head.createDiv({ cls: "ggai-character-assets-title" });
+    setIcon(title.createSpan(), "images");
+    title.createSpan({ text: "캐릭터 에셋" });
+
+    const input = head.createEl("input", {
+      cls: "ggai-character-assets-input",
+      type: "file",
+    });
+    input.accept = ".zip,.png,.jpg,.jpeg,.gif,.webp";
+    input.multiple = true;
+    const importBtn = this.renderToolbarButton(head, "download", "에셋 임포트", () =>
+      input.click()
+    );
+    importBtn.addClass("ggai-btn-small");
+
+    const status = this.characterAssetImportStatus.get(item.scenarioFile);
+    if (status?.kind === "working") {
+      input.disabled = true;
+      importBtn.setAttribute("disabled", "true");
+      importBtn.querySelector(".ggai-dash-tool-btn-label")?.setText("가져오는 중…");
+    }
+
+    const body = host.createDiv({ cls: "ggai-character-assets-body" });
+    const folder = item.scenarioFile.replace(/\/scenario\.json$/, "/assets");
+    const renderStatus = (): void => {
+      if (!status) return;
+      const statusEl = body.createDiv({
+        cls: `ggai-character-assets-status is-${status.kind}`,
+      });
+      setIcon(statusEl.createSpan(), status.kind === "error" ? "circle-alert" : status.kind === "success" ? "circle-check" : "loader-circle");
+      statusEl.createSpan({ text: status.text });
+    };
+    renderStatus();
+    body.createDiv({ cls: "ggai-character-assets-empty", text: "에셋을 확인하는 중…" });
+
+    input.addEventListener("change", () => {
+      const files = Array.from(input.files ?? []);
+      input.value = "";
+      if (files.length > 0) void this.importCharacterAssets(item, files);
+    });
+
+    void this.store
+      .listScenarioCharacterAssets(item.scenarioFile)
+      .then((assets) => {
+        if (renderSeq !== this.characterAssetsRenderSeq || !host.isConnected) return;
+        body.empty();
+        renderStatus();
+        if (assets.length === 0) {
+          body.createDiv({
+            cls: "ggai-character-assets-empty",
+            text: "ZIP 또는 이미지 파일을 가져오면 이 시나리오의 모든 세션에서 사용합니다.",
+          });
+          body.createDiv({
+            cls: "ggai-character-assets-path",
+            text: `저장 위치: ${folder}`,
+          });
+          return;
+        }
+        body.createDiv({
+          cls: "ggai-character-assets-summary",
+          text: `${assets.length}개 파일 · 저장 위치: ${folder}`,
+        });
+        const grid = body.createDiv({ cls: "ggai-character-assets-grid" });
+        for (const asset of assets) {
+          const card = grid.createDiv({ cls: "ggai-character-asset-card" });
+          const file = this.app.vault.getAbstractFileByPath(asset.path);
+          if (file instanceof TFile) {
+            card.createEl("img", {
+              attr: {
+                src: this.app.vault.getResourcePath(file),
+                alt: asset.filename,
+                loading: "lazy",
+                decoding: "async",
+              },
+            });
+          }
+          card.createDiv({ cls: "ggai-character-asset-name", text: asset.filename });
+        }
+      })
+      .catch((err) => {
+        if (renderSeq !== this.characterAssetsRenderSeq || !host.isConnected) return;
+        body.empty();
+        renderStatus();
+        body.createDiv({
+          cls: "ggai-character-assets-empty",
+          text: `에셋을 읽지 못했습니다: ${errorMessage(err)}`,
+        });
+      });
+  }
+
+  private async importCharacterAssets(
+    item: ScenarioListItem,
+    files: File[]
+  ): Promise<void> {
+    this.characterAssetImportStatus.set(item.scenarioFile, {
+      kind: "working",
+      text: `${files.length}개 선택 항목을 읽는 중입니다.`,
+    });
+    this.refreshCharacterAssetsSection(item);
+    try {
+      const assets = await readCharacterAssetUploads(files);
+      if (assets.length === 0) {
+        this.characterAssetImportStatus.set(item.scenarioFile, {
+          kind: "error",
+          text: "가져올 이미지가 없었습니다.",
+        });
+        this.refreshCharacterAssetsSection(item);
+        new Notice("가져올 이미지가 없습니다.");
+        return;
+      }
+      await this.store.importScenarioCharacterAssets(
+        item.scenarioFile,
+        assets
+      );
+      const saved = await this.store.listScenarioCharacterAssets(item.scenarioFile);
+      this.characterAssetImportStatus.set(item.scenarioFile, {
+        kind: "success",
+        text: `가져오기 완료 · ${assets.length}개 처리 · 현재 ${saved.length}개 저장됨`,
+      });
+      this.refreshCharacterAssetsSection(item);
+      new Notice(`캐릭터 에셋 ${assets.length}개를 가져왔습니다. 현재 ${saved.length}개입니다.`);
+    } catch (err) {
+      console.error("[GGAI Stella] 캐릭터 에셋 임포트 실패:", err);
+      this.characterAssetImportStatus.set(item.scenarioFile, {
+        kind: "error",
+        text: `가져오기 실패 · ${errorMessage(err)}`,
+      });
+      this.refreshCharacterAssetsSection(item);
+      new Notice(`캐릭터 에셋 임포트 실패: ${errorMessage(err)}`);
+    }
+  }
+
+  private refreshCharacterAssetsSection(item: ScenarioListItem): void {
+    if (
+      this.characterAssetsScenarioFile === item.scenarioFile &&
+      this.characterAssetsEl?.isConnected
+    ) {
+      this.renderCharacterAssetsSection(this.characterAssetsEl, item);
+    }
   }
 
   private detailSelectHeadEl: HTMLElement | null = null;

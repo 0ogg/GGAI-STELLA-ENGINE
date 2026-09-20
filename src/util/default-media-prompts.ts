@@ -7,6 +7,7 @@ import type { MediaPromptItem } from "../types/preset";
 export const LOREBOOK_SELECT_TASK_DEFAULT_PROMPT_ID = "builtin:lorebookSelect:2";
 
 export type MediaPromptBucket =
+  | "chatImageReaction"
   | "translation"
   | "illustrationPromptGen"
   | "paragraphRegen"
@@ -32,6 +33,15 @@ export type MediaPromptBucket =
  * 여기 한 곳의 오브젝트로 모든 기본 프롬프트를 일괄 관리한다.
  */
 export const DEFAULT_MEDIA_PROMPTS: Record<MediaPromptBucket, MediaPromptItem[]> = {
+  chatImageReaction: [
+    {
+      id: "builtin:chatImageReaction:1",
+      title: "Default",
+      prompt:
+        "The user attached the image shown with this message. Treat it as something the user has just shown to the character. Respond naturally in character and in the current conversational context. Do not produce a generic image-analysis report unless the user explicitly asks for one. Mention only visible details that are relevant to the reply, and do not invent unseen details.",
+    },
+  ],
+
   translation: [
     {
       id: "builtin:translation:1",

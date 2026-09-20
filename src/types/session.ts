@@ -86,6 +86,20 @@ export interface SessionGenMeta {
   profile?: string;
 }
 
+/** 챗 사용자 메시지에 붙은 이미지. 바이너리는 세션 assets/에 두고 여기엔 참조만 둔다. */
+export interface SessionImageAttachment {
+  id: string;
+  kind: "image";
+  /** 세션 폴더 기준 상대 경로 (`assets/...`). */
+  path: string;
+  mediaType: string;
+  /** 원본 파일명(표시/진단용). */
+  name?: string;
+  /** 비전 모델이 한 번 읽은 설명. 이후 텍스트 모델과 후속 턴의 대체 정보다. */
+  caption: string;
+  createdAt: number;
+}
+
 export interface SessionNode {
   id: string;
   /** 루트는 null. */
@@ -107,6 +121,8 @@ export interface SessionNode {
    * 없으면 호스트 시나리오 발화로 간주 (그룹 이전 노드/일반 세션 호환).
    */
   speaker?: string;
+  /** 챗 사용자 메시지 첨부. 본문 문자 offset에는 영향을 주지 않는다. */
+  attachments?: SessionImageAttachment[];
 }
 
 /**

@@ -34,7 +34,12 @@ import type {
   SessionIllustrations,
   SessionTranslations,
 } from "../types/media";
-import type { Patch, SessionNode, StellaSession } from "../types/session";
+import type {
+  Patch,
+  SessionImageAttachment,
+  SessionNode,
+  StellaSession,
+} from "../types/session";
 import type { StellaGroup } from "../types/group";
 import {
   parseTalkativeness,
@@ -62,7 +67,7 @@ import {
   hasCardImageTag,
   hasHtmlMarkup,
   renderSafeHtml,
-  replaceCardImageTags,
+  replaceCardImageTagsDeferred,
 } from "../util/safe-html";
 import { applyMacros, type MacroContext } from "../util/macros";
 import { REGEX_PLACEMENT, type RegexScript } from "../types/regex";
@@ -121,6 +126,12 @@ import { ParagraphRegenModal } from "./paragraph-regen-modal";
 import { ViewStylePopover } from "./view-style-popover";
 import { buildSessionMenu, sessionListItemOf } from "./session-menu";
 import { removeGroupMember, setGroupMemberMuted } from "./entity-actions";
+import { parseGeneratedImageMeta } from "../util/image-meta";
+import { openImageLightbox } from "./image-lightbox";
+import {
+  buildCharacterAssetMacros,
+  characterAssetLabel,
+} from "../util/character-assets";
 
 interface ChatSessionViewState {
   sessionFile: string;
@@ -133,7 +144,18 @@ interface ChatGenerationState {
   accumulatedText: string;
 }
 
+interface PendingChatImage {
+  id: string;
+  name: string;
+  mediaType: string;
+  bytes: ArrayBuffer;
+  caption: string;
+  objectUrl: string;
+}
+
 const EDIT_COMMIT_DEBOUNCE_MS = 800;
+const MAX_CHAT_IMAGES = 4;
+const MAX_CHAT_IMAGE_BYTES = 20 * 1024 * 1024;
 
 /** 카드 이미지 태그가 확장자만 다르게 저장돼 있어도 찾아줄 형식들. */
 const CARD_IMAGE_EXTS: ReadonlySet<string> = new Set([
@@ -172,6 +194,10 @@ export class ChatSessionView extends ItemView {
   private renderPending = false;
   /** 표시용 매크로 컨텍스트 ({{char}}/{{user}} 등 — 전송본과 별개, 표시 전용). */
   private displayMacroCtx: MacroContext = { user: "User" };
+  /** 그룹이면 멤버 전부를 포함한 에셋 탐색 루트. */
+  private characterAssetFolders: string[] = [];
+  /** 전체 로그의 이미지 생성을 피하고 화면 근처 슬롯만 활성화한다. */
+  private characterAssetObserver: IntersectionObserver | null = null;
 
   // ── 미디어/보기 (C3) ──
   private translations: SessionTranslations | null = null;
@@ -242,6 +268,11 @@ export class ChatSessionView extends ItemView {
 
   private messagesEl: HTMLElement | null = null;
   private inputEl: HTMLTextAreaElement | null = null;
+  /** 작성 중인 글은 DOM 재생성보다 오래 살아야 한다(첨부 미리보기/외부 갱신 보존). */
+  private inputDraft = "";
+  private pendingImages: PendingChatImage[] = [];
+  private attachmentPreviewEl: HTMLElement | null = null;
+  private attachmentProcessing = false;
   private sendBtn: HTMLButtonElement | null = null;
   /** 빠른 답장(QR) 바 — 입력바 바로 위. */
   private qrBar: SessionQuickReplyBar | null = null;
@@ -294,6 +325,8 @@ export class ChatSessionView extends ItemView {
       this.cancelAutoChain();
       this.pinnedSpeakerId = null;
       await this.flushPendingEdits({ convert: false });
+      this.clearPendingImages();
+      this.inputDraft = "";
       this.sessionFile = next;
       this.plugin.rememberActiveSessionFile(next);
       await this.loadSession();
@@ -322,7 +355,7 @@ export class ChatSessionView extends ItemView {
 
   /** AI 생성(스트리밍) 진행 중 — 이 탭은 다른 세션으로 갈아끼우면 안 된다 (session-host 규약). */
   isGenerating(): boolean {
-    return !!(this.sessionFile && this.plugin.isSessionChanging?.(this.sessionFile)) || this.generation != null || this.preparing || this.sending || this.bidiSending || this.bidiReflecting != null || this.translating || this.illustrating;
+    return !!(this.sessionFile && this.plugin.isSessionChanging?.(this.sessionFile)) || this.generation != null || this.preparing || this.sending || this.bidiSending || this.bidiReflecting != null || this.translating || this.illustrating || this.attachmentProcessing;
   }
 
   /**
@@ -338,7 +371,8 @@ export class ChatSessionView extends ItemView {
       this.pendingEditBubble != null ||
       this.editCommitTimer != null ||
       this.trEdit != null ||
-      this.bidiReflectTimer != null
+      this.bidiReflectTimer != null ||
+      this.pendingImages.length > 0
     );
   }
 
@@ -430,7 +464,17 @@ export class ChatSessionView extends ItemView {
     );
     // 확장 켜기/끄기 → 번역/삽화 버튼 노출을 즉시 반영.
     this.registerEvent(
-      this.store.on("extensions-changed", () => this.updateToolbar())
+      this.store.on("extensions-changed", (id: string) => {
+        this.updateToolbar();
+        if (id === "stella:character-assets" || id === "stella:card-display") {
+          void this.refreshMacroContext().then(() => this.renderMessages());
+        }
+      })
+    );
+    this.registerEvent(
+      this.store.on("scenario-assets-changed", () => {
+        void this.refreshMacroContext().then(() => this.renderMessages());
+      })
     );
     // 그룹 멤버 변경 (초대/내보내기) — 발화자 후보/라벨 재료 갱신.
     this.registerEvent(
@@ -513,12 +557,15 @@ export class ChatSessionView extends ItemView {
 
   async onClose(): Promise<void> {
     this.closed = true;
+    this.characterAssetObserver?.disconnect();
+    this.characterAssetObserver = null;
     this.cancelStreamPaint();
     this.cancelAutoChain();
     this.viewStylePopover?.close();
     this.viewStylePopover = null;
     this.generation?.abort.abort();
     await this.flushPendingEdits({ convert: false });
+    this.clearPendingImages();
   }
 
   private async loadSession(): Promise<void> {
@@ -562,6 +609,8 @@ export class ChatSessionView extends ItemView {
     this.groupMembers = [];
     this.scopedRegexScripts = [];
     this.scenarioStellaId = null;
+    this.characterAssetFolders = [];
+    let assetFilenames: string[] = [];
     if (this.sessionFile) {
       const scenarios = await this.store.getScenarios().catch(() => []);
       const scenarioFile = scenarioFileOfSessionFile(this.sessionFile);
@@ -572,6 +621,7 @@ export class ChatSessionView extends ItemView {
         // 표시 시점 정규식 재료 — 시나리오 전용 스크립트 + 허용 판정용 id.
         this.scopedRegexScripts = readScenarioRegexScripts(item?.scenario);
         this.scenarioStellaId = item?.scenario.data?.extensions?.stella?.id ?? null;
+        if (item) this.characterAssetFolders.push(item.folder);
       }
       // 그룹 챗 (G2) — 멤버 이름/표지/수다스러움(ST talkativeness) 재료.
       const groupId = this.session?.meta.groupId;
@@ -600,6 +650,10 @@ export class ChatSessionView extends ItemView {
               },
             ];
           });
+          this.characterAssetFolders = gi.group.members.flatMap((member) => {
+            const sc = byId.get(member.scenarioId);
+            return sc ? [sc.folder] : [];
+          });
           // 지목했던 발화자가 내보내졌으면 자동으로 복귀.
           if (
             this.pinnedSpeakerId &&
@@ -609,12 +663,25 @@ export class ChatSessionView extends ItemView {
           }
         }
       }
+      this.characterAssetFolders = [...new Set(this.characterAssetFolders)];
+      if (this.plugin.isExtensionEnabled("stella:character-assets")) {
+        const assetLists = await Promise.all(
+          this.characterAssetFolders.map((folder) =>
+            this.store.listScenarioCharacterAssets(`${folder}/scenario.json`)
+          )
+        );
+        assetFilenames = assetLists.flat().map((asset) => asset.filename);
+      }
     }
     if (userFile) {
       const users = await this.store.getUsers().catch(() => []);
       this.personaThumbPath =
         users.find((u) => u.userFile === userFile)?.thumbnailPath ?? null;
     }
+    const assetMacros = buildCharacterAssetMacros(
+      assetFilenames,
+      this.characterAssetFolders[0]?.split("/").pop() ?? ""
+    );
     this.displayMacroCtx = {
       char: scenarioData?.name ?? "(unknown)",
       user: user.name || "User",
@@ -624,6 +691,11 @@ export class ChatSessionView extends ItemView {
       personality: scenarioData?.personality,
       first_message: scenarioData?.first_mes,
       charFirstMessage: scenarioData?.first_mes,
+      ...(this.plugin.isExtensionEnabled("stella:character-assets")
+        ? assetMacros
+        : {}),
+      imgResolve: (name) => this.resolveCardImageSrc(name) ?? "",
+      imgRandom: (prefix) => this.resolveRandomCardImageSrc(prefix) ?? "",
     };
   }
 
@@ -1082,6 +1154,7 @@ export class ChatSessionView extends ItemView {
       cls: "ggai-chat-input",
       attr: { rows: "1", placeholder: "메시지를 입력하세요…" },
     });
+    this.inputEl.value = this.inputDraft;
     this.inputEl.addEventListener("keydown", (e) => {
       // 모바일은 Enter = 줄바꿈 (Shift 키가 사실상 없다) — 전송은 버튼으로.
       // PC 는 Enter = 전송, Shift+Enter = 줄바꿈 (채팅 앱 관례).
@@ -1092,9 +1165,34 @@ export class ChatSessionView extends ItemView {
       }
     });
     this.inputEl.addEventListener("input", () => {
+      this.inputDraft = this.inputEl?.value ?? "";
       // 타이핑 인터럽트 — 사용자가 쓰기 시작하면 자동 연쇄를 즉시 멈춘다 (G2).
       if ((this.inputEl?.value ?? "") !== "") this.cancelAutoChain();
       this.autosizeInput();
+    });
+    this.inputEl.addEventListener("paste", (e) => {
+      const images = Array.from(e.clipboardData?.files ?? []).filter((file) =>
+        file.type.startsWith("image/")
+      );
+      if (!images.length) return;
+      e.preventDefault();
+      void this.addPendingImageFiles(images);
+    });
+    center.addEventListener("dragover", (e) => {
+      if (Array.from(e.dataTransfer?.items ?? []).some((item) => item.type.startsWith("image/"))) {
+        e.preventDefault();
+        center.addClass("is-image-dragover");
+      }
+    });
+    center.addEventListener("dragleave", () => center.removeClass("is-image-dragover"));
+    center.addEventListener("drop", (e) => {
+      center.removeClass("is-image-dragover");
+      const images = Array.from(e.dataTransfer?.files ?? []).filter((file) =>
+        file.type.startsWith("image/")
+      );
+      if (!images.length) return;
+      e.preventDefault();
+      void this.addPendingImageFiles(images);
     });
     // 선택 모드에서 입력창을 탭하면 입력창 텍스트가 재생성 대상이 된다.
     this.inputEl.addEventListener(
@@ -1109,6 +1207,27 @@ export class ChatSessionView extends ItemView {
       },
       true
     );
+
+    this.attachmentPreviewEl = center.createDiv({ cls: "ggai-chat-attach-preview" });
+    this.renderAttachmentPreview();
+
+    const fileInput = center.createEl("input", {
+      cls: "ggai-chat-file-input",
+      type: "file",
+    });
+    fileInput.accept = "image/png,image/jpeg,image/webp,image/gif,image/avif";
+    fileInput.multiple = true;
+    const attachBtn = center.createEl("button", {
+      cls: "clickable-icon ggai-chat-attach-btn",
+      attr: { "aria-label": "사진 첨부" },
+    });
+    setIcon(attachBtn, "paperclip");
+    attachBtn.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", () => {
+      const files = Array.from(fileInput.files ?? []);
+      fileInput.value = "";
+      void this.addPendingImageFiles(files);
+    });
 
     this.sendBtn = center.createEl("button", { cls: "ggai-chat-send" });
     this.sendBtn.addEventListener("click", () => void this.handleSend());
@@ -1251,6 +1370,7 @@ export class ChatSessionView extends ItemView {
       return;
     }
     this.renderPending = false;
+    this.characterAssetObserver?.disconnect();
 
     // 읽던 위치 보존 — 바닥 따라가기 중이 아니면(위로 스크롤해 옛 대화를 읽는
     // 중이면) 재렌더 후 스크롤 위치를 복원한다. 자동 번역/삽화 완료 같은 외부
@@ -1358,6 +1478,7 @@ export class ChatSessionView extends ItemView {
         setIcon(mark, "eye-off");
         mark.setAttr("aria-label", "AI 에게 보내지 않음");
       }
+      if (msg.role === "user") this.renderMessageAttachments(stack, msg.nodeId);
       const bubble = stack.createDiv({ cls: "ggai-chat-bubble" });
       bubble.dataset.index = String(index);
       // 말풍선 우클릭(모바일: 꾹) = 메시지 메뉴. 끝 메시지가 아니어도 지울 수 있다.
@@ -1434,6 +1555,34 @@ export class ChatSessionView extends ItemView {
     this.updateToolbar();
     if (savedScrollTop == null) this.scrollToBottom();
     else this.restoreScrollTop(host, savedScrollTop);
+  }
+
+  /** 사용자 말풍선 위 첨부 이미지. 세션 assets 참조만 읽고 본문 DOM에는 넣지 않는다. */
+  private renderMessageAttachments(stack: HTMLElement, nodeId: string): void {
+    if (!this.session || !this.sessionFile) return;
+    const attachments = this.session.nodes[nodeId]?.attachments ?? [];
+    if (!attachments.length) return;
+    const folder = this.sessionFile.endsWith("/session.json")
+      ? this.sessionFile.slice(0, -"/session.json".length)
+      : "";
+    const items = attachments.flatMap((attachment) => {
+      const fullPath = `${folder}/${attachment.path}`;
+      const file = this.app.vault.getAbstractFileByPath(fullPath);
+      return file instanceof TFile
+        ? [{
+            src: this.app.vault.adapter.getResourcePath(fullPath),
+            caption: attachment.caption,
+          }]
+        : [];
+    });
+    if (!items.length) return;
+    const grid = stack.createDiv({ cls: "ggai-chat-message-images" });
+    items.forEach((item, index) => {
+      const img = grid.createEl("img", {
+        attr: { src: item.src, alt: item.caption || "첨부 이미지" },
+      });
+      img.addEventListener("click", () => openImageLightbox(items, index));
+    });
   }
 
   /**
@@ -2173,6 +2322,7 @@ export class ChatSessionView extends ItemView {
         }
         if (this.inputEl) {
           this.inputEl.value = r.text;
+          this.inputDraft = r.text;
           this.autosizeInput();
           this.inputEl.focus();
         }
@@ -2343,12 +2493,18 @@ export class ChatSessionView extends ItemView {
    * 마크업으로 오인하지 않게).
    */
   private setBubbleDisplay(bubble: HTMLElement, text: string): void {
-    const allowHtml =
-      this.plugin.isExtensionEnabled("stella:card-display") &&
-      (hasHtmlMarkup(text) || hasCardImageTag(text));
-    const source = allowHtml
-      ? replaceCardImageTags(text, (name) => this.resolveCardImageSrc(name))
-      : text;
+    const hasAssetTag =
+      this.plugin.isExtensionEnabled("stella:character-assets") &&
+      hasCardImageTag(text);
+    const cardHtml =
+      this.plugin.isExtensionEnabled("stella:card-display") && hasHtmlMarkup(text);
+    const allowHtml = hasAssetTag || cardHtml;
+    // 에셋 슬롯 때문에 HTML 파서를 켜더라도 카드 화면 표시가 꺼져 있으면 카드의
+    // 다른 raw HTML까지 함께 살아나면 안 된다. `<`만 엔티티로 바꿔 글자로 둔다.
+    const base = hasAssetTag && !cardHtml ? text.replace(/</g, "&lt;") : text;
+    const source = hasAssetTag
+      ? replaceCardImageTagsDeferred(base, (name) => this.resolveCardImageSrc(name))
+      : base;
     renderSafeHtml(bubble, formatMessageHtml(source, { allowHtml }), {
       // 카드 CSS 는 말풍선 안으로 가둔다 — 옵시디언 화면 전체를 망치지 않게.
       styleScope: ".ggai-chat-bubble",
@@ -2356,6 +2512,47 @@ export class ChatSessionView extends ItemView {
     // 마크다운으로 그려진 본문 표시 — 수정칸/스트리밍(원문 그대로)과 구분한다.
     bubble.addClass("ggai-md");
     attachCodeCopyButtons(bubble);
+    if (hasAssetTag) this.observeCharacterAssetSlots(bubble);
+  }
+
+  /** 화면 근처에 온 슬롯만 실제 이미지로 바꾼다. */
+  private observeCharacterAssetSlots(bubble: HTMLElement): void {
+    const slots = Array.from(
+      bubble.querySelectorAll<HTMLElement>(".ggai-card-img-slot")
+    );
+    if (slots.length === 0) return;
+    if (typeof IntersectionObserver === "undefined") {
+      for (const slot of slots) this.materializeCharacterAsset(slot);
+      return;
+    }
+    if (!this.characterAssetObserver) {
+      this.characterAssetObserver = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting || !(entry.target instanceof HTMLElement)) continue;
+            this.characterAssetObserver?.unobserve(entry.target);
+            this.materializeCharacterAsset(entry.target);
+          }
+        },
+        { root: this.messagesEl, rootMargin: "600px 0px" }
+      );
+    }
+    for (const slot of slots) this.characterAssetObserver.observe(slot);
+  }
+
+  private materializeCharacterAsset(slot: HTMLElement): void {
+    const src = slot.dataset.assetSrc;
+    if (!src) {
+      slot.remove();
+      return;
+    }
+    const img = document.createElement("img");
+    img.className = "ggai-card-img";
+    img.src = src;
+    img.alt = slot.dataset.assetName ?? "";
+    img.loading = "lazy";
+    img.decoding = "async";
+    slot.replaceWith(img);
   }
 
   /**
@@ -2376,30 +2573,52 @@ export class ChatSessionView extends ItemView {
   private resolveCardImageSrc(name: string): string | null {
     const clean = name.trim().replace(/^[/\\]+/, "");
     if (!clean || clean.includes("..")) return null; // 폴더 밖으로 나가는 경로 금지
-    const scenarioFile = scenarioFileOfSessionFile(this.sessionFile ?? "");
-    if (!scenarioFile) return null;
-    const root = scenarioFile.slice(0, -"/scenario.json".length);
-
-    for (const folder of [root, `${root}/assets`]) {
+    const key = clean.toLowerCase();
+    for (const root of this.characterAssetFolders) {
+      for (const folder of [root, `${root}/assets`]) {
       const exact = this.app.vault.getAbstractFileByPath(`${folder}/${clean}`);
       if (exact instanceof TFile) return this.app.vault.getResourcePath(exact);
 
       // 확장자만 다른 같은 이름 (하위 폴더를 가리키는 이름은 대상 아님).
       if (clean.includes("/")) continue;
-      const base = clean.replace(/\.[^.]+$/, "").toLowerCase();
+      const base = key.replace(/\.[^.]+$/, "");
       const dir = this.app.vault.getAbstractFileByPath(folder);
       if (!base || !(dir instanceof TFolder)) continue;
       for (const child of dir.children) {
         if (
           child instanceof TFile &&
-          child.basename.toLowerCase() === base &&
+          (child.basename.toLowerCase() === base ||
+            characterAssetLabel(child.name) === key) &&
           CARD_IMAGE_EXTS.has(child.extension.toLowerCase())
         ) {
           return this.app.vault.getResourcePath(child);
         }
       }
+      }
     }
     return null;
+  }
+
+  private resolveRandomCardImageSrc(prefix: string): string | null {
+    const key = prefix.trim().toLowerCase();
+    if (!key) return null;
+    const matches: string[] = [];
+    for (const root of this.characterAssetFolders) {
+      const dir = this.app.vault.getAbstractFileByPath(`${root}/assets`);
+      if (!(dir instanceof TFolder)) continue;
+      for (const child of dir.children) {
+        if (
+          child instanceof TFile &&
+          CARD_IMAGE_EXTS.has(child.extension.toLowerCase()) &&
+          child.basename.toLowerCase().startsWith(key)
+        ) {
+          matches.push(this.app.vault.getResourcePath(child));
+        }
+      }
+    }
+    return matches.length > 0
+      ? matches[Math.floor(Math.random() * matches.length)]
+      : null;
   }
 
   /**
@@ -3120,6 +3339,7 @@ export class ChatSessionView extends ItemView {
 
   /** QR 버튼 결과를 입력창에 넣고, send 면 그대로 전송한다. */
   private async applyQuickReplyText(text: string, send: boolean): Promise<void> {
+    this.inputDraft = text;
     if (this.inputEl) {
       this.inputEl.value = text;
       this.autosizeInput();
@@ -3129,6 +3349,125 @@ export class ChatSessionView extends ItemView {
     if (send) await this.handleSend();
   }
 
+  /** 파일 선택/붙여넣기/드롭 공용. 저장은 전송 시점까지 미뤄 취소 에셋을 남기지 않는다. */
+  private async addPendingImageFiles(files: File[]): Promise<void> {
+    if (this.attachmentProcessing) return;
+    const room = MAX_CHAT_IMAGES - this.pendingImages.length;
+    if (room <= 0) {
+      new Notice(`사진은 한 메시지에 최대 ${MAX_CHAT_IMAGES}장까지 첨부할 수 있습니다.`);
+      return;
+    }
+    const images = files.filter((file) => file.type.startsWith("image/")).slice(0, room);
+    if (!images.length) return;
+    this.attachmentProcessing = true;
+    this.updateSendButton();
+    try {
+      for (const file of images) {
+        if (file.size > MAX_CHAT_IMAGE_BYTES) {
+          new Notice(`${file.name}: 20MB보다 큰 이미지는 첨부할 수 없습니다.`);
+          continue;
+        }
+        const bytes = await file.arrayBuffer();
+        const meta = parseGeneratedImageMeta(new Uint8Array(bytes));
+        // 폰과 같은 1회 비전 캡션 경로를 재사용한다. 설정된 비전 모델이 없거나
+        // 실패하면 생성 메타/파일명으로 폴백하고, 비전 지원 본 모델은 원본도 직접 본다.
+        const seen = await this.plugin.phone.describeImage(bytes, file.type, {
+          hasMeta: !!meta,
+        });
+        this.pendingImages.push({
+          id: uuidv4(),
+          name: file.name,
+          mediaType: file.type || mediaTypeFromName(file.name),
+          bytes,
+          caption:
+            seen ??
+            meta?.description ??
+            (file.name.replace(/\.[^.]+$/, "") || "Attached image"),
+          objectUrl: URL.createObjectURL(file),
+        });
+        this.renderAttachmentPreview();
+      }
+      if (files.length > room) {
+        new Notice(`사진은 한 메시지에 최대 ${MAX_CHAT_IMAGES}장까지 첨부할 수 있습니다.`);
+      }
+      await this.warnIfNoVisionReader();
+    } catch (err) {
+      new Notice(`사진 첨부 실패: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      this.attachmentProcessing = false;
+      this.updateSendButton();
+      this.inputEl?.focus();
+    }
+  }
+
+  private async warnIfNoVisionReader(): Promise<void> {
+    if (!this.sessionFile) return;
+    const settings = await this.plugin.resolveActiveSettings(this.sessionFile);
+    const active = settings.modelProfileId
+      ? this.ai.getProfileById(settings.modelProfileId)
+      : this.ai.getDefaultGenerationProfile();
+    const fallback = this.ai.getProfileById(this.plugin.data.phone?.visionProfileId);
+    if (active?.supportsVision || fallback?.supportsVision) return;
+    new Notice(
+      "현재 모델은 사진을 직접 볼 수 없고 사진 읽기 모델도 설정되지 않았습니다. 우측 모델 설정에서 비전 지원 챗 모델을 선택하세요."
+    );
+  }
+
+  private renderAttachmentPreview(): void {
+    const host = this.attachmentPreviewEl;
+    if (!host) return;
+    host.empty();
+    for (const item of this.pendingImages) {
+      const chip = host.createDiv({ cls: "ggai-chat-attach-chip" });
+      const img = chip.createEl("img", { attr: { src: item.objectUrl, alt: item.caption } });
+      img.addEventListener("click", () =>
+        openImageLightbox([{ src: item.objectUrl, caption: item.caption }])
+      );
+      const remove = chip.createEl("button", {
+        cls: "clickable-icon ggai-chat-attach-remove",
+        attr: { "aria-label": "첨부 제거" },
+      });
+      setIcon(remove, "x");
+      remove.addEventListener("click", () => {
+        const index = this.pendingImages.findIndex((image) => image.id === item.id);
+        if (index < 0) return;
+        const [removed] = this.pendingImages.splice(index, 1);
+        URL.revokeObjectURL(removed.objectUrl);
+        this.renderAttachmentPreview();
+        this.updateSendButton();
+      });
+    }
+  }
+
+  private clearPendingImages(): void {
+    for (const image of this.pendingImages) URL.revokeObjectURL(image.objectUrl);
+    this.pendingImages = [];
+    this.attachmentPreviewEl?.empty();
+  }
+
+  private async savePendingImages(): Promise<SessionImageAttachment[]> {
+    if (!this.sessionFile) return [];
+    const saved: SessionImageAttachment[] = [];
+    for (const item of this.pendingImages) {
+      const ext = safeImageExtension(item.name, item.mediaType);
+      const path = await this.store.saveSessionAsset(
+        this.sessionFile,
+        `chat-${Date.now()}-${item.id}.${ext}`,
+        item.bytes
+      );
+      saved.push({
+        id: item.id,
+        kind: "image",
+        path,
+        mediaType: item.mediaType,
+        name: item.name,
+        caption: item.caption,
+        createdAt: Date.now(),
+      });
+    }
+    return saved;
+  }
+
   // ── 전송 / 생성 ──────────────────────────────────────────────────
 
   private sending = false;
@@ -3136,7 +3475,7 @@ export class ChatSessionView extends ItemView {
 
   private async handleSend(): Promise<void> {
     if (this.generation) { this.generation.abort.abort(); return; }
-    if (this.sending || this.preparing || !this.sessionFile || (this.plugin.isSessionChanging?.(this.sessionFile) || isSessionGenerating(this.app.workspace, this.sessionFile, this))) return;
+    if (this.sending || this.preparing || this.attachmentProcessing || !this.sessionFile || (this.plugin.isSessionChanging?.(this.sessionFile) || isSessionGenerating(this.app.workspace, this.sessionFile, this))) return;
     this.sending = true;
     this.updateSendButton();
     try { await this.sendMessage(); }
@@ -3159,7 +3498,8 @@ export class ChatSessionView extends ItemView {
     if (this.bidirectional() && this.collectBidiOps().length > 0) return;
     if (!this.session || !this.sessionFile) return;
 
-    const text = this.inputEl?.value.trim() ?? "";
+    const text = this.inputEl?.value.trim() ?? this.inputDraft.trim();
+    const hasImages = this.pendingImages.length > 0;
     // 양방향 번역 — 내 언어로 친 메시지를 스토리 원문 언어로 변환해 저장한다.
     // 실패/취소 시 전송하지 않고 입력창의 원문을 그대로 남긴다 (조용한 유실 금지).
     let messageText = text;
@@ -3189,7 +3529,9 @@ export class ChatSessionView extends ItemView {
       }
       messageText = conv.text;
     }
-    if (text) {
+    if (hasImages && !messageText) messageText = "사진을 첨부했습니다.";
+    if (messageText) {
+      const attachments = hasImages ? await this.savePendingImages() : [];
       const flatLen = spansToText(buildSpans(this.session)).length;
       const node: SessionNode = {
         id: uuidv4(),
@@ -3207,14 +3549,17 @@ export class ChatSessionView extends ItemView {
           },
         ],
         createdAt: Date.now(),
+        ...(attachments.length ? { attachments } : {}),
       };
       this.session.nodes[node.id] = node;
       this.session.meta.activeLeafId = node.id;
       this.redoStack = [];
       if (this.inputEl) {
         this.inputEl.value = "";
+        this.inputDraft = "";
         this.autosizeInput();
       }
+      if (attachments.length) this.clearPendingImages();
       const saved = await this.persistSession("메시지 저장 실패");
       this.followTail = true;
       this.renderMessages();
@@ -3548,7 +3893,9 @@ export class ChatSessionView extends ItemView {
   private updateSendButton(): void {
     const btn = this.sendBtn;
     if (!btn) return;
-    btn.disabled = !this.generation && (this.preparing || this.sending);
+    btn.disabled =
+      !this.generation &&
+      (this.preparing || this.sending || this.attachmentProcessing);
     btn.empty();
     setIcon(btn, this.generation ? "square" : "send");
     btn.toggleClass("is-generating", this.generation != null);
@@ -3590,6 +3937,31 @@ function formatDateDivider(ts: number): string {
   const weekday = ["일", "월", "화", "수", "목", "금", "토"][d.getDay()];
   const md = `${d.getMonth() + 1}월 ${d.getDate()}일 (${weekday})`;
   return d.getFullYear() === now.getFullYear() ? md : `${d.getFullYear()}년 ${md}`;
+}
+
+function mediaTypeFromName(name: string): string {
+  const ext = name.split(".").pop()?.toLowerCase();
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  if (ext === "webp") return "image/webp";
+  if (ext === "gif") return "image/gif";
+  if (ext === "avif") return "image/avif";
+  return "image/png";
+}
+
+function safeImageExtension(name: string, mediaType: string): string {
+  const fromName = name.split(".").pop()?.toLowerCase();
+  if (fromName && ["png", "jpg", "jpeg", "webp", "gif", "avif"].includes(fromName)) {
+    return fromName;
+  }
+  return mediaType === "image/jpeg"
+    ? "jpg"
+    : mediaType === "image/webp"
+      ? "webp"
+      : mediaType === "image/gif"
+        ? "gif"
+        : mediaType === "image/avif"
+          ? "avif"
+          : "png";
 }
 
 /** 글 끝에 caret 배치 — 수정 버튼으로 편집칸을 열었을 때의 커서 자리. */

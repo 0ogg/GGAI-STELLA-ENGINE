@@ -376,6 +376,32 @@ export function replaceCardImageTags(
   });
 }
 
+/**
+ * 전체 챗 로그를 한꺼번에 이미지로 만들지 않기 위한 지연 슬롯.
+ * 뷰가 IntersectionObserver로 화면 근처 슬롯만 실제 `<img>`로 바꾼다.
+ */
+export function replaceCardImageTagsDeferred(
+  text: string,
+  resolve: (name: string) => string | null
+): string {
+  return (text ?? "").replace(CARD_IMAGE_RE, (_m, name: string) => {
+    const cleanName = name.trim();
+    const src = resolve(cleanName);
+    if (!src || !isSafeUrl(src)) return "";
+    const escapedSrc = escapeHtmlAttr(src);
+    const escapedName = escapeHtmlAttr(cleanName);
+    return `<span class="ggai-card-img-slot" data-asset-src="${escapedSrc}" data-asset-name="${escapedName}" role="img" aria-label="${escapedName}"></span>`;
+  });
+}
+
+function escapeHtmlAttr(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 export interface SafeHtmlOptions {
   /**
    * 카드가 낸 `<style>` 을 이 선택자 밑으로 가둔다(예: `.ggai-chat-bubble`).

@@ -162,6 +162,10 @@ import {
 } from "../util/session-ops";
 import { WriteQueue } from "./write-queue";
 import { uuidv4 } from "../util/uuid";
+import {
+  isCharacterAssetFilename,
+  type CharacterAssetFile,
+} from "../util/character-assets";
 
 /**
  * 자기 write 이후 vault.modify 무시 기간 — 캐시는 이미 최신이므로.
@@ -366,6 +370,60 @@ export class StellaStore extends Events {
       if (item) item.scenario = scenario;
     }
     this.trigger("scenarios-changed");
+  }
+
+  /** 시나리오의 ST 호환 캐릭터 에셋 목록. 저장 위치는 시나리오 `assets/` 루트다. */
+  async listScenarioCharacterAssets(
+    scenarioFile: string
+  ): Promise<Array<{ filename: string; path: string }>> {
+    const folder = scenarioFolderOfScenarioFile(scenarioFile);
+    if (!folder) return [];
+    const assets = this.vault.getAbstractFileByPath(`${folder}/assets`);
+    if (!(assets instanceof TFolder)) return [];
+    return assets.children
+      .filter(
+        (child): child is TFile =>
+          child instanceof TFile && isCharacterAssetFilename(child.name)
+      )
+      .map((file) => ({ filename: file.name, path: file.path }))
+      .sort((a, b) => a.filename.localeCompare(b.filename));
+  }
+
+  /**
+   * ST sprite ZIP과 같은 덮어쓰기 규칙으로 시나리오 에셋을 저장한다.
+   * 같은 basename의 기존 파일은 확장자가 달라도 새 파일로 교체된다.
+   */
+  async importScenarioCharacterAssets(
+    scenarioFile: string,
+    files: readonly CharacterAssetFile[]
+  ): Promise<number> {
+    const folder = scenarioFolderOfScenarioFile(scenarioFile);
+    if (!folder) throw new Error("Invalid scenario path");
+    const assetsFolder = normalizePath(`${folder}/assets`);
+    if (!(await this.vault.adapter.exists(assetsFolder))) {
+      await this.vault.createFolder(assetsFolder);
+    }
+
+    for (const input of files) {
+      const filename = input.filename.replace(/\\/g, "/").split("/").pop() ?? "";
+      if (!filename || !isCharacterAssetFilename(filename)) continue;
+      const base = filename.replace(/\.[^.]+$/, "");
+      const dir = this.vault.getAbstractFileByPath(assetsFolder);
+      if (dir instanceof TFolder) {
+        for (const child of [...dir.children]) {
+          if (child instanceof TFile && child.basename === base && child.name !== filename) {
+            this.markSelfWrite(child.path);
+            await this.vault.trash(child, false);
+          }
+        }
+      }
+      await this.writeBinaryFile(
+        normalizePath(`${assetsFolder}/${filename}`),
+        input.data
+      );
+    }
+    this.trigger("scenario-assets-changed", scenarioFile);
+    return files.length;
   }
 
   async renameScenario(
@@ -2535,6 +2593,16 @@ export class StellaStore extends Events {
   ): void {
     if ((kind !== "delete" && this.sessionWrites.hasPending(path)) || this.isRecentSelfWrite(path)) return;
 
+    // 시나리오 공용 캐릭터 에셋. 세션 assets/와 구분해 해당 시나리오 화면만 갱신한다.
+    const assetsAt = path.lastIndexOf("/assets/");
+    if (assetsAt > 0) {
+      const folder = path.slice(0, assetsAt);
+      if (!folder.includes("/SESSIONS/")) {
+        this.trigger("scenario-assets-changed", `${folder}/scenario.json`);
+        return;
+      }
+    }
+
     // scenario.json 변경
     if (path.endsWith("/scenario.json")) {
       this.scenariosCache = null;
@@ -2933,6 +3001,13 @@ async function copyFolderChildren(
 function parentFolderPath(filePath: string): string {
   const idx = filePath.lastIndexOf("/");
   return idx < 0 ? "" : filePath.slice(0, idx);
+}
+
+function scenarioFolderOfScenarioFile(filePath: string): string | null {
+  const normalized = normalizePath(filePath);
+  return normalized.endsWith("/scenario.json")
+    ? normalized.slice(0, -"/scenario.json".length)
+    : null;
 }
 
 function sanitizeFolderName(name: string): string {

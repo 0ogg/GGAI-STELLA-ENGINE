@@ -1,6 +1,7 @@
 import { App, Modal, Notice } from "obsidian";
 import type { SessionContextDryRun } from "../util/build-session-context";
 import { createModalShell } from "./modal-shell";
+import { chatContentText } from "../services/ai-service";
 
 /**
  * ContextPreviewModal — AI 에 보낼 최종 컨텍스트 미리보기.
@@ -111,12 +112,26 @@ export class ContextPreviewModal extends Modal {
             if (m.source.detail) source.title = m.source.detail;
           }
           const tok = tokens?.[i];
+          const contentText = chatContentText(m.content);
+          const imageCount = Array.isArray(m.content)
+            ? m.content.filter((part) => part.type === "image").length
+            : 0;
           head.createSpan({
             cls: "ggai-ctx-msg-len",
-            text: tok != null ? `~${tok.toLocaleString()}토큰 · ${m.content.length}자` : `${m.content.length}자`,
+            text:
+              (tok != null
+                ? `~${tok.toLocaleString()}토큰 · ${contentText.length}자`
+                : `${contentText.length}자`) +
+              (imageCount ? ` · 이미지 ${imageCount}장` : ""),
           });
           const body = card.createDiv({ cls: "ggai-ctx-msg-body" });
-          appendHighlighted(body, m.content, query, this.hits);
+          appendHighlighted(body, contentText, query, this.hits);
+          if (imageCount) {
+            body.createDiv({
+              cls: "ggai-ctx-image-note",
+              text: `[원본 이미지 ${imageCount}장 첨부]`,
+            });
+          }
           head.addEventListener("click", () => card.toggleClass("is-collapsed", !card.hasClass("is-collapsed")));
         });
       };
@@ -143,7 +158,15 @@ export class ContextPreviewModal extends Modal {
       const text =
         this.dry.textPrompt ??
         (this.dry.chatMessages ?? out.messages)
-          .map((m) => `[${m.role}${m.source ? ` | ${m.source.label}` : ""}]\n${m.content}`)
+          .map((m) => {
+            const content = chatContentText(m.content);
+            const imageCount = Array.isArray(m.content)
+              ? m.content.filter((part) => part.type === "image").length
+              : 0;
+            return `[${m.role}${m.source ? ` | ${m.source.label}` : ""}]\n${content}${
+              imageCount ? `\n[Original images attached: ${imageCount}]` : ""
+            }`;
+          })
           .join("\n\n");
       void navigator.clipboard
         .writeText(text)

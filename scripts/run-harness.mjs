@@ -21,6 +21,7 @@ const testNames = [
   "image-char-prompts",
   "dashboard-content-safety",
   "card-instructions",
+  "character-assets",
   "qr-jjangdol",
   "trim-incomplete",
   "write-queue",

@@ -39,6 +39,8 @@ export interface GenerationProfileLite {
   maxContextTokens?: number;
   /** 프로필에 설정된 출력 토큰 상한(Core "max output tokens"). Stella 의 Max Output Tokens 슬라이더 상한 클램프에 쓴다. undefined=제한 없음. */
   maxOutputTokensLimit?: number;
+  /** Core 프로필이 원본 이미지 입력을 지원하는지. */
+  supportsVision?: boolean;
 }
 
 /** 호환을 위한 별칭. 점진 폐기 예정. */
@@ -52,9 +54,20 @@ export interface ImageProfileLite {
   isDefault?: boolean;
 }
 
+export type ChatContentPart =
+  | { type: "text"; text: string }
+  | {
+      type: "image";
+      source:
+        | { kind: "base64"; mediaType: string; data: string }
+        | { kind: "url"; url: string };
+    };
+
+export type ChatMessageContent = string | ChatContentPart[];
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string;
+  content: ChatMessageContent;
 }
 
 export interface ChatRequest {
@@ -203,6 +216,7 @@ export class AIService extends Events {
           typeof p.params?.maxContextTokens === "number" ? p.params.maxContextTokens : undefined,
         maxOutputTokensLimit:
           typeof p.params?.maxTokens === "number" ? p.params.maxTokens : undefined,
+        supportsVision: p.supports?.vision === true,
       }));
       mapped.sort(compareGenerationProfiles);
       this.profileCache = mapped;
@@ -402,7 +416,7 @@ export class AIService extends Events {
       const text =
         typeof input === "string"
           ? input
-          : input.map((m) => m.content).join("\n");
+          : input.map((m) => chatContentText(m.content)).join("\n");
       return Math.ceil(text.length / 4);
     }
     try {
@@ -480,6 +494,15 @@ export class AIService extends Events {
       console.warn("[GGAI Stella] Core profiles-changed 구독 실패:", err);
     }
   }
+}
+
+/** 미리보기/폴백 계수에서 멀티모달 메시지의 텍스트 부분만 꺼낸다. */
+export function chatContentText(content: ChatMessageContent): string {
+  if (typeof content === "string") return content;
+  return content
+    .filter((part): part is Extract<ChatContentPart, { type: "text" }> => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
 }
 
 function normalizeChatResponse(r: any): ChatResponse {

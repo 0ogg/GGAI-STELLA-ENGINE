@@ -102,10 +102,14 @@ async function inflateRaw(
     throw new Error("이 환경은 ZIP deflate 해제를 지원하지 않습니다.");
   }
   const stream = new DecompressionStreamCtor("deflate-raw");
-  const writer = stream.writable.getWriter();
-  await writer.write(bytes);
-  await writer.close();
-  const buffer = await new Response(stream.readable).arrayBuffer();
+  // 출력 소비를 먼저 시작해야 큰 항목에서 Web Streams 역압력으로 멈추지 않는다.
+  const output = new Response(stream.readable).arrayBuffer();
+  const inputBytes = bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength
+  ) as ArrayBuffer;
+  await new Blob([inputBytes]).stream().pipeTo(stream.writable);
+  const buffer = await output;
   const out = new Uint8Array(buffer);
   if (expectedSize > 0 && out.length !== expectedSize) {
     console.warn("[GGAI Stella] CHARX inflate size mismatch", {

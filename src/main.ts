@@ -135,6 +135,8 @@ import type { SessionListItem } from "./util/scan-sessions";
 export interface StellaPluginData {
   current?: ActiveSettings;
   mediaPrompts?: MediaPromptLibrary;
+  /** 챗 첨부 이미지 반응 프롬프트. 미지정이면 내장 영어 기본값. */
+  chatImageReactionPromptId?: string;
   /** 문단 재생성 패널에서 마지막으로 선택한 프롬프트 id. */
   paragraphRegenPromptId?: string;
   /** 문단 재생성 시 세션 컨텍스트(앞뒤 문단+요약) 첨부를 끄는지. 기본 false(첨부). */
@@ -1072,12 +1074,20 @@ export default class StellaEnginePlugin extends Plugin {
     {
       id: "stella:card-display",
       name: "카드 화면 표시",
-      desc: "카드가 낸 상태창·표·이미지를 채팅 말풍선에 화면으로 그립니다(스크립트는 실행하지 않습니다). 끄면 태그가 글자 그대로 보입니다.",
+      desc: "카드가 낸 상태창·표를 채팅 말풍선에 화면으로 그립니다(스크립트는 실행하지 않습니다). 캐릭터 이미지 에셋은 별도 기능에서 켭니다.",
+    },
+    {
+      id: "stella:character-assets",
+      name: "캐릭터 에셋",
+      desc: "실리태번 캐릭터 에셋 ZIP을 시나리오에 가져오고 {{img::파일명}} 태그를 채팅에 표시합니다. 켜면 대시보드 시나리오 상세에 에셋 임포트가 나타납니다.",
     },
   ];
 
-  /** 확장이 켜져 있는지 (항목 없으면 기본 켜짐). */
+  /** 확장이 켜져 있는지. 캐릭터 에셋은 명시적으로 사용 체크한 경우에만 켜진다. */
   isExtensionEnabled(id: string): boolean {
+    if (id === "stella:character-assets") {
+      return this.data.extensionsEnabled?.[id] === true;
+    }
     return this.data.extensionsEnabled?.[id] !== false;
   }
 
@@ -1087,8 +1097,9 @@ export default class StellaEnginePlugin extends Plugin {
    */
   async setExtensionEnabled(id: string, enabled: boolean): Promise<void> {
     const map = { ...(this.data.extensionsEnabled ?? {}) };
-    if (enabled) delete map[id];
-    else map[id] = false;
+    const defaultEnabled = id !== "stella:character-assets";
+    if (enabled === defaultEnabled) delete map[id];
+    else map[id] = enabled;
     await this.savePluginData({ extensionsEnabled: map });
     this.applyExtensions();
     this.store.trigger("extensions-changed", id);

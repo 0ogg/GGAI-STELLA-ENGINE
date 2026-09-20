@@ -19,6 +19,7 @@ import type {
 } from "../types/prompt";
 import { MARKER_MACRO_TOKENS } from "../types/prompt";
 import { applyMacros, type MacroContext } from "./macros";
+import type { CharacterAssetMacros } from "./character-assets";
 import { tokenizeParagraphs } from "./translate-paragraphs";
 import {
   matchLorebookEntries,
@@ -95,6 +96,8 @@ export interface ContextBuilderInputV2 {
   continueText?: string;
   /** 마지막 노드 이후 경과 표현 — {{idle_duration}} 매크로 값 (P1 실시간 채팅). */
   idleDuration?: string;
+  /** ST character-assets 매크로 값. 에셋 기능이 꺼져 있으면 생략. */
+  characterAssets?: CharacterAssetMacros;
   /** 세션 단위 매크로 변수. setvar/getvar/addvar 계열이 이 객체를 갱신한다. */
   variables?: Record<string, string>;
   /** 세션 단위 Choice Block 선택값. */
@@ -268,6 +271,12 @@ export function buildContext(
     lastMessage,
     lastCharMessage,
     idleDuration: input.idleDuration,
+    imgInprompt: input.characterAssets?.imgInprompt,
+    imgKeywords: input.characterAssets?.imgKeywords,
+    imgKeywordsAutogen: input.characterAssets?.imgKeywordsAutogen,
+    imgKeywordsGrouped: input.characterAssets?.imgKeywordsGrouped,
+    charkey: input.characterAssets?.charkey,
+    imgCount: input.characterAssets?.imgCount,
     variables: input.variables,
     choices,
   };

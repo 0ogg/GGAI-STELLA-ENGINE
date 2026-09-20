@@ -5,6 +5,7 @@ import type {
 } from "../../services/ai-service";
 import type StellaEnginePlugin from "../../main";
 import { renderCollapsibleShell, renderModelPicker } from "./setting-controls";
+import { renderMediaPromptPicker } from "./media-prompt-panel";
 
 /**
  * ModelSection — 활성 모델 프로필 버튼.
@@ -93,6 +94,29 @@ export class ModelSection {
       onOpenSettings: () => this.openCoreSettings(),
       onLongPressEdit: (p) => this.handleLongPressEdit(p as GenerationProfileLite),
     });
+    renderMediaPromptPicker({
+      plugin: this.plugin,
+      parent: this.bodyEl,
+      label: "챗 사진 반응 프롬프트",
+      bucket: "chatImageReaction",
+      activeId: this.plugin.data.chatImageReactionPromptId,
+      onSelect: (chatImageReactionPromptId) =>
+        void this.saveChatImagePrompt(chatImageReactionPromptId),
+      onChanged: () => this.render(),
+      onDeleted: () => void this.saveChatImagePrompt(undefined),
+    });
+  }
+
+  private async saveChatImagePrompt(
+    chatImageReactionPromptId: string | undefined
+  ): Promise<void> {
+    try {
+      await this.plugin.savePluginData({ chatImageReactionPromptId });
+      this.render();
+    } catch (err) {
+      console.error("[GGAI Stella] 챗 사진 반응 프롬프트 저장 실패:", err);
+      new Notice("사진 반응 프롬프트 저장 실패.");
+    }
   }
 
   private async handleSelect(profile: GenerationProfileLite): Promise<void> {

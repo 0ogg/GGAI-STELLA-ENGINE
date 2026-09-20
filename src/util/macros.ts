@@ -37,6 +37,15 @@ export interface MacroContext {
   lastCharMessage?: string;
   /** 마지막 노드 이후 경과 표현 (예: "3 hours") — ST {{idle_duration}} 호환. */
   idleDuration?: string;
+  /** tincansimagine/character-assets 호환 매크로. */
+  imgInprompt?: string;
+  imgKeywords?: string;
+  imgKeywordsAutogen?: string;
+  imgKeywordsGrouped?: string;
+  charkey?: string;
+  imgCount?: string;
+  imgResolve?: (name: string) => string;
+  imgRandom?: (prefix: string) => string;
   variables?: Record<string, string>;
   choices?: Record<string, string>;
 }
@@ -82,6 +91,12 @@ const SUPPORTED_MACROS: ReadonlyArray<keyof MacroContext> = [
   "lastMessage",
   "lastCharMessage",
   "idleDuration",
+  "imgInprompt",
+  "imgKeywords",
+  "imgKeywordsAutogen",
+  "imgKeywordsGrouped",
+  "charkey",
+  "imgCount",
 ];
 const SUPPORTED_SET = new Set<string>(SUPPORTED_MACROS);
 const MACRO_ALIASES: ReadonlyMap<string, keyof MacroContext> = new Map([
@@ -103,10 +118,21 @@ const MACRO_ALIASES: ReadonlyMap<string, keyof MacroContext> = new Map([
   ["lastmessage", "lastMessage"],
   ["lastcharmessage", "lastCharMessage"],
   ["idle_duration", "idleDuration"],
+  ["img_inprompt", "imgInprompt"],
+  ["img_keywords", "imgKeywords"],
+  ["img_keywords_autogen", "imgKeywordsAutogen"],
+  ["img_keywords_grouped", "imgKeywordsGrouped"],
+  ["img_count", "imgCount"],
 ]);
 
 function resolveMacro(match: string, key: string, ctx: MacroContext): string {
   const k = key.trim();
+
+  const imageRandom = k.match(/^img_rand::(.+)$/i);
+  if (imageRandom && ctx.imgRandom) return ctx.imgRandom(imageRandom[1].trim());
+
+  const imageResolve = k.match(/^img_resolve::(.+)$/i);
+  if (imageResolve && ctx.imgResolve) return ctx.imgResolve(imageResolve[1].trim());
 
   const rollMatch = k.match(/^(?:roll|dice):(\d+)d(\d+)$/i);
   if (rollMatch) return rollDice(Number(rollMatch[1]), Number(rollMatch[2]));

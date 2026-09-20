@@ -36,6 +36,10 @@ import { buildSummaryPrompt } from "../src/util/generate-summary";
 import { applyMacros } from "../src/util/macros";
 import { normalizeMessagesForChat } from "../src/util/normalize-messages";
 import {
+  appendAttachmentContext,
+} from "../src/util/chat-attachments";
+import { getDefaultPrompts } from "../src/util/default-media-prompts";
+import {
   buildSessionLog,
   hasSameTextState,
 } from "../src/util/session-view-logic";
@@ -217,6 +221,31 @@ function makeSession(): StellaSession {
       },
     },
   };
+}
+
+{
+  const unchanged = appendAttachmentContext("hello", undefined, "");
+  assert.equal(unchanged, "hello", "첨부가 없으면 전송 텍스트가 byte 단위로 불변");
+
+  const reactionPrompt = getDefaultPrompts("chatImageReaction")[0]?.prompt ?? "";
+  const attached = appendAttachmentContext("look at this", [
+    {
+      id: "img-1",
+      kind: "image",
+      path: "assets/chat-img.png",
+      mediaType: "image/png",
+      name: "chat-img.png",
+      caption: "A rainy bus stop at night",
+      createdAt: 1,
+    },
+  ], reactionPrompt);
+  assert.ok(attached.startsWith("look at this\n\n[Attached image context]"));
+  assert.ok(attached.includes("Image 1: A rainy bus stop at night"));
+  assert.ok(attached.includes(reactionPrompt));
+  assert.ok(
+    reactionPrompt.includes("Respond naturally in character"),
+    "사진 반응 지시문은 영어 캐릭터 반응 지시를 유지"
+  );
 }
 
 function cloneSession(session: StellaSession): StellaSession {

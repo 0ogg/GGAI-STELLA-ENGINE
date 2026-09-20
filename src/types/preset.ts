@@ -20,6 +20,8 @@ export interface MediaPromptItem {
 }
 
 export interface MediaPromptLibrary {
+  /** 챗 모드 — 사용자가 첨부한 이미지에 캐릭터답게 반응하도록 하는 지시문. */
+  chatImageReaction?: MediaPromptItem[];
   translation?: MediaPromptItem[];
   illustrationPromptGen?: MediaPromptItem[];
   paragraphRegen?: MediaPromptItem[];
