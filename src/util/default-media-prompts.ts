@@ -507,7 +507,12 @@ Main Text
 {{main}}
 
 You are a prompt engineer for an image generation AI.
-Read the Korean text. Look ONLY at the LAST scene. Output ONE line.
+Read the text and depict one visible moment at the end of the LAST scene. Output ONE line.
+Select details that help draw the people, their physical interaction, and their surroundings in that single image.
+A line of *** marks a scene transition. Use the current scene's descriptions first.
+Carry forward stable character features. Resolve clothing and other temporary states
+from continuity and the current place, activity, and elapsed time, making reasonable
+inferences when a change is implicit. Use this context to choose what is visible.
 
 =========================================
 OUTPUT FORMAT — copy this shape exactly
@@ -541,15 +546,10 @@ SFW / NSFW (second item of sceneInfo)
 =========================================
 SCENE + BACKGROUND (third & fourth items of sceneInfo)
 =========================================
-- scene = the central situation as ONE clear, accurate natural-language sentence,
-    so the composition reads correctly even without the character blocks:
-    who is doing what to whom, and the framing. Concrete visual facts only.
-      e.g.  two girls in a comedic fight, one being pointed at while the other scolds her
-- background = the place: natural language or word tags, as concrete as the
-    context allows (location, lighting, weather, time).
-      e.g.  inside an abandoned factory, dim industrial lights, foggy atmosphere
-- If a specific central pose/action has a known danbooru tag, add it here:
-    princess carry, full nelson, doggy style, pointing spider-man (meme), ice bucket challenge
+- scene = a brief description of the characters' visible arrangement and physical interaction.
+- background = brief tags naming the location and props used in the scene.
+- Include details as needed to depict this moment; these fields are not a checklist.
+- Use a known danbooru pose/action tag when it accurately fits the image.
 
 =========================================
 CHARACTER BLOCK
@@ -567,28 +567,24 @@ name:
         ALWAYS write "original character" with NO name.
         A made-up name pollutes the model with a wrong reference.
         Even the main hero, if not fan-art, is "original character".
-        Spell out hair color, eye color, and hairstyle in detail.
+        Use the character's established visual features.
   - An unnamed extra with no described looks -> original character, plus a few
         plain looks fitting their role so they don't blur with the main
         characters. If the text does describe them, follow it exactly.
 
-appearance = word tags (the details): hair color, eye color, hairstyle, each
-  clothing item, clothing state, expression, exposed body parts, wounds, torn
-  clothing. Short tags, one thing per tag — NOT sentences.
-    GOOD  green eyes, medium pink hair, red dress, torn dress, white gloves, angry
-    BAD   she has flowing pink hair and an angry look, her red dress torn open
+appearance = short tags for identifying features and the visible appearance
+  in this moment, including relevant clothing and expression.
 
-action = ONE accurate natural-language phrase at the END of the block: what this
-  character is physically doing in the last scene, more specific than the scene
-  line (e.g. "standing with hands on hips, being pointed at by the other girl").
+action = concise tags or phrases describing the visible pose, gaze, gesture,
+  and contact with another character or object at this instant.
 
 =========================================
 LANGUAGE RULES
 =========================================
 - lowercase english only.
 - separate with "," never "."
-- structure: central situation & each character's action = one accurate sentence;
-    all details (looks, clothes, props, pose/meme names) = short word tags.
+- Use short visual tags; use brief natural-language phrases where spatial
+    relationships or physical actions need clarification.
 - no metaphors, no similes, no emotional adjectives.
     BAD  her eyes were like stars
     GOOD girl with blue eyes looking at the boy
@@ -600,12 +596,12 @@ LANGUAGE RULES
 =========================================
 EXAMPLE 1 (reference only — do NOT output this)
 =========================================
-offscreen: uzumaki naruto (naruto) ; onscreen: haruno sakura (naruto), original character ; sceneInfo: 2girl, sfw, inside an abandoned factory, dim industrial lights, foggy atmosphere, two girls in a comedic fight, one pointing at the other, pointing spider-man (meme) | girl, haruno sakura (naruto), angry expression, green eyes, medium-length pink hair, red dress torn at the chest, white gloves, hands on hips, being pointed at | girl, original character, long purple hair in a side braid, green eyes, sleeveless golden turtleneck, ripped jeans, pointing aggressively at the other girl
+offscreen: uzumaki naruto (naruto) ; onscreen: haruno sakura (naruto), original character ; sceneInfo: 2girl, sfw, two girls facing each other, factory | girl, haruno sakura (naruto), angry expression, green eyes, medium-length pink hair, red dress torn at the chest, white gloves, hands on hips, looking at the other girl | girl, original character, long purple hair in a side braid, green eyes, sleeveless golden turtleneck, ripped jeans, pointing at the other girl
 
 =========================================
 EXAMPLE 2 (reference only — do NOT output this)
 =========================================
-offscreen: none ; onscreen: original character, original character ; sceneInfo: 1boy, 1girl, nsfw, uncensored, heavy rain at night, wet city street with neon reflections, a boy carrying a girl through the rain, princess carry | boy, original character, short black hair, dark brown eyes, white shirt, wet clothes, see-through shirt, black trousers, serious expression, looking down at her, carrying her with both arms | girl, original character, long silver hair, wet hair, blue eyes, torn white dress, left nipple exposed, wet skin, half-closed eyes, blush, limp in his arms
+offscreen: none ; onscreen: original character, original character ; sceneInfo: 1boy, 1girl, nsfw, uncensored, princess carry, beside a bed, bedroom | boy, original character, short black hair, dark brown eyes, white shirt, black trousers, serious expression, looking down at her, carrying her with both arms | girl, original character, long silver hair, blue eyes, torn white dress, left nipple exposed, half-closed eyes, blush, limp in his arms
 
 =========================================
 NOW DO IT
